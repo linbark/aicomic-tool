@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI漫剧创作工作台 v2.0</title>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif; }
+        ::-webkit-scrollbar { width: 5px; height: 5px; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+        .slide-fade-enter-active { transition: all 0.2s ease-out; }
+        .slide-fade-leave-active { transition: all 0.1s cubic-bezier(1, 0.5, 0.8, 1); }
+        .slide-fade-enter-from, .slide-fade-leave-to { opacity: 0; transform: translateY(-5px); }
+    </style>
+</head>
+<body class="bg-gray-100 h-screen flex text-gray-800 text-sm overflow-hidden">
+
+    <div id="app" class="flex w-full h-full">
+        
+        <div class="w-16 bg-gray-900 flex flex-col items-center py-4 space-y-4 z-20">
+            <div class="text-white font-bold text-xl mb-4">AI</div>
+            <button @click="currentView = 'script'" :class="['p-2 rounded-lg transition', currentView==='script'?'bg-blue-600 text-white':'text-gray-400 hover:text-white']" title="剧本骨架">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
+            </button>
+            <button @click="currentView = 'events'" :class="['p-2 rounded-lg transition', currentView==='events'?'bg-blue-600 text-white':'text-gray-400 hover:text-white']" title="事件总览">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.384-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" /></svg>
+            </button>
+        </div>
+
+        <div class="w-64 bg-white border-r border-gray-200 flex flex-col">
+            <div class="p-3 border-b bg-gray-50 flex flex-col gap-2">
+                <select v-model="currentProjectId" @change="loadData" class="w-full border rounded p-1 text-xs">
+                    <option v-for="p in projects" :value="p.id">{{ p.name }}</option>
+                </select>
+                <div class="text-[10px] text-gray-400 uppercase tracking-wider font-bold">SCRIPT HIERARCHY</div>
+            </div>
+
+            <div class="flex-1 overflow-y-auto p-2 space-y-4" v-if="currentView === 'script'">
+                <div v-for="ep in episodes" :key="ep.id">
+                    <div class="flex items-center text-xs font-bold text-gray-800 mb-2 px-1 cursor-pointer hover:text-blue-600">
+                        <span class="mr-1">📺</span> {{ ep.title }}
+                    </div>
+                    
+                    <div class="pl-3 border-l-2 border-gray-100 space-y-1">
+                        <div v-for="scene in ep.scenes" :key="scene.id" 
+                             @click="selectScene(scene)"
+                             :class="['cursor-pointer px-2 py-1.5 rounded text-xs truncate transition', 
+                                      currentScene && currentScene.id === scene.id ? 'bg-blue-50 text-blue-700 font-bold' : 'text-gray-600 hover:bg-gray-50']">
+                            {{ scene.sequence_number }}. {{ scene.title }}
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="flex-1 overflow-y-auto p-4" v-if="currentView === 'events'">
+                <div class="flex justify-between items-center mb-4">
+                    <h3 class="font-bold text-gray-700">所有事件</h3>
+                    <button class="text-blue-600 text-xs">+ 新增</button>
+                </div>
+                <div class="space-y-2">
+                    <div v-for="evt in events" :key="evt.id" class="p-2 rounded border bg-white shadow-sm flex items-center gap-2">
+                        <div class="w-3 h-3 rounded-full" :style="{background: evt.color}"></div>
+                        <span class="text-xs font-bold text-gray-700">{{ evt.name }}</span>
+                    </div>
+                </div>
+                <div class="mt-8 text-center text-xs text-gray-400 p-4 border-2 border-dashed rounded">
+                    Phase 3:<br>Event Matrix Visualization<br>Coming Soon
+                </div>
+            </div>
+        </div>
+
+        <div class="flex-1 flex flex-col bg-gray-50 overflow-hidden relative">
+            
+            <div v-if="currentView === 'script' && currentScene" class="flex flex-1 h-full">
+                <div class="w-80 border-r border-gray-200 bg-white flex flex-col">
+                    <div class="p-3 border-b flex justify-between items-center bg-gray-50">
+                        <span class="font-bold text-gray-600 text-xs">{{ currentScene.title }} - 镜头表</span>
+                        <button class="text-blue-600 text-xs">+ 加镜</button>
+                    </div>
+                    <div class="flex-1 overflow-y-auto p-2 space-y-2">
+                        <div v-for="shot in currentScene.shots" :key="shot.id"
+                             @click="selectShot(shot)"
+                             :class="['p-3 rounded border transition cursor-pointer relative',
+                                      currentShot && currentShot.id === shot.id ? 'border-blue-500 bg-blue-50' : 'border-gray-200 bg-white hover:border-blue-300']">
+                            <div class="flex justify-between mb-1">
+                                <span class="font-bold text-xs text-blue-700">Shot {{ shot.sequence_number }}</span>
+                                <span class="text-[10px] text-gray-400">{{ shot.status }}</span>
+                            </div>
+                            <div class="text-xs font-bold text-gray-800 mb-1" v-if="shot.title">{{ shot.title }}</div>
+                            <div class="text-[10px] text-gray-500 line-clamp-2">{{ shot.action_text || '无描述' }}</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flex-1 flex flex-col bg-gray-50 h-full" v-if="currentShot">
+                     <div class="p-4 bg-white border-b shadow-sm">
+                        <div class="flex justify-between items-center mb-4">
+                            <h2 class="text-lg font-bold">镜头编辑器 <span class="text-gray-400 text-sm">Shot {{ currentShot.sequence_number }}</span></h2>
+                            <button @click="saveShot" class="bg-blue-600 text-white px-4 py-1 rounded text-xs hover:bg-blue-700">保存</button>
+                        </div>
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <label class="text-[10px] font-bold text-gray-500 uppercase">Action</label>
+                                <textarea v-model="currentShot.action_text" class="w-full h-24 border rounded p-2 text-sm focus:border-blue-500 outline-none resize-none"></textarea>
+                            </div>
+                            <div>
+                                <label class="text-[10px] font-bold text-gray-500 uppercase">Prompt</label>
+                                <textarea v-model="currentShot.prompt" class="w-full h-24 border rounded p-2 text-xs font-mono bg-gray-50 focus:border-blue-500 outline-none resize-none"></textarea>
+                            </div>
+                        </div>
+                     </div>
+                     <div class="flex-1 p-4 overflow-y-auto">
+                        <div class="text-xs font-bold text-gray-400 mb-2 uppercase">Assets / Generations</div>
+                        <div class="grid grid-cols-3 gap-3">
+                             <div v-for="asset in currentShot.assets" :key="asset.id" class="aspect-video bg-gray-200 rounded relative group overflow-hidden">
+                                 <img v-if="asset.file_path" :src="getFileUrl(asset.file_path)" class="w-full h-full object-cover">
+                                 <div class="absolute bottom-0 inset-x-0 bg-black/60 text-white text-[10px] p-1 opacity-0 group-hover:opacity-100 transition">
+                                     Seed: {{ asset.meta_data?.seed }}
+                                 </div>
+                             </div>
+                        </div>
+                     </div>
+                </div>
+                <div v-else class="flex-1 flex items-center justify-center text-gray-400">选择一个镜头开始编辑</div>
+            </div>
+            
+            <div v-else-if="currentView === 'script'" class="flex-1 flex items-center justify-center text-gray-400">
+                请从左侧选择一场戏
+            </div>
+
+            <div v-if="currentView === 'events'" class="flex-1 flex flex-col items-center justify-center text-gray-400 space-y-4">
+                <div class="text-6xl opacity-20">📊</div>
+                <p>Event Matrix (Timeline View)</p>
+                <p class="text-xs max-w-md text-center">在此视图下，你将看到横轴为时间（集/场/镜），纵轴为事件轨道的矩阵。</p>
+            </div>
+
+        </div>
+
+    </div>
+
+    <script>
+        const { createApp } = Vue;
+        const API_BASE = 'http://localhost:8000';
+
+        createApp({
+            data() {
+                return {
+                    currentView: 'script', // 'script' or 'events'
+                    currentProjectId: null,
+                    projects: [],
+                    episodes: [], // 新增：集数据 (包含 scenes)
+                    events: [],   // 新增：事件数据
+                    
+                    currentScene: null,
+                    currentShot: null,
+                }
+            },
+            async mounted() {
+                await this.loadProjects();
+            },
+            methods: {
+                async loadProjects() {
+                    const res = await axios.get(`${API_BASE}/projects/`);
+                    this.projects = res.data;
+                    if(this.projects.length > 0) {
+                        this.currentProjectId = this.projects[0].id;
+                        this.loadData();
+                    }
+                },
+                async loadData() {
+                    if(!this.currentProjectId) return;
+                    
+                    // 1. 加载剧本骨架 (Episode -> Scene)
+                    // 注意：API 路径改了，现在用 storyboard 里的 get_full_script，或者你把 storyboard.py 改名为 script.py
+                    // 这里假设你还没改文件名，但 router prefix 改成了 /script
+                    const scriptRes = await axios.get(`${API_BASE}/script/project/${this.currentProjectId}`);
+                    this.episodes = scriptRes.data;
+
+                    // 2. 加载事件列表
+                    const eventRes = await axios.get(`${API_BASE}/events/project/${this.currentProjectId}`);
+                    this.events = eventRes.data;
+                    
+                    this.currentScene = null;
+                    this.currentShot = null;
+                },
+                selectScene(scene) {
+                    this.currentScene = scene;
+                    this.currentShot = null;
+                },
+                selectShot(shot) {
+                    this.currentShot = JSON.parse(JSON.stringify(shot)); // deep copy
+                },
+                async saveShot() {
+                    // 假设 shot update api 没变
+                    await axios.patch(`${API_BASE}/storyboard/shot/${this.currentShot.id}`, this.currentShot);
+                    // 刷新数据 (简单粗暴重载，或者只更新本地)
+                    // 为了简单，我们更新当前 scene 的 shot 列表
+                    const sceneIndex = this.episodes.find(e => e.id === this.currentScene.episode_id)
+                                          .scenes.findIndex(s => s.id === this.currentScene.id);
+                    // 实际项目中建议只重新请求 scene 数据
+                    alert("已保存");
+                },
+                getFileUrl(path) {
+                    if (path && path.includes('user_projects')) {
+                        return `${API_BASE}/files/${path.split(/[\/\\]/).pop()}`;
+                    }
+                    return path;
+                }
+            }
+        }).mount('#app');
+    </script>
+</body>
+</html>
