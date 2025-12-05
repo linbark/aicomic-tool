@@ -27,20 +27,12 @@ export default {
   // 事件
   getEvents: (projectId) => apiClient.get(`/events/project/${projectId}`),
   createEvent: (projectId, data) => apiClient.post(`/events/project/${projectId}`, data),
+  upsertEventNode: (eventId, data) => apiClient.post(`/events/nodes/${eventId}`, data),
   
   // 人设
   getCharacters: (projectId) => apiClient.get(`/projects/${projectId}/characters`),
   
   // 上传角色素材
-  uploadCharacterAsset: (charId, formData) => {
-    return apiClient.post(`/assets/character/${charId}`, formData, {
-      headers: {
-        'Content-Type': 'multipart/form-data'
-      }
-    });
-  },
-
-  // 上传角色素材 (无需更改函数名，但逻辑上现在支持更多格式了)
   uploadCharacterAsset: (charId, formData) => {
     return apiClient.post(`/assets/character/${charId}`, formData, {
       headers: { 'Content-Type': 'multipart/form-data' }
