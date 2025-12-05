@@ -96,12 +96,22 @@ class EventRead(BaseModel):
     id: int
     name: str
     color: str
+    description: Optional[str] = None
+    graph_data: Optional[dict] = None
     nodes: List[EventNodeRead] = []
     class Config: from_attributes = True
 
 class EventCreate(BaseModel):
     name: str
     color: str = "#3B82F6"
+    description: Optional[str] = None
+
+
+class EventUpdate(BaseModel):
+    name: Optional[str] = None
+    color: Optional[str] = None
+    description: Optional[str] = None
+    graph_data: Optional[dict] = None
 
 # === 项目 ===
 class ProjectBase(BaseModel):

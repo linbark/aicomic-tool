@@ -27,6 +27,7 @@ export default {
   // 事件
   getEvents: (projectId) => apiClient.get(`/events/project/${projectId}`),
   createEvent: (projectId, data) => apiClient.post(`/events/project/${projectId}`, data),
+  updateEvent: (eventId, data) => apiClient.patch(`/events/${eventId}`, data),
   upsertEventNode: (eventId, data) => apiClient.post(`/events/nodes/${eventId}`, data),
   
   // 人设

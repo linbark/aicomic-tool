@@ -59,6 +59,27 @@ def upsert_event_node(
         db.refresh(new_node)
         return new_node
 
+
+# 更新事件详情
+@router.patch("/{event_id}", response_model=schemas.EventRead)
+def update_event(event_id: int, event_update: schemas.EventUpdate, db: Session = Depends(get_db)):
+    db_event = db.query(models.Event).filter(models.Event.id == event_id).first()
+    if not db_event:
+        raise HTTPException(status_code=404, detail="Event not found")
+
+    if event_update.name is not None:
+        db_event.name = event_update.name
+    if event_update.description is not None:
+        db_event.description = event_update.description
+    if event_update.graph_data is not None:
+        db_event.graph_data = event_update.graph_data
+    if event_update.color is not None:
+        db_event.color = event_update.color
+
+    db.commit()
+    db.refresh(db_event)
+    return db_event
+
 @router.get("/matrix/{project_id}")
 def get_event_matrix(project_id: int, db: Session = Depends(get_db)):
     """
