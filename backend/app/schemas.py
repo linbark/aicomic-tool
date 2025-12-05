@@ -80,7 +80,11 @@ class EpisodeCreate(BaseModel):
     order: int = 0
 
 # === 事件系统 (Event) ===
-
+# --- Pydantic 模型 (建议加到 schemas.py) ---
+class EventNodeUpdate(BaseModel):
+    description: str
+    target_type: str # "episode", "scene", "shot"
+    target_id: int
 class EventNodeRead(BaseModel):
     id: int
     target_type: str
