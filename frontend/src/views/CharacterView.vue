@@ -49,10 +49,10 @@
                   </div>
   
                   <div class="mt-4 pt-4 border-t border-gray-200">
-                      <label class="cursor-pointer bg-white border border-dashed border-gray-300 hover:border-blue-500 hover:text-blue-600 text-gray-500 text-xs rounded py-2 w-full flex items-center justify-center gap-2 transition">
-                          <span>📤 上传三视图/视频</span>
-                          <input type="file" class="hidden" multiple accept="image/*,video/*" @change="(e) => handleUpload(char.id, e)">
-                      </label>
+                    <label class="cursor-pointer bg-white border border-dashed border-gray-300 hover:border-blue-500 hover:text-blue-600 text-gray-500 text-xs rounded py-2 w-full flex items-center justify-center gap-2 transition">
+                        <span>📤 上传素材 (图/视/文)</span>
+                        <input type="file" class="hidden" multiple accept="image/*,video/*,.txt,.md,.pdf,.doc,.docx" @change="(e) => handleUpload(char.id, e)">
+                    </label>
                   </div>
               </div>
   
@@ -65,26 +65,24 @@
                 <div v-else class="w-full overflow-x-auto p-4 flex gap-3 items-center">
                     
                     <div v-for="asset in (char.assets || [])" :key="asset.id" 
-                        class="h-48 aspect-[3/4] flex-shrink-0 rounded-lg overflow-hidden border border-gray-200 relative group cursor-zoom-in bg-gray-100 shadow-sm"
+                        class="h-48 aspect-[3/4] flex-shrink-0 rounded-lg overflow-hidden border border-gray-200HV relative group cursor-pointer bg-gray-100 shadow-sm"
                         @click="openLightbox(asset)">
                         
                         <img v-if="asset.file_type === 'image'" :src="getFileUrl(asset.file_path)" class="w-full h-full object-cover transition duration-300 group-hover:scale-105">
-                        <video v-else :src="getFileUrl(asset.file_path)" class="w-full h-full object-cover" preload="metadata" muted></video>
                         
+                        <video v-else-if="asset.file_type === 'video'" :src="getFileUrl(asset.file_path)" class="w-full h-full object-cover" preload="metadata" muted></video>
+                        
+                        <div v-else class="w-full h-full flex flex-col items-center justify-center bg-gray-50 text-gray-500 p-4">
+                            <span class="text-4xl mb-2">📄</span>
+                            <span class="text-[10px] break-all text-center line-clamp-3">{{ asset.file_path.split('/').pop() }}</span>
+                        </div>
+
                         <div v-if="asset.file_type === 'video'" class="absolute inset-0 flex items-center justify-center pointer-events-none">
                             <div class="bg-black/50 rounded-full p-2 backdrop-blur-sm">
                                 <span class="text-white text-xs">▶</span>
                             </div>
                         </div>
 
-                        <div class="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition"></div>
-
-                        <button 
-                            @click.stop="deleteAsset(asset)" 
-                            class="absolute top-1 right-1 bg-red-500 hover:bg-red-600 text-white p-1 rounded-full opacity-0 group-hover:opacity-100 transition duration-200 z-20 shadow-sm"
-                            title="删除此图片">
-                            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-                        </button>
                     </div>
 
                 </div>
@@ -117,14 +115,22 @@
       </div>
   
       <div v-if="lightboxAsset" class="fixed inset-0 bg-black/90 z-[60] flex items-center justify-center" @click="lightboxAsset = null">
-          <div class="relative max-w-5xl max-h-screen p-4" @click.stop>
-              <button @click="lightboxAsset = null" class="absolute -top-10 right-0 text-white hover:text-gray-300 text-2xl">✕</button>
-              <img v-if="lightboxAsset.file_type === 'image'" :src="getFileUrl(lightboxAsset.file_path)" class="max-w-full max-h-[90vh] rounded shadow-2xl">
-              <video v-else :src="getFileUrl(lightboxAsset.file_path)" controls autoplay class="max-w-full max-h-[90vh] rounded shadow-2xl"></video>
-              <div class="mt-2 text-center text-gray-400 text-xs font-mono">
-                  {{ lightboxAsset.file_path }}
-              </div>
-          </div>
+        <div class="relative max-w-5xl max-h-screen p-4" @click.stop>
+            <button @click="lightboxAsset = null" class="absolute -top-10 right-0 text-white hover:text-gray-300 text-2xl">✕</button>
+            
+            <img v-if="lightboxAsset.file_type === 'image'" :src="getFileUrl(lightboxAsset.file_path)" class="max-w-full max-h-[90vh] rounded shadow-2xl">
+            <video v-else-if="lightboxAsset.file_type === 'video'" :src="getFileUrl(lightboxAsset.file_path)" controls autoplay class="max-w-full max-h-[90vh] rounded shadow-2xl"></video>
+            
+            <div v-else class="bg-white p-10 rounded text-center">
+                <div class="text-6xl mb-4">📄</div>
+                <p class="mb-4">文档文件无法直接预览</p>
+                <a :href="getFileUrl(lightboxAsset.file_path)" target="_blank" class="bg-blue-600 text-white px-4 py-2 rounded text-sm hover:bg-blue-700">下载/在新标签页打开</a>
+            </div>
+
+            <div class="mt-2 text-center text-gray-400 text-xs font-mono">
+                {{ lightboxAsset.file_path }}
+            </div>
+        </div>
       </div>
   
     </div>
