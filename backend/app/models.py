@@ -99,6 +99,8 @@ class Event(Base):
     name = Column(String, index=True)   # 事件名，如 "张小凡黑化"
     color = Column(String, default="#3B82F6") # 显示颜色，默认蓝色
     start_time_sort_key = Column(Integer, default=0) # 用于 Y 轴排序
+    description = Column(Text, nullable=True)  # 事件详细描述
+    graph_data = Column(JSON, nullable=True)   # Vue Flow 节点/连线数据
     
     project = relationship("Project", back_populates="events")
     nodes = relationship("EventNode", back_populates="event", cascade="all, delete-orphan")
