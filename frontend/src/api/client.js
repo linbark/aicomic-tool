@@ -40,6 +40,20 @@ export default {
     });
   },
 
+  // 上传角色素材 (无需更改函数名，但逻辑上现在支持更多格式了)
+  uploadCharacterAsset: (charId, formData) => {
+    return apiClient.post(`/assets/character/${charId}`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    });
+  },
+
+  // 镜头素材上传
+  uploadShotAsset: (shotId, formData) => {
+    return apiClient.post(`/assets/shot/${shotId}/upload`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    });
+  },
+  
   uploadShotVideo(shotId, formData) {
     return apiClient.post(`/assets/shot/${shotId}/video`, formData, {
       headers: {

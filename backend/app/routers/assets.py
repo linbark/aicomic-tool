@@ -21,44 +21,53 @@ def get_project_name(db: Session, project_id: int):
         raise HTTPException(status_code=404, detail="Project not found")
     return project.name
 
-# 1. 为角色上传图片/视频 (三视图等)
+def determine_file_type(content_type: str, filename: str) -> str:
+    """辅助函数：根据 MIME 或 后缀判断文件类型"""
+    if content_type:
+        if content_type.startswith("image"): return "image"
+        if content_type.startswith("video"): return "video"
+        if content_type.startswith("text"): return "text"
+    
+    # 后缀回退判断
+    ext = os.path.splitext(filename)[1].lower()
+    if ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif']: return "image"
+    if ext in ['.mp4', '.mov', '.avi', '.webm']: return "video"
+    if ext in ['.txt', '.md', '.json', '.pdf', '.doc', '.docx']: return "text"
+    
+    return "other"
+
+# ==========================================
+# 1. 角色资源上传 (支持文档)
+# ==========================================
+@router.post("/character/{char_id}", response_model=schemas.AssetRead)
 @router.post("/character/{char_id}", response_model=schemas.AssetRead)
 async def upload_character_asset(
     char_id: int, 
     file: UploadFile = File(...), 
     db: Session = Depends(get_db)
 ):
-    # 1. 获取角色和项目信息
     char = db.query(models.Character).filter(models.Character.id == char_id).first()
     if not char:
         raise HTTPException(status_code=404, detail="Character not found")
     
     project_name = get_project_name(db, char.project_id)
     
-    # 2. 构建目标路径: data/{project_name}/characters/
-    # 注意：为了兼容操作系统路径，使用 os.path.join
+    # 路径：data/{ProjectName}/characters/
     save_dir = os.path.join(DATA_ROOT, project_name, "characters")
     os.makedirs(save_dir, exist_ok=True)
     
-    # 3. 保存文件
     file_path = os.path.join(save_dir, file.filename)
     
-    # 写入文件
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
         
-    # 4. 判断类型
-    file_type = "image"
-    if file.content_type and file.content_type.startswith("video"):
-        file_type = "video"
+    # --- 修改点：使用通用类型判断 ---
+    file_type = determine_file_type(file.content_type, file.filename)
         
-    # 5. 提取元数据 (如果是图片)
     meta = {}
     if file_type == "image":
         meta = extract_metadata(file_path)
 
-    # 6. 存入数据库
-    # 存储相对路径： "项目名/characters/文件名" 方便前端拼接 /files/
     relative_path = f"{project_name}/characters/{file.filename}"
     
     db_asset = models.Asset(
@@ -66,7 +75,76 @@ async def upload_character_asset(
         file_path=relative_path,
         file_type=file_type,
         meta_data=meta,
-        is_favorite=True # 默认上传的都算精选
+        is_favorite=True 
+    )
+    
+    db.add(db_asset)
+    db.commit()
+    db.refresh(db_asset)
+    return db_asset
+
+# ==========================================
+# 2. 镜头资源上传
+# ==========================================
+@router.post("/shot/{shot_id}/upload", response_model=schemas.AssetRead)
+async def upload_shot_asset(
+    shot_id: int, 
+    file: UploadFile = File(...), 
+    db: Session = Depends(get_db)
+):
+    # 1. 获取镜头及完整的层级关系
+    shot = db.query(models.Shot).filter(models.Shot.id == shot_id).first()
+    if not shot:
+        raise HTTPException(status_code=404, detail="Shot not found")
+    
+    # 关联查询: Shot -> Scene -> Episode -> Project
+    # 也可以使用 db.query(models.Project).join(...).filter(...) 的方式
+    # 这里为了简单直接查对象
+    scene = db.query(models.Scene).filter(models.Scene.id == shot.scene_id).first()
+    episode = db.query(models.Episode).filter(models.Episode.id == scene.episode_id).first()
+    project = db.query(models.Project).filter(models.Project.id == episode.project_id).first()
+    
+    project_name = project.name
+
+    # 2. 构建层级路径: data/{Project}/storyboard/episode_{id}/scene_{id}/shot_{id}/assets/
+    # 使用 ID 命名文件夹比使用 Title 更安全，因为 Title 会变，ID 不会
+    hierarchy_path = os.path.join(
+        "storyboard",
+        f"episode_{episode.id}",
+        f"scene_{scene.id}",
+        f"shot_{shot.id}",
+        "assets"
+    )
+    
+    save_dir = os.path.join(DATA_ROOT, project_name, hierarchy_path)
+    os.makedirs(save_dir, exist_ok=True)
+
+    # 3. 保存文件
+    # 既然已经分了 shot_{id} 文件夹，文件名冲突概率大大降低，直接用原名即可
+    file_path = os.path.join(save_dir, file.filename)
+    
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    # 4. 判断类型
+    file_type = determine_file_type(file.content_type, file.filename)
+    
+    # 5. 提取 Metadata
+    meta = {}
+    if file_type == "image":
+        meta = extract_metadata(file_path)
+
+    # 6. 入库 (存储相对路径)
+    # Windows下 path separator 是 \, 需要转成 / 供前端 URL 使用
+    relative_path_part = os.path.join(project_name, hierarchy_path, file.filename)
+    relative_path = relative_path_part.replace("\\", "/")
+    
+    db_asset = models.Asset(
+        shot_id=shot.id,
+        file_path=relative_path,
+        file_type=file_type,
+        meta_data=meta,
+        is_favorite=False
     )
     
     db.add(db_asset)
@@ -75,8 +153,6 @@ async def upload_character_asset(
     return db_asset
 
 # 2. 为镜头关联资产 (保持原有逻辑，但适配新路径)
-# 注意：这里我们保留原来的 POST 接口，但建议前端改成上传模式，或者你继续用本地路径粘贴模式
-# 为了演示，这里假设你还是用"粘贴路径"的方式，或者你可以参考上面的 upload 写一个 create_shot_asset
 @router.post("/shot/{shot_id}", response_model=schemas.AssetRead)
 def register_asset_for_shot(
     shot_id: int, 
