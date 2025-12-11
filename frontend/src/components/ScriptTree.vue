@@ -32,10 +32,14 @@ import api from '../api/client';
 const store = useProjectStore();
 
 const addEpisode = async () => {
+   if (!store.currentProjectId) {
+     alert("请先选择一个项目");
+     return;
+   }
    const title = prompt("请输入集标题:");
    if(title) {
      await api.createEpisode(store.currentProjectId, { title, order: store.episodes.length + 1 });
-     store.fetchScript();
+     await store.fetchScript();
    }
 };
 
