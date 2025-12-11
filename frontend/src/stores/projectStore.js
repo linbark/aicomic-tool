@@ -10,7 +10,6 @@ export const useProjectStore = defineStore('project', {
     episodes: [], // 剧本树
     events: [],   // 事件列表
     characters: [], // 人设列表
-    currentProjectId: null,
         
     // UI 状态
     currentScene: null,
