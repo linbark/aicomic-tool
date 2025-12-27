@@ -12,8 +12,8 @@
         <span class="text-xs font-bold">事件</span>
       </router-link>
       
-      <router-link to="/characters" active-class="bg-blue-600 text-white" class="p-3 rounded-xl text-gray-400 hover:text-white transition">
-        <span class="text-xs font-bold">人设</span>
+      <router-link to="/assets" active-class="bg-blue-600 text-white" class="p-3 rounded-xl text-gray-400 hover:text-white transition">
+        <span class="text-xs font-bold">资产</span>
       </router-link>
     </aside>
 

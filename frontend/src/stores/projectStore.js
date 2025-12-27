@@ -9,7 +9,7 @@ export const useProjectStore = defineStore('project', {
     // 数据缓存
     episodes: [], // 剧本树
     events: [],   // 事件列表
-    characters: [], // 人设列表
+    assetItems: [], // 资产条目列表（项目级，按分类查询）
         
     // UI 状态
     currentScene: null,
@@ -37,7 +37,7 @@ export const useProjectStore = defineStore('project', {
       await Promise.all([
         this.fetchScript(),
         this.fetchEvents(),
-        this.fetchCharacters()
+        this.fetchAssetItems('persona')
       ]);
     },
     
@@ -53,10 +53,10 @@ export const useProjectStore = defineStore('project', {
       this.events = data;
     },
 
-    async fetchCharacters() {
+    async fetchAssetItems(category) {
       if (!this.currentProjectId) return;
-      const { data } = await api.getCharacters(this.currentProjectId);
-      this.characters = data;
+      const { data } = await api.getAssetItems(this.currentProjectId, category);
+      this.assetItems = data;
     },
     
     // --- 操作 ---

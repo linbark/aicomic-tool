@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, joinedload
 from typing import List, Optional
 from pydantic import BaseModel
@@ -27,12 +27,14 @@ class CharacterCreate(BaseModel):
     name: str
     description: Optional[str] = None
     base_prompt: Optional[str] = None
+    category: Optional[str] = "persona"
 
 class CharacterUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     base_prompt: Optional[str] = None
     avatar_path: Optional[str] = None 
+    category: Optional[str] = None
 
 # =======================
 # 1. 项目管理接口
@@ -67,21 +69,27 @@ def update_project(project_id: int, project_update: ProjectUpdate, db: Session =
     return db_project
 
 # =======================
-# 2. 人设管理接口
+# 2. 资产条目管理接口（对外不再暴露“人设/角色”概念）
 # =======================
 
-@router.get("/{project_id}/characters", response_model=List[schemas.CharacterRead])
-def get_project_characters(project_id: int, db: Session = Depends(get_db)):
-    chars = db.query(models.Character).options(
-        joinedload(models.Character.assets)
-    ).filter(models.Character.project_id == project_id).all()
-    return chars
+@router.get("/{project_id}/asset-items", response_model=List[schemas.AssetItemRead])
+def get_project_asset_items(
+    project_id: int,
+    category: Optional[str] = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    q = db.query(models.Character).options(joinedload(models.Character.assets)).filter(
+        models.Character.project_id == project_id
+    )
+    if category:
+        q = q.filter(models.Character.category == category)
+    return q.all()
 
-@router.post("/{project_id}/characters", response_model=schemas.CharacterRead)
-def create_character(project_id: int, char: CharacterCreate, db: Session = Depends(get_db)):
+@router.post("/{project_id}/asset-items", response_model=schemas.AssetItemRead)
+def create_asset_item(project_id: int, item: CharacterCreate, db: Session = Depends(get_db)):
     exists = db.query(models.Character).filter(
         models.Character.project_id == project_id,
-        models.Character.name == char.name
+        models.Character.name == item.name
     ).first()
     
     if exists:
@@ -89,9 +97,10 @@ def create_character(project_id: int, char: CharacterCreate, db: Session = Depen
 
     new_char = models.Character(
         project_id=project_id,
-        name=char.name,
-        description=char.description,
-        base_prompt=char.base_prompt
+        name=item.name,
+        description=item.description,
+        base_prompt=item.base_prompt,
+        category=item.category or "persona",
     )
     db.add(new_char)
     db.commit()
@@ -102,31 +111,33 @@ def create_character(project_id: int, char: CharacterCreate, db: Session = Depen
     ).filter(models.Character.id == new_char.id).first()
     return db_char
 
-@router.patch("/characters/{char_id}", response_model=schemas.CharacterRead)
-def update_character(char_id: int, char_update: CharacterUpdate, db: Session = Depends(get_db)):
-    db_char = db.query(models.Character).filter(models.Character.id == char_id).first()
+@router.patch("/asset-items/{item_id}", response_model=schemas.AssetItemRead)
+def update_asset_item(item_id: int, item_update: CharacterUpdate, db: Session = Depends(get_db)):
+    db_char = db.query(models.Character).filter(models.Character.id == item_id).first()
     if not db_char:
-        raise HTTPException(status_code=404, detail="角色不存在")
+        raise HTTPException(status_code=404, detail="Asset item not found")
     
 
-    if char_update.name and char_update.name != db_char.name:
+    if item_update.name and item_update.name != db_char.name:
         exists = db.query(models.Character).filter(
             models.Character.project_id == db_char.project_id,
-            models.Character.name == char_update.name
+            models.Character.name == item_update.name
         ).first()
         if exists:
             raise HTTPException(status_code=400, detail="该项目下已存在同名角色")
 
-    if char_update.name is not None:
-        db_char.name = char_update.name
-    if char_update.description is not None:
-        db_char.description = char_update.description
-    if char_update.base_prompt is not None:
-        db_char.base_prompt = char_update.base_prompt
+    if item_update.name is not None:
+        db_char.name = item_update.name
+    if item_update.description is not None:
+        db_char.description = item_update.description
+    if item_update.base_prompt is not None:
+        db_char.base_prompt = item_update.base_prompt
+    if item_update.category is not None:
+        db_char.category = item_update.category
         
-    if char_update.avatar_path:
+    if item_update.avatar_path:
         new_asset = models.Asset(
-            file_path=char_update.avatar_path,
+            file_path=item_update.avatar_path,
             file_type="image",
             is_favorite=True 
         )
@@ -138,15 +149,15 @@ def update_character(char_id: int, char_update: CharacterUpdate, db: Session = D
     # 重新加载以包含 assets 关系
     db_char = db.query(models.Character).options(
         joinedload(models.Character.assets)
-    ).filter(models.Character.id == char_id).first()
+    ).filter(models.Character.id == item_id).first()
     return db_char
     
-@router.delete("/characters/{character_id}")
-def delete_character(character_id: int, db: Session = Depends(get_db)):
-    # 查询角色
-    character = db.query(models.Character).filter(models.Character.id == character_id).first()
+@router.delete("/asset-items/{item_id}")
+def delete_asset_item(item_id: int, db: Session = Depends(get_db)):
+    # 查询资产条目
+    character = db.query(models.Character).options(joinedload(models.Character.assets)).filter(models.Character.id == item_id).first()
     if not character:
-        raise HTTPException(status_code=404, detail="Character not found")
+        raise HTTPException(status_code=404, detail="Asset item not found")
     
     # --- 新增逻辑：物理删除关联的文件 ---
     # 假设你的 DATA_DIR 是项目根目录下的 data 文件夹
@@ -169,7 +180,26 @@ def delete_character(character_id: int, db: Session = Depends(get_db)):
     # 删除数据库记录
     db.delete(character)
     db.commit()
-    return {"message": "Character and associated files deleted"}
+    return {"message": "Asset item and associated files deleted"}
+
+# -----------------------
+# 兼容旧接口（前端已切到 /asset-items；此处仅避免旧客户端断掉）
+# -----------------------
+@router.get("/{project_id}/characters", response_model=List[schemas.AssetItemRead])
+def get_project_characters(project_id: int, db: Session = Depends(get_db)):
+    return get_project_asset_items(project_id=project_id, category=None, db=db)
+
+@router.post("/{project_id}/characters", response_model=schemas.AssetItemRead)
+def create_character(project_id: int, char: CharacterCreate, db: Session = Depends(get_db)):
+    return create_asset_item(project_id=project_id, item=char, db=db)
+
+@router.patch("/characters/{char_id}", response_model=schemas.AssetItemRead)
+def update_character(char_id: int, char_update: CharacterUpdate, db: Session = Depends(get_db)):
+    return update_asset_item(item_id=char_id, item_update=char_update, db=db)
+
+@router.delete("/characters/{character_id}")
+def delete_character(character_id: int, db: Session = Depends(get_db)):
+    return delete_asset_item(item_id=character_id, db=db)
 
 @router.delete("/assets/{asset_id}")
 def delete_asset(asset_id: int, db: Session = Depends(get_db)):

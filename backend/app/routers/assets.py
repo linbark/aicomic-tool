@@ -37,23 +37,24 @@ def determine_file_type(content_type: str, filename: str) -> str:
     return "other"
 
 # ==========================================
-# 1. 角色资源上传 (支持文档)
+# 1. 资产条目资源上传 (支持文档)
 # ==========================================
-@router.post("/character/{char_id}", response_model=schemas.AssetRead)
-@router.post("/character/{char_id}", response_model=schemas.AssetRead)
-async def upload_character_asset(
-    char_id: int, 
+@router.post("/asset-item/{item_id}", response_model=schemas.AssetRead)
+async def upload_asset_item_asset(
+    item_id: int,
     file: UploadFile = File(...), 
     db: Session = Depends(get_db)
 ):
-    char = db.query(models.Character).filter(models.Character.id == char_id).first()
-    if not char:
-        raise HTTPException(status_code=404, detail="Character not found")
+    item = db.query(models.Character).filter(models.Character.id == item_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Asset item not found")
     
-    project_name = get_project_name(db, char.project_id)
+    project_name = get_project_name(db, item.project_id)
     
-    # 路径：data/{ProjectName}/characters/
-    save_dir = os.path.join(DATA_ROOT, project_name, "characters")
+    # 按分类决定落盘目录（persona 兼容旧 characters 目录）
+    category = (item.category or "persona").lower()
+    folder = "characters" if category == "persona" else "backgrounds" if category == "background" else category
+    save_dir = os.path.join(DATA_ROOT, project_name, folder)
     os.makedirs(save_dir, exist_ok=True)
     
     file_path = os.path.join(save_dir, file.filename)
@@ -68,10 +69,10 @@ async def upload_character_asset(
     if file_type == "image":
         meta = extract_metadata(file_path)
 
-    relative_path = f"{project_name}/characters/{file.filename}"
+    relative_path = f"{project_name}/{folder}/{file.filename}"
     
     db_asset = models.Asset(
-        character_id=char.id,
+        character_id=item.id,
         file_path=relative_path,
         file_type=file_type,
         meta_data=meta,
@@ -82,6 +83,17 @@ async def upload_character_asset(
     db.commit()
     db.refresh(db_asset)
     return db_asset
+
+# -----------------------
+# 兼容旧接口（前端已切到 /asset-item/{id}；此处仅避免旧客户端断掉）
+# -----------------------
+@router.post("/character/{char_id}", response_model=schemas.AssetRead)
+async def upload_character_asset(
+    char_id: int,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    return await upload_asset_item_asset(item_id=char_id, file=file, db=db)
 
 # ==========================================
 # 2. 镜头资源上传
