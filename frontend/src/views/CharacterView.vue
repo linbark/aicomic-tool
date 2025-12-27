@@ -83,6 +83,13 @@
                             </div>
                         </div>
 
+                        <!-- 删除按钮 (Hover显示) -->
+                        <div class="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition z-10">
+                            <button @click.stop="deleteAsset(asset)" class="bg-white/90 hover:bg-red-500 hover:text-white text-gray-500 rounded-full p-1.5 shadow-sm backdrop-blur-sm transition-colors" title="删除文件">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+                            </button>
+                        </div>
+
                     </div>
 
                 </div>
@@ -116,7 +123,13 @@
   
       <div v-if="lightboxAsset" class="fixed inset-0 bg-black/90 z-[60] flex items-center justify-center" @click="lightboxAsset = null">
         <div class="relative max-w-5xl max-h-screen p-4" @click.stop>
-            <button @click="lightboxAsset = null" class="absolute -top-10 right-0 text-white hover:text-gray-300 text-2xl">✕</button>
+            <div class="absolute -top-10 right-0 flex gap-4">
+                <button @click="deleteAssetFromLightbox(lightboxAsset)" class="text-white hover:text-red-400 text-sm flex items-center gap-1 bg-black/50 px-3 py-1 rounded backdrop-blur-sm">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+                    删除
+                </button>
+                <button @click="lightboxAsset = null" class="text-white hover:text-gray-300 text-2xl leading-none">✕</button>
+            </div>
             
             <img v-if="lightboxAsset.file_type === 'image'" :src="getFileUrl(lightboxAsset.file_path)" class="max-w-full max-h-[90vh] rounded shadow-2xl">
             <video v-else-if="lightboxAsset.file_type === 'video'" :src="getFileUrl(lightboxAsset.file_path)" controls autoplay class="max-w-full max-h-[90vh] rounded shadow-2xl"></video>
@@ -230,6 +243,18 @@
         console.error(e);
         alert("删除失败，请检查控制台");
     }
+  };
+
+  const deleteAssetFromLightbox = async (asset) => {
+      if(!confirm("确定要删除这张图片/视频吗？此操作无法撤销。")) return;
+      try {
+          await axios.delete(`http://localhost:8000/projects/assets/${asset.id}`);
+          await store.fetchCharacters();
+          lightboxAsset.value = null;
+      } catch (e) {
+          console.error(e);
+          alert("删除失败，请检查控制台");
+      }
   };
 
   
