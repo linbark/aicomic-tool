@@ -26,12 +26,14 @@ def determine_file_type(content_type: str, filename: str) -> str:
     if content_type:
         if content_type.startswith("image"): return "image"
         if content_type.startswith("video"): return "video"
+        if content_type.startswith("audio"): return "audio"
         if content_type.startswith("text"): return "text"
     
     # 后缀回退判断
     ext = os.path.splitext(filename)[1].lower()
     if ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif']: return "image"
     if ext in ['.mp4', '.mov', '.avi', '.webm']: return "video"
+    if ext in ['.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg']: return "audio"
     if ext in ['.txt', '.md', '.json', '.pdf', '.doc', '.docx']: return "text"
     
     return "other"
@@ -51,9 +53,26 @@ async def upload_asset_item_asset(
     
     project_name = get_project_name(db, item.project_id)
     
-    # 按分类决定落盘目录（persona 兼容旧 characters 目录）
-    category = (item.category or "persona").lower()
-    folder = "characters" if category == "persona" else "backgrounds" if category == "background" else category
+    # 按分类决定落盘目录（固定枚举；兼容历史 persona -> persona_visual）
+    category = (item.category or "persona_visual").lower()
+    if category == "persona":
+        category = "persona_visual"
+
+    category_folder_map = {
+        "persona_visual": "characters",
+        "persona_voice": "voices",
+        "background": "backgrounds",
+        "element": "elements",
+        "prop": "props",
+        "pose": "poses",
+        "vfx": "vfx",
+        "layout": "layout",
+        "audio_music": "audio_music",
+        "audio_sfx": "audio_sfx",
+        "branding": "branding",
+        "ai_preset": "ai_preset",
+    }
+    folder = category_folder_map.get(category, category)
     save_dir = os.path.join(DATA_ROOT, project_name, folder)
     os.makedirs(save_dir, exist_ok=True)
     

@@ -14,21 +14,16 @@
     </div>
 
     <div class="px-6 pt-4">
-      <div class="inline-flex bg-white border rounded-lg overflow-hidden shadow-sm">
-        <button
-          class="px-3 py-2 text-xs"
-          :class="selectedCategory === 'persona' ? 'bg-blue-600 text-white' : 'text-gray-600 hover:bg-gray-50'"
-          @click="setCategory('persona')"
+      <div class="flex items-center gap-2">
+        <label class="text-[10px] font-bold text-gray-400 uppercase">Category</label>
+        <select
+          v-model="selectedCategory"
+          class="bg-white border rounded-lg px-3 py-2 text-xs shadow-sm focus:ring-2 ring-blue-500 outline-none"
         >
-          人设资产
-        </button>
-        <button
-          class="px-3 py-2 text-xs border-l"
-          :class="selectedCategory === 'background' ? 'bg-blue-600 text-white' : 'text-gray-600 hover:bg-gray-50'"
-          @click="setCategory('background')"
-        >
-          背景
-        </button>
+          <option v-for="opt in categoryOptions" :key="opt.value" :value="opt.value">
+            {{ opt.label }}
+          </option>
+        </select>
       </div>
     </div>
 
@@ -64,7 +59,8 @@
                 {{ item.description || '暂无描述...' }}
               </p>
             </div>
-            <div v-if="selectedCategory === 'persona'">
+
+            <div v-if="selectedCategory === 'persona_visual'">
               <label class="text-[10px] font-bold text-gray-400 uppercase">Base Prompt</label>
               <p class="text-[10px] text-blue-600 font-mono bg-blue-50 p-2 rounded border border-blue-100 mt-1 break-all line-clamp-2">
                 {{ item.base_prompt || 'N/A' }}
@@ -74,12 +70,12 @@
 
           <div class="mt-4 pt-4 border-t border-gray-200">
             <label class="cursor-pointer bg-white border border-dashed border-gray-300 hover:border-blue-500 hover:text-blue-600 text-gray-500 text-xs rounded py-2 w-full flex items-center justify-center gap-2 transition">
-              <span>📤 上传素材 (图/视/文)</span>
+              <span>📤 上传素材 (图/视/音/文)</span>
               <input
                 type="file"
                 class="hidden"
                 multiple
-                accept="image/*,video/*,.txt,.md,.pdf,.doc,.docx"
+                accept="image/*,video/*,audio/*,.txt,.md,.pdf,.doc,.docx"
                 @change="(e) => handleUpload(item.id, e)"
               >
             </label>
@@ -99,16 +95,27 @@
               @click="openLightbox(asset)"
             >
               <img v-if="asset.file_type === 'image'" :src="getFileUrl(asset.file_path)" class="w-full h-full object-cover transition duration-300 group-hover:scale-105">
-              <video v-else-if="asset.file_type === 'video'" :src="getFileUrl(asset.file_path)" class="w-full h-full object-cover" preload="metadata" muted></video>
+
+              <div v-else-if="asset.file_type === 'video'" class="w-full h-full relative">
+                <video :src="getFileUrl(asset.file_path)" class="w-full h-full object-cover" preload="metadata" muted></video>
+                <div class="absolute inset-0 flex items-center justify-center pointer-events-none">
+                  <div class="bg-black/50 rounded-full p-2 backdrop-blur-sm">
+                    <span class="text-white text-xs">▶</span>
+                  </div>
+                </div>
+              </div>
+
+              <div v-else-if="asset.file_type === 'audio'" class="w-full h-full flex flex-col items-center justify-center bg-gray-50 text-gray-600 p-3 gap-2">
+                <div class="text-4xl">🔊</div>
+                <div class="text-[10px] text-center break-all line-clamp-2">
+                  {{ asset.file_path.split('/').pop() }}
+                </div>
+                <audio :src="getFileUrl(asset.file_path)" controls class="w-full"></audio>
+              </div>
+
               <div v-else class="w-full h-full flex flex-col items-center justify-center bg-gray-50 text-gray-500 p-4">
                 <span class="text-4xl mb-2">📄</span>
                 <span class="text-[10px] break-all text-center line-clamp-3">{{ asset.file_path.split('/').pop() }}</span>
-              </div>
-
-              <div v-if="asset.file_type === 'video'" class="absolute inset-0 flex items-center justify-center pointer-events-none">
-                <div class="bg-black/50 rounded-full p-2 backdrop-blur-sm">
-                  <span class="text-white text-xs">▶</span>
-                </div>
               </div>
 
               <div class="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition z-10">
@@ -134,15 +141,16 @@
             <label class="text-xs font-bold text-gray-500">描述</label>
             <textarea v-model="form.description" class="w-full border p-2 rounded text-sm h-24 focus:ring-2 ring-blue-500 outline-none resize-none"></textarea>
           </div>
-          <div v-if="form.category === 'persona'">
+          <div v-if="form.category === 'persona_visual'">
             <label class="text-xs font-bold text-gray-500">Base Prompt</label>
             <textarea v-model="form.base_prompt" class="w-full border p-2 rounded text-xs font-mono h-24 bg-gray-50 focus:ring-2 ring-blue-500 outline-none resize-none"></textarea>
           </div>
           <div>
             <label class="text-xs font-bold text-gray-500">分类</label>
             <select v-model="form.category" class="w-full border p-2 rounded text-sm bg-white focus:ring-2 ring-blue-500 outline-none">
-              <option value="persona">人设资产</option>
-              <option value="background">背景</option>
+              <option v-for="opt in categoryOptions" :key="opt.value" :value="opt.value">
+                {{ opt.label }}
+              </option>
             </select>
           </div>
         </div>
@@ -165,6 +173,7 @@
 
         <img v-if="lightboxAsset.file_type === 'image'" :src="getFileUrl(lightboxAsset.file_path)" class="max-w-full max-h-[90vh] rounded shadow-2xl">
         <video v-else-if="lightboxAsset.file_type === 'video'" :src="getFileUrl(lightboxAsset.file_path)" controls autoplay class="max-w-full max-h-[90vh] rounded shadow-2xl"></video>
+        <audio v-else-if="lightboxAsset.file_type === 'audio'" :src="getFileUrl(lightboxAsset.file_path)" controls class="w-full max-w-3xl bg-white/5 rounded p-3"></audio>
 
         <div v-else class="bg-white p-10 rounded text-center">
           <div class="text-6xl mb-4">📄</div>
@@ -188,17 +197,27 @@ import axios from 'axios';
 
 const store = useProjectStore();
 
-const selectedCategory = ref('persona');
+const categoryOptions = [
+  { value: 'persona_visual', label: '角色（视觉）' },
+  { value: 'persona_voice', label: '角色（声音）' },
+  { value: 'background', label: '背景/场景' },
+  { value: 'element', label: '场景元素/贴片' },
+  { value: 'prop', label: '道具/物件' },
+  { value: 'pose', label: '动作/镜头/分镜模板' },
+  { value: 'vfx', label: '特效/转场' },
+  { value: 'layout', label: '字幕/版式/字体' },
+  { value: 'audio_music', label: '音频-音乐' },
+  { value: 'audio_sfx', label: '音频-音效/环境' },
+  { value: 'branding', label: '成片物料' },
+  { value: 'ai_preset', label: 'AI 预设与工程模板' },
+];
+
+const selectedCategory = ref('persona_visual');
 
 const showModal = ref(false);
 const isEditing = ref(false);
 const form = ref({});
 const lightboxAsset = ref(null);
-
-const setCategory = async (cat) => {
-  selectedCategory.value = cat;
-  if (store.currentProjectId) await store.fetchAssetItems(cat);
-};
 
 onMounted(async () => {
   if (store.currentProjectId) await store.fetchAssetItems(selectedCategory.value);
@@ -207,6 +226,10 @@ onMounted(async () => {
 watch(() => store.currentProjectId, async (newId) => {
   if (newId) await store.fetchAssetItems(selectedCategory.value);
   else store.assetItems = [];
+});
+
+watch(selectedCategory, async (cat) => {
+  if (store.currentProjectId) await store.fetchAssetItems(cat);
 });
 
 const openEditModal = (item) => {
