@@ -19,9 +19,11 @@ def ensure_characters_category_column():
             cols = conn.execute(text("PRAGMA table_info(characters)")).fetchall()
             col_names = {row[1] for row in cols}  # (cid, name, type, notnull, dflt_value, pk)
             if "category" not in col_names:
-                conn.execute(text("ALTER TABLE characters ADD COLUMN category TEXT NOT NULL DEFAULT 'persona'"))
+                conn.execute(text("ALTER TABLE characters ADD COLUMN category TEXT NOT NULL DEFAULT 'persona_visual'"))
                 # 保险起见：把历史 NULL 补齐（正常情况下 NOT NULL + DEFAULT 已覆盖）
-                conn.execute(text("UPDATE characters SET category='persona' WHERE category IS NULL"))
+                conn.execute(text("UPDATE characters SET category='persona_visual' WHERE category IS NULL"))
+            # 历史兼容：将旧值 persona 归一化为 persona_visual
+            conn.execute(text("UPDATE characters SET category='persona_visual' WHERE category='persona'"))
     except Exception as e:
         # 不阻断服务启动，但打印错误便于排查
         print(f"[Migration][Warning] ensure_characters_category_column failed: {e}")

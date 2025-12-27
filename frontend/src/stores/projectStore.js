@@ -37,7 +37,7 @@ export const useProjectStore = defineStore('project', {
       await Promise.all([
         this.fetchScript(),
         this.fetchEvents(),
-        this.fetchAssetItems('persona')
+        this.fetchAssetItems('persona_visual')
       ]);
     },
     

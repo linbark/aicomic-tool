@@ -27,7 +27,7 @@ class CharacterCreate(BaseModel):
     name: str
     description: Optional[str] = None
     base_prompt: Optional[str] = None
-    category: Optional[str] = "persona"
+    category: Optional[str] = "persona_visual"
 
 class CharacterUpdate(BaseModel):
     name: Optional[str] = None
@@ -100,7 +100,7 @@ def create_asset_item(project_id: int, item: CharacterCreate, db: Session = Depe
         name=item.name,
         description=item.description,
         base_prompt=item.base_prompt,
-        category=item.category or "persona",
+        category=item.category or "persona_visual",
     )
     db.add(new_char)
     db.commit()
