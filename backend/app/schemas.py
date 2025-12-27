@@ -14,11 +14,12 @@ class AssetRead(AssetBase):
     created_at: datetime
     class Config: from_attributes = True
 
-class CharacterRead(BaseModel):
+class AssetItemRead(BaseModel):
     id: int
     name: str
     description: Optional[str] = None
     base_prompt: Optional[str] = None
+    category: str
     avatar_asset_id: Optional[int] = None
     
     # 【新增】返回该角色的所有图片/视频
@@ -26,6 +27,9 @@ class CharacterRead(BaseModel):
     
     class Config:
         from_attributes = True
+
+# 兼容旧命名（后端内部仍可能引用 CharacterRead）
+CharacterRead = AssetItemRead
         
 class ShotBase(BaseModel):
     sequence_number: int

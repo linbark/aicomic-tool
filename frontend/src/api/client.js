@@ -31,9 +31,24 @@ export default {
   upsertEventNode: (eventId, data) => apiClient.post(`/events/nodes/${eventId}`, data),
   
   // 人设
+  // 资产条目（项目级）
+  getAssetItems: (projectId, category) => {
+    const qs = category ? `?category=${encodeURIComponent(category)}` : '';
+    return apiClient.get(`/projects/${projectId}/asset-items${qs}`);
+  },
+  createAssetItem: (projectId, data) => apiClient.post(`/projects/${projectId}/asset-items`, data),
+  updateAssetItem: (itemId, data) => apiClient.patch(`/projects/asset-items/${itemId}`, data),
+  deleteAssetItem: (itemId) => apiClient.delete(`/projects/asset-items/${itemId}`),
+  // 兼容旧接口（可逐步移除）
   getCharacters: (projectId) => apiClient.get(`/projects/${projectId}/characters`),
   
-  // 上传角色素材
+  // 上传资产条目素材
+  uploadAssetItemAsset: (itemId, formData) => {
+    return apiClient.post(`/assets/asset-item/${itemId}`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    });
+  },
+  // 兼容旧接口
   uploadCharacterAsset: (charId, formData) => {
     return apiClient.post(`/assets/character/${charId}`, formData, {
       headers: { 'Content-Type': 'multipart/form-data' }

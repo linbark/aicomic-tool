@@ -25,6 +25,9 @@ class Character(Base):
     description = Column(Text)
     base_prompt = Column(Text)
     negative_prompt = Column(Text, nullable=True)
+    # 资产条目分类：persona(人设资产) / background(背景) ...
+    # 说明：对外 API 不再暴露“角色”概念，但为兼容旧数据与关系，这里保留表名与模型名。
+    category = Column(String, nullable=False, default="persona")
     avatar_asset_id = Column(Integer, ForeignKey("assets.id"), nullable=True)
     project = relationship("Project", back_populates="characters")
     assets = relationship("Asset", back_populates="character", cascade="all, delete-orphan", foreign_keys="Asset.character_id")
