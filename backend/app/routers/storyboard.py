@@ -127,7 +127,7 @@ def delete_scene(scene_id: int, db: Session = Depends(get_db)):
 
     # 删除对应场次的文件夹：data/{project}/storyboard/episode_{id}/scene_{id}
     if project_name and episode_id:
-        base_data_dir = os.path.join(os.getcwd(), "data")
+        base_data_dir = os.environ.get("AICOMIC_DATA_DIR") or os.path.join(os.getcwd(), "data")
         scene_dir = os.path.join(
             base_data_dir,
             project_name,
@@ -155,7 +155,7 @@ def delete_shot(shot_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Shot not found")
     
     # 2. 物理删除逻辑
-    base_data_dir = os.path.join(os.getcwd(), "data")
+    base_data_dir = os.environ.get("AICOMIC_DATA_DIR") or os.path.join(os.getcwd(), "data")
 
     # A. 删除 Asset 文件 (图片/文档)
     if db_shot.assets:
@@ -212,7 +212,7 @@ def upload_shot_video(shot_id: int, file: UploadFile = File(...), db: Session = 
     )
     
     # 绝对路径用于保存
-    DATA_ROOT = os.path.join(os.getcwd(), "data")
+    DATA_ROOT = os.environ.get("AICOMIC_DATA_DIR") or os.path.join(os.getcwd(), "data")
     save_dir = os.path.join(DATA_ROOT, project_name, hierarchy_path)
     os.makedirs(save_dir, exist_ok=True) 
 

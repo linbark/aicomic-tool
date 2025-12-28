@@ -12,8 +12,8 @@ router = APIRouter(
     tags=["Assets (资源管理)"]
 )
 
-# 配置根存储目录
-DATA_ROOT = os.path.join(os.getcwd(), "data")
+# 配置根存储目录（桌面版可通过环境变量注入）
+DATA_ROOT = os.environ.get("AICOMIC_DATA_DIR") or os.path.join(os.getcwd(), "data")
 
 def get_project_name(db: Session, project_id: int):
     project = db.query(models.Project).filter(models.Project.id == project_id).first()

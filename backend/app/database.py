@@ -1,10 +1,26 @@
+import os
+from pathlib import Path
+
 from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
+def _build_sqlite_url() -> str:
+    """
+    支持桌面版通过环境变量指定 DB 路径：
+    - AICOMIC_DB_PATH: /abs/path/to/database.db 或相对路径
+    """
+    db_path = os.environ.get("AICOMIC_DB_PATH")
+    if db_path:
+        p = Path(db_path).expanduser()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        # sqlite URL：相对路径 sqlite:///relative.db；绝对路径 sqlite:////abs/path.db
+        return f"sqlite:///{p}"
+    # 默认仍使用项目根目录下的 database.db
+    return "sqlite:///./database.db"
+
 # 定义 SQLite 数据库的地址
-# 这里的 ./database.db 表示会在项目根目录生成数据库文件
-SQLALCHEMY_DATABASE_URL = "sqlite:///./database.db"
+SQLALCHEMY_DATABASE_URL = _build_sqlite_url()
 
 # 创建引擎
 # connect_args={"check_same_thread": False} 是 SQLite 必须的配置

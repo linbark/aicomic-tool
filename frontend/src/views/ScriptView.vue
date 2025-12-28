@@ -137,7 +137,7 @@
  <script setup>
  import { ref } from 'vue';
  import { useProjectStore } from '../stores/projectStore';
- import api from '../api/client';
+ import api, { getFileUrl as buildFileUrl } from '../api/client';
  
  const store = useProjectStore();
  const newAssetPath = ref('');
@@ -296,11 +296,7 @@
      }
  }
  
- const getFileUrl = (path) => {
-   if (!path) return '';
-   const baseUrl = 'http://localhost:8000';
-   return `${baseUrl}/files/${path}`;
- };
+ const getFileUrl = (path) => buildFileUrl(path);
  
  const getFileName = (path) => {
      if (!path) return '';

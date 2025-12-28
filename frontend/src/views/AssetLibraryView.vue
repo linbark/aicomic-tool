@@ -192,8 +192,7 @@
 <script setup>
 import { ref, onMounted, watch } from 'vue';
 import { useProjectStore } from '../stores/projectStore';
-import api from '../api/client';
-import axios from 'axios';
+import api, { getFileUrl } from '../api/client';
 
 const store = useProjectStore();
 
@@ -300,7 +299,7 @@ const handleUpload = async (itemId, event) => {
 const deleteAsset = async (asset) => {
   if (!confirm("确定要删除这个文件吗？此操作无法撤销。")) return;
   try {
-    await axios.delete(`http://localhost:8000/projects/assets/${asset.id}`);
+    await api.deleteProjectAsset(asset.id);
     await store.fetchAssetItems(selectedCategory.value);
   } catch (e) {
     console.error(e);
@@ -311,19 +310,13 @@ const deleteAsset = async (asset) => {
 const deleteAssetFromLightbox = async (asset) => {
   if (!confirm("确定要删除这个文件吗？此操作无法撤销。")) return;
   try {
-    await axios.delete(`http://localhost:8000/projects/assets/${asset.id}`);
+    await api.deleteProjectAsset(asset.id);
     await store.fetchAssetItems(selectedCategory.value);
     lightboxAsset.value = null;
   } catch (e) {
     console.error(e);
     alert("删除失败，请检查控制台");
   }
-};
-
-const getFileUrl = (path) => {
-  if (!path) return '';
-  const baseUrl = 'http://localhost:8000';
-  return `${baseUrl}/files/${path}`;
 };
 
 const openLightbox = (asset) => {
