@@ -43,7 +43,33 @@
        请从左侧选择一场戏
      </div>
  
-     <div class="flex-1 flex flex-col bg-gray-50" v-if="store.currentShot">
+     <!-- Scene 编辑界面（当选中 Scene 但没有选中 Shot 时） -->
+     <div class="flex-1 flex flex-col bg-gray-50" v-if="store.currentScene && !store.currentShot">
+        <div class="p-4 bg-white border-b shadow-sm flex justify-between items-center">
+           <div class="flex items-center gap-3">
+              <span class="bg-gray-100 px-2 py-1 rounded text-xs font-mono text-gray-600">SCENE-{{ store.currentScene.sequence_number }}</span>
+              <input v-model="editingScene.title" placeholder="场标题" class="border-b focus:border-blue-500 outline-none text-sm w-48">
+           </div>
+           <button @click="saveScene" class="bg-blue-600 text-white px-4 py-1.5 rounded text-xs hover:bg-blue-700 transition shadow-sm">
+             保存修改
+           </button>
+        </div>
+
+        <div class="grid grid-cols-2 gap-0 border-b border-gray-200">
+           <div class="p-4 bg-white border-r">
+              <label class="block text-[10px] font-bold text-gray-400 uppercase mb-2">Action (画面描述)</label>
+              <textarea v-model="editingScene.action_text" class="w-full h-32 text-sm outline-none resize-none placeholder-gray-300" placeholder="描述发生了什么..."></textarea>
+           </div>
+           <div class="p-4 bg-gray-50">
+              <label class="block text-[10px] font-bold text-gray-400 uppercase mb-2">Stable Diffusion Prompt</label>
+              <textarea v-model="editingScene.prompt" class="w-full h-32 text-xs font-mono bg-transparent outline-none resize-none text-gray-600 placeholder-gray-300" placeholder="English prompt here..."></textarea>
+           </div>
+        </div>
+
+     </div>
+
+     <!-- Shot 编辑界面 -->
+     <div class="flex-1 flex flex-col bg-gray-50" v-else-if="store.currentShot">
         <div class="p-4 bg-white border-b shadow-sm flex justify-between items-center">
            <div class="flex items-center gap-3">
               <span class="bg-gray-100 px-2 py-1 rounded text-xs font-mono text-gray-600">SHOT-{{ store.currentShot.sequence_number }}</span>
@@ -124,10 +150,10 @@
         </div>
      </div>
      
-     <div v-else class="flex-1 flex items-center justify-center text-gray-300">
+     <div v-else-if="!store.currentScene" class="flex-1 flex items-center justify-center text-gray-300">
         <div class="text-center">
            <div class="text-4xl mb-2">🎬</div>
-           <p>Select a shot to edit</p>
+           <p>请从左侧选择一场戏</p>
         </div>
      </div>
      
@@ -135,13 +161,33 @@
  </template>
  
  <script setup>
- import { ref } from 'vue';
- import { useProjectStore } from '../stores/projectStore';
- import api, { getFileUrl as buildFileUrl } from '../api/client';
- 
- const store = useProjectStore();
- const newAssetPath = ref('');
- const videoInput = ref(null);
+import { ref, watch } from 'vue';
+import { useProjectStore } from '../stores/projectStore';
+import api, { getFileUrl as buildFileUrl } from '../api/client';
+
+const store = useProjectStore();
+const newAssetPath = ref('');
+const videoInput = ref(null);
+
+// Scene 编辑状态
+const editingScene = ref({
+  id: null,
+  title: '',
+  action_text: '',
+  prompt: ''
+});
+
+// 监听 currentScene 变化，同步到 editingScene
+watch(() => store.currentScene, (newScene) => {
+  if (newScene) {
+    editingScene.value = {
+      id: newScene.id,
+      title: newScene.title || '',
+      action_text: newScene.action_text || '',
+      prompt: newScene.prompt || ''
+    };
+  }
+}, { immediate: true });
  
  // === 基础操作 ===
  
@@ -164,12 +210,30 @@
     }
  };
  
- const save = async () => {
-   if(store.currentShot) {
-     await store.saveShot(store.currentShot);
-     alert('已保存');
-   }
- };
+const save = async () => {
+  if(store.currentShot) {
+    await store.saveShot(store.currentShot);
+    alert('已保存');
+  }
+};
+
+const saveScene = async () => {
+  if (!editingScene.value.id) return;
+  
+  try {
+    await api.updateScene(editingScene.value.id, {
+      title: editingScene.value.title,
+      action_text: editingScene.value.action_text,
+      prompt: editingScene.value.prompt
+    });
+    await store.fetchScript();
+    refreshCurrentSceneRef();
+    alert('已保存');
+  } catch (error) {
+    console.error('保存场失败:', error);
+    alert('保存失败: ' + (error?.response?.data?.detail || error?.message || '未知错误'));
+  }
+};
  
  // === 资产管理 ===
  

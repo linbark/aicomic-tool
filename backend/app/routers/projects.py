@@ -46,11 +46,28 @@ def get_projects(db: Session = Depends(get_db)):
 
 @router.post("/", response_model=schemas.ProjectBase)
 def create_project(project: ProjectCreate, db: Session = Depends(get_db)):
-    db_project = models.Project(name=project.name, description=project.description)
-    db.add(db_project)
-    db.commit()
-    db.refresh(db_project)
-    return db_project
+    import json, os
+    log_path = '/Users/ljc/aicomic-tool/.cursor/debug.log'
+    try:
+        with open(log_path, 'a') as f:
+            f.write(json.dumps({"location":"projects.py:48","message":"create_project called","data":{"name":project.name,"description":project.description},"timestamp":int(__import__('time').time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"D"})+"\n")
+    except: pass
+    try:
+        db_project = models.Project(name=project.name, description=project.description)
+        db.add(db_project)
+        db.commit()
+        db.refresh(db_project)
+        try:
+            with open(log_path, 'a') as f:
+                f.write(json.dumps({"location":"projects.py:54","message":"create_project success","data":{"id":db_project.id,"name":db_project.name},"timestamp":int(__import__('time').time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"D"})+"\n")
+        except: pass
+        return db_project
+    except Exception as e:
+        try:
+            with open(log_path, 'a') as f:
+                f.write(json.dumps({"location":"projects.py:57","message":"create_project error","data":{"error":str(e),"type":type(e).__name__},"timestamp":int(__import__('time').time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"D"})+"\n")
+        except: pass
+        raise
 
 # 【新增】修改项目 (重命名)
 @router.patch("/{project_id}", response_model=schemas.ProjectBase)
@@ -63,10 +80,36 @@ def update_project(project_id: int, project_update: ProjectUpdate, db: Session =
         db_project.name = project_update.name
     if project_update.description is not None:
         db_project.description = project_update.description
-        
+    
     db.commit()
     db.refresh(db_project)
     return db_project
+
+# 【新增】删除项目
+@router.delete("/{project_id}")
+def delete_project(project_id: int, db: Session = Depends(get_db)):
+    db_project = db.query(models.Project).filter(models.Project.id == project_id).first()
+    if not db_project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    
+    project_name = db_project.name
+    base_data_dir = os.environ.get("AICOMIC_DATA_DIR") or os.path.join(os.getcwd(), "data")
+    project_dir = os.path.join(base_data_dir, project_name)
+    
+    # 删除项目文件夹（如果存在）
+    if os.path.exists(project_dir):
+        import shutil
+        try:
+            shutil.rmtree(project_dir)
+            print(f"Deleted project directory: {project_dir}")
+        except Exception as e:
+            print(f"Error deleting project directory {project_dir}: {e}")
+    
+    # 删除数据库记录（级联删除会自动处理关联数据）
+    db.delete(db_project)
+    db.commit()
+    
+    return {"message": f"Project '{project_name}' and all associated data deleted successfully"}
 
 # =======================
 # 2. 资产条目管理接口（对外不再暴露“人设/角色”概念）

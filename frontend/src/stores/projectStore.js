@@ -22,11 +22,24 @@ export const useProjectStore = defineStore('project', {
   
   actions: {
     async init() {
-      const { data } = await api.getProjects();
-      this.projects = data;
-      // 默认选中第一个
-      if (this.projects.length > 0 && !this.currentProjectId) {
-        this.selectProject(this.projects[0].id);
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/fed868ac-0cc7-4d56-bc9f-30fe8b506df5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'projectStore.js:24',message:'store.init called',data:{},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
+      // #endregion
+      try {
+        const { data } = await api.getProjects();
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/fed868ac-0cc7-4d56-bc9f-30fe8b506df5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'projectStore.js:27',message:'getProjects response',data:{projectCount:data?.length,projects:data},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
+        // #endregion
+        this.projects = data;
+        // 默认选中第一个
+        if (this.projects.length > 0 && !this.currentProjectId) {
+          this.selectProject(this.projects[0].id);
+        }
+      } catch (error) {
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/fed868ac-0cc7-4d56-bc9f-30fe8b506df5',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'projectStore.js:33',message:'store.init error',data:{error:error?.message,status:error?.response?.status},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
+        // #endregion
+        console.error('获取项目列表失败:', error);
       }
     },
     

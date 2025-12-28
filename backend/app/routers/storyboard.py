@@ -39,6 +39,26 @@ def create_episode(project_id: int, episode: schemas.EpisodeCreate, db: Session 
     db.refresh(db_ep)
     return db_ep
 
+# 2.1 更新集
+@router.patch("/episode/{episode_id}", response_model=schemas.EpisodeRead)
+def update_episode(episode_id: int, episode_update: schemas.EpisodeUpdate, db: Session = Depends(get_db)):
+    db_ep = db.query(models.Episode).filter(models.Episode.id == episode_id).first()
+    if not db_ep:
+        raise HTTPException(status_code=404, detail="Episode not found")
+    
+    if episode_update.title is not None:
+        db_ep.title = episode_update.title
+    if episode_update.description is not None:
+        db_ep.description = episode_update.description
+    if episode_update.action_text is not None:
+        db_ep.action_text = episode_update.action_text
+    if episode_update.prompt is not None:
+        db_ep.prompt = episode_update.prompt
+    
+    db.commit()
+    db.refresh(db_ep)
+    return db_ep
+
 # 3. 创建场
 @router.post("/episode/{episode_id}/scene", response_model=schemas.SceneRead)
 def create_scene(episode_id: int, scene: schemas.SceneCreate, db: Session = Depends(get_db)):
@@ -69,6 +89,14 @@ def update_scene(scene_id: int, scene_update: schemas.SceneUpdate, db: Session =
     
     if scene_update.title is not None:
         db_scene.title = scene_update.title
+    if scene_update.description is not None:
+        db_scene.description = scene_update.description
+    if scene_update.action_text is not None:
+        db_scene.action_text = scene_update.action_text
+    if scene_update.dialogue is not None:
+        db_scene.dialogue = scene_update.dialogue
+    if scene_update.prompt is not None:
+        db_scene.prompt = scene_update.prompt
         
     db.commit()
     db.refresh(db_scene)

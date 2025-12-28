@@ -12,6 +12,7 @@
   "tauri": {
     "windows": [
       {
+        "label": "main",
         "title": "AIComicTool",
         "width": 1280,
         "height": 800,
@@ -31,6 +32,9 @@
       "active": true,
       "identifier": "com.ljc.aicomictool",
       "targets": ["app"],
+      "icon": [
+        "../../data/111/characters/漫剧-张小凡-正视图.png"
+      ],
       "resources": [
         "../../backend/**",
         "../../requirements.txt"

@@ -28,7 +28,41 @@ def ensure_characters_category_column():
         # 不阻断服务启动，但打印错误便于排查
         print(f"[Migration][Warning] ensure_characters_category_column failed: {e}")
 
+def ensure_episode_scene_description_columns():
+    """
+    轻量 SQLite 迁移：
+    - 为 episodes 和 scenes 表添加 description 列
+    - 为 episodes 表添加 action_text、prompt 列
+    - 为 scenes 表添加 action_text、dialogue、prompt 列
+    """
+    try:
+        with engine.begin() as conn:
+            # 检查并添加 episodes 的各个列
+            ep_cols = conn.execute(text("PRAGMA table_info(episodes)")).fetchall()
+            ep_col_names = {row[1] for row in ep_cols}
+            if "description" not in ep_col_names:
+                conn.execute(text("ALTER TABLE episodes ADD COLUMN description TEXT"))
+            if "action_text" not in ep_col_names:
+                conn.execute(text("ALTER TABLE episodes ADD COLUMN action_text TEXT"))
+            if "prompt" not in ep_col_names:
+                conn.execute(text("ALTER TABLE episodes ADD COLUMN prompt TEXT"))
+            
+            # 检查并添加 scenes 的各个列
+            sc_cols = conn.execute(text("PRAGMA table_info(scenes)")).fetchall()
+            sc_col_names = {row[1] for row in sc_cols}
+            if "description" not in sc_col_names:
+                conn.execute(text("ALTER TABLE scenes ADD COLUMN description TEXT"))
+            if "action_text" not in sc_col_names:
+                conn.execute(text("ALTER TABLE scenes ADD COLUMN action_text TEXT"))
+            if "dialogue" not in sc_col_names:
+                conn.execute(text("ALTER TABLE scenes ADD COLUMN dialogue TEXT"))
+            if "prompt" not in sc_col_names:
+                conn.execute(text("ALTER TABLE scenes ADD COLUMN prompt TEXT"))
+    except Exception as e:
+        print(f"[Migration][Warning] ensure_episode_scene_description_columns failed: {e}")
+
 ensure_characters_category_column()
+ensure_episode_scene_description_columns()
 
 app = FastAPI(title="AI Comic Studio")
 

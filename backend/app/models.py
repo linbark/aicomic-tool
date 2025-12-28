@@ -44,6 +44,9 @@ class Episode(Base):
     project_id = Column(Integer, ForeignKey("projects.id"))
     title = Column(String) # 例如 "第一集：初入青云"
     order = Column(Integer, default=0) # 排序用
+    description = Column(Text, nullable=True) # 集的剧本描述/内容
+    action_text = Column(Text, nullable=True) # 画面描述（类似 Shot/Scene）
+    prompt = Column(Text, nullable=True) # Stable Diffusion Prompt（类似 Shot/Scene）
     
     project = relationship("Project", back_populates="episodes")
     scenes = relationship("Scene", back_populates="episode", cascade="all, delete-orphan")
@@ -54,7 +57,11 @@ class Scene(Base):
     # 【重大变更】Scene 现在属于 Episode，而不是直接属于 Project
     episode_id = Column(Integer, ForeignKey("episodes.id")) 
     sequence_number = Column(Integer) 
-    title = Column(String) 
+    title = Column(String)
+    description = Column(Text, nullable=True) # 场的剧本描述/内容
+    action_text = Column(Text, nullable=True) # 画面描述（类似 Shot）
+    dialogue = Column(Text, nullable=True) # 对话内容（类似 Shot）
+    prompt = Column(Text, nullable=True) # Stable Diffusion Prompt（类似 Shot）
     
     episode = relationship("Episode", back_populates="scenes")
     shots = relationship("Shot", back_populates="scene", cascade="all, delete-orphan")

@@ -66,18 +66,27 @@ fn spawn_backend(app_data_dir: &Path, port: u16, backend_root: &Path) -> std::io
     port.to_string(),
   ];
 
+  eprintln!("[Tauri] Attempting to spawn backend with python3...");
+  eprintln!("[Tauri] Command: python3 -m uvicorn backend.app.main:app --host 127.0.0.1 --port {}", port);
+  eprintln!("[Tauri] Working directory: {:?}", backend_root);
+  eprintln!("[Tauri] PYTHONPATH: {}", pythonpath);
+  
   let mut cmd = Command::new("python3");
   cmd.args(args.clone());
   cmd.current_dir(backend_root);
   cmd.env("PYTHONPATH", pythonpath.clone());
   cmd.env("AICOMIC_DB_PATH", db_path.to_string_lossy().to_string());
   cmd.env("AICOMIC_DATA_DIR", data_dir.to_string_lossy().to_string());
-  cmd.stdout(Stdio::null());
-  cmd.stderr(Stdio::null());
+  cmd.stdout(Stdio::piped()); // 保留 stdout 以便调试
+  cmd.stderr(Stdio::piped()); // 保留 stderr 以便调试
 
   match cmd.spawn() {
-    Ok(child) => Ok(child),
-    Err(_) => {
+    Ok(child) => {
+      eprintln!("[Tauri] Backend process spawned successfully with python3");
+      Ok(child)
+    }
+    Err(e) => {
+      eprintln!("[Tauri] Failed to spawn with python3: {:?}, trying python...", e);
       // fallback to `python`
       let mut cmd2 = Command::new("python");
       cmd2.args(args);
@@ -85,9 +94,18 @@ fn spawn_backend(app_data_dir: &Path, port: u16, backend_root: &Path) -> std::io
       cmd2.env("PYTHONPATH", pythonpath);
       cmd2.env("AICOMIC_DB_PATH", db_path.to_string_lossy().to_string());
       cmd2.env("AICOMIC_DATA_DIR", data_dir.to_string_lossy().to_string());
-      cmd2.stdout(Stdio::null());
-      cmd2.stderr(Stdio::null());
-      cmd2.spawn()
+      cmd2.stdout(Stdio::piped()); // 保留 stdout 以便调试
+      cmd2.stderr(Stdio::piped()); // 保留 stderr 以便调试
+      match cmd2.spawn() {
+        Ok(child) => {
+          eprintln!("[Tauri] Backend process spawned successfully with python");
+          Ok(child)
+        }
+        Err(e2) => {
+          eprintln!("[Tauri] Failed to spawn with python: {:?}", e2);
+          Err(e2)
+        }
+      }
     }
   }
 }
@@ -98,11 +116,18 @@ fn inject_base_url(window: &Window, port: u16) {
       (function() {{
         const url = "http://127.0.0.1:{port}";
         window.__AICOMIC_API_BASE_URL__ = url;
+        console.log("[Tauri] Injected API baseURL:", url);
         window.dispatchEvent(new CustomEvent("aicomic-api-base-url", {{ detail: url }}));
+        // 确保立即触发一次，以防事件监听器已经注册
+        if (window.setApiBaseUrl) {{
+          window.setApiBaseUrl(url);
+        }}
       }})();
     "#
   );
-  let _ = window.eval(&js);
+  if let Err(e) = window.eval(&js) {
+    eprintln!("[Tauri] Failed to inject baseURL: {:?}", e);
+  }
 }
 
 fn main() {
@@ -118,23 +143,69 @@ fn main() {
       let backend_root = find_backend_root(resource_dir).expect("backend root not found");
 
       let port = pick_free_port();
-      let child = spawn_backend(&app_data_dir, port, &backend_root).expect("spawn backend failed");
+      eprintln!("[Tauri] Picked port: {}", port);
+      eprintln!("[Tauri] Backend root: {:?}", backend_root);
+      eprintln!("[Tauri] App data dir: {:?}", app_data_dir);
+      
+      let mut child = match spawn_backend(&app_data_dir, port, &backend_root) {
+        Ok(c) => {
+          eprintln!("[Tauri] Backend spawned successfully");
+          c
+        }
+        Err(e) => {
+          eprintln!("[Tauri] Failed to spawn backend: {:?}", e);
+          return Err(e.into());
+        }
+      };
+
+      // 读取 stderr 以便调试
+      if let Some(stderr) = child.stderr.take() {
+        let app_handle = app.handle().clone();
+        thread::spawn(move || {
+          use std::io::{BufRead, BufReader};
+          let reader = BufReader::new(stderr);
+          for line in reader.lines() {
+            if let Ok(l) = line {
+              eprintln!("[Backend stderr] {}", l);
+            }
+          }
+        });
+      }
 
       // stash child for shutdown
       app.manage(BackendChild(std::sync::Mutex::new(Some(child))));
 
       // wait backend ready then inject url
-      if wait_port_open(port, Duration::from_secs(8)) {
-        if let Some(win) = app.get_window("main") {
-          inject_base_url(&win, port);
+      let app_handle = app.handle().clone();
+      let port_for_inject = port;
+      thread::spawn(move || {
+        eprintln!("[Tauri] Waiting for backend on port {}...", port_for_inject);
+        // 等待后端启动
+        if wait_port_open(port_for_inject, Duration::from_secs(10)) {
+          eprintln!("[Tauri] Backend ready on port {}", port_for_inject);
+          // 尝试多次注入，因为窗口可能还没准备好
+          for i in 0..20 {
+            if let Some(win) = app_handle.get_window("main") {
+              inject_base_url(&win, port_for_inject);
+              eprintln!("[Tauri] Injected baseURL on attempt {}", i + 1);
+              // 再等待一下，确保注入完成
+              thread::sleep(Duration::from_millis(100));
+              break;
+            }
+            eprintln!("[Tauri] Window not ready yet, attempt {}", i + 1);
+            thread::sleep(Duration::from_millis(200));
+          }
+        } else {
+          eprintln!("[Tauri] ERROR: Backend failed to start within timeout on port {}", port_for_inject);
+          eprintln!("[Tauri] Please check if Python and uvicorn are installed correctly");
         }
-      }
+      });
 
       Ok(())
     })
     .on_window_event(|event| {
-      if let tauri::WindowEvent::CloseRequested { api, .. } = event.event() {
-        // allow close, but kill backend first
+      if let tauri::WindowEvent::CloseRequested { .. } = event.event() {
+        // 不拦截关闭：在关闭事件触发时先 kill 后端子进程，然后让窗口自然关闭即可
         let app = event.window().app_handle();
         if let Some(state) = app.try_state::<BackendChild>() {
           if let Ok(mut guard) = state.0.lock() {
@@ -143,7 +214,6 @@ fn main() {
             }
           }
         }
-        api.close_window();
       }
     })
     .run(tauri::generate_context!())

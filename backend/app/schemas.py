@@ -62,26 +62,50 @@ class SceneRead(BaseModel):
     id: int
     title: Optional[str] = None
     sequence_number: Optional[int] = None
+    description: Optional[str] = None
+    action_text: Optional[str] = None
+    dialogue: Optional[str] = None
+    prompt: Optional[str] = None
     shots: List[ShotRead] = []
     class Config: from_attributes = True
 
 class SceneCreate(BaseModel):
     title: str
     sequence_number: Optional[int] = None
+    description: Optional[str] = None
+    action_text: Optional[str] = None
+    dialogue: Optional[str] = None
+    prompt: Optional[str] = None
 
 class SceneUpdate(BaseModel):
     title: Optional[str] = None
+    description: Optional[str] = None
+    action_text: Optional[str] = None
+    dialogue: Optional[str] = None
+    prompt: Optional[str] = None
 
 class EpisodeRead(BaseModel):
     id: int
     title: str
     order: int
+    description: Optional[str] = None
+    action_text: Optional[str] = None
+    prompt: Optional[str] = None
     scenes: List[SceneRead] = []
     class Config: from_attributes = True
 
 class EpisodeCreate(BaseModel):
     title: str
     order: int = 0
+    description: Optional[str] = None
+    action_text: Optional[str] = None
+    prompt: Optional[str] = None
+
+class EpisodeUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    action_text: Optional[str] = None
+    prompt: Optional[str] = None
 
 # === 事件系统 (Event) ===
 # --- Pydantic 模型 (建议加到 schemas.py) ---
