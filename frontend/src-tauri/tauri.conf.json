@@ -1,0 +1,45 @@
+{
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
+    "devPath": "http://127.0.0.1:1420",
+    "distDir": "../dist"
+  },
+  "package": {
+    "productName": "AIComicTool",
+    "version": "0.1.0"
+  },
+  "tauri": {
+    "windows": [
+      {
+        "title": "AIComicTool",
+        "width": 1280,
+        "height": 800,
+        "resizable": true
+      }
+    ],
+    "allowlist": {
+      "all": false,
+      "shell": {
+        "open": true
+      }
+    },
+    "security": {
+      "csp": null
+    },
+    "bundle": {
+      "active": true,
+      "identifier": "com.ljc.aicomictool",
+      "targets": ["app"],
+      "resources": [
+        "../../backend/**",
+        "../../requirements.txt"
+      ],
+      "macOS": {
+        "entitlements": null
+      }
+    }
+  }
+}
+
+

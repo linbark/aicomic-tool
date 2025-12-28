@@ -161,7 +161,7 @@ def delete_asset_item(item_id: int, db: Session = Depends(get_db)):
     
     # --- 新增逻辑：物理删除关联的文件 ---
     # 假设你的 DATA_DIR 是项目根目录下的 data 文件夹
-    base_data_dir = os.path.join(os.getcwd(), "data")
+    base_data_dir = os.environ.get("AICOMIC_DATA_DIR") or os.path.join(os.getcwd(), "data")
     
     # 遍历该角色的所有资产进行删除
     # 注意：确保 character.assets 是正确关联的列表
@@ -210,7 +210,7 @@ def delete_asset(asset_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Asset not found")
     
     # 物理删除文件
-    base_data_dir = os.path.join(os.getcwd(), "data")
+    base_data_dir = os.environ.get("AICOMIC_DATA_DIR") or os.path.join(os.getcwd(), "data")
     if asset.file_path:
         # 防止路径拼接错误，根据你的实际存储逻辑调整
         # 如果 file_path 已经是相对路径 "characters/1/xxx.jpg"，直接拼

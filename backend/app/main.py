@@ -40,7 +40,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-DATA_DIR = os.path.join(os.getcwd(), "data")
+DATA_DIR = os.environ.get("AICOMIC_DATA_DIR") or os.path.join(os.getcwd(), "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 app.mount("/files", StaticFiles(directory=DATA_DIR), name="files")
 

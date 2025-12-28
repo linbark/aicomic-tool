@@ -1,11 +1,43 @@
 import axios from 'axios';
 
+let _apiBaseUrl =
+  (typeof window !== 'undefined' && window.__AICOMIC_API_BASE_URL__) ||
+  (import.meta?.env?.VITE_API_BASE_URL) ||
+  'http://localhost:8000';
+
+export function setApiBaseUrl(url) {
+  if (!url) return;
+  _apiBaseUrl = url;
+  apiClient.defaults.baseURL = url;
+}
+
+export function getApiBaseUrl() {
+  return _apiBaseUrl;
+}
+
+export function getFileUrl(path) {
+  if (!path) return '';
+  return `${getApiBaseUrl()}/files/${path}`;
+}
+
+// 初始化 axios 实例（baseURL 可在运行时被 setApiBaseUrl 更新）
 const apiClient = axios.create({
-  baseURL: 'http://localhost:8000',
+  baseURL: _apiBaseUrl,
   headers: {
     'Content-Type': 'application/json',
   },
 });
+
+// Tauri 启动后会通过 window 事件注入端口
+if (typeof window !== 'undefined') {
+  window.addEventListener('aicomic-api-base-url', (e) => {
+    const url = e?.detail;
+    setApiBaseUrl(url);
+  });
+  if (window.__AICOMIC_API_BASE_URL__) {
+    setApiBaseUrl(window.__AICOMIC_API_BASE_URL__);
+  }
+}
 
 export default {
   // 项目
@@ -79,5 +111,10 @@ export default {
   },
   deleteShot(id) {
     return apiClient.delete(`/storyboard/shot/${id}`);
+  },
+
+  // 资产文件删除（Asset 表）
+  deleteProjectAsset(assetId) {
+    return apiClient.delete(`/projects/assets/${assetId}`);
   }
 };
