@@ -12,6 +12,7 @@ export const useProjectStore = defineStore('project', {
     assetItems: [], // 资产条目列表（项目级，按分类查询）
         
     // UI 状态
+    currentEpisode: null,
     currentScene: null,
     currentShot: null,
   }),
@@ -45,6 +46,7 @@ export const useProjectStore = defineStore('project', {
     
     async selectProject(id) {
       this.currentProjectId = id;
+      this.currentEpisode = null;
       this.currentScene = null;
       this.currentShot = null;
       await Promise.all([
@@ -53,11 +55,65 @@ export const useProjectStore = defineStore('project', {
         this.fetchAssetItems('persona_visual')
       ]);
     },
+
+    selectEpisode(ep) {
+      const episodeId = typeof ep === 'number' ? ep : ep?.id;
+      this.currentEpisode = this.episodes.find(e => e.id === episodeId) || (typeof ep === 'object' ? ep : null);
+      this.currentScene = null;
+      this.currentShot = null;
+    },
+
+    selectScene(scene) {
+      const sceneId = typeof scene === 'number' ? scene : scene?.id;
+      for (const ep of this.episodes) {
+        const sc = ep?.scenes?.find(s => s.id === sceneId);
+        if (sc) {
+          this.currentEpisode = ep;
+          this.currentScene = sc;
+          this.currentShot = null;
+          return;
+        }
+      }
+      // fallback（理论上不会走到这里）
+      this.currentScene = typeof scene === 'object' ? scene : null;
+      this.currentShot = null;
+    },
     
     async fetchScript() {
       if (!this.currentProjectId) return;
       const { data } = await api.getScript(this.currentProjectId);
       this.episodes = data;
+
+      // 重新挂载当前选择，避免引用指向旧对象
+      const prevEpisodeId = this.currentEpisode?.id;
+      const prevSceneId = this.currentScene?.id;
+      const prevShotId = this.currentShot?.id;
+
+      let foundEpisode = null;
+      let foundScene = null;
+      if (prevSceneId) {
+        for (const ep of this.episodes) {
+          const sc = ep?.scenes?.find(s => s.id === prevSceneId);
+          if (sc) {
+            foundEpisode = ep;
+            foundScene = sc;
+            break;
+          }
+        }
+      } else if (prevEpisodeId) {
+        foundEpisode = this.episodes.find(e => e.id === prevEpisodeId) || null;
+      }
+
+      this.currentEpisode = foundEpisode;
+      this.currentScene = foundScene;
+
+      if (prevShotId && this.currentScene?.shots) {
+        const shot = this.currentScene.shots.find(s => s.id === prevShotId);
+        this.currentShot = shot ? JSON.parse(JSON.stringify(shot)) : null;
+      } else if (!foundScene) {
+        // 如果不在 Scene 里，镜头必然无效
+        this.currentShot = null;
+      }
     },
     
     async fetchEvents() {

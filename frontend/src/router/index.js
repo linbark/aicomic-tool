@@ -3,6 +3,7 @@ import ScriptView from '../views/ScriptView.vue';
 import EventMatrixView from '../views/EventMatrixView.vue';
 import EventFlowView from '../views/EventFlowView.vue';
 import AssetLibraryView from '../views/AssetLibraryView.vue';
+import AiSettingsView from '../views/AiSettingsView.vue';
 
 const routes = [
   { path: '/', redirect: '/script' },
@@ -10,6 +11,7 @@ const routes = [
   { path: '/events', component: EventMatrixView },
   { path: '/events/flow', component: EventFlowView },
   { path: '/assets', component: AssetLibraryView },
+  { path: '/settings/ai', component: AiSettingsView },
 ];
 
 export default createRouter({

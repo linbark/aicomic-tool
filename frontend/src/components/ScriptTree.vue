@@ -2,14 +2,14 @@
   <div class="space-y-4">
     <div v-for="ep in store.episodes" :key="ep.id">
       <div class="flex items-center justify-between text-xs font-bold text-gray-800 mb-2 px-2 group">
-        <div class="flex items-center cursor-pointer flex-1" @click="openEpisodeEditModal(ep)">
+        <div class="flex items-center cursor-pointer flex-1" @click="store.selectEpisode(ep)">
           <span class="text-gray-400 mr-1 text-[10px]">EP{{ ep.order }}</span>
-          <span class="group-hover:text-blue-600">{{ ep.title }}</span>
+          <span :class="store.currentEpisode?.id === ep.id ? 'text-blue-700' : 'group-hover:text-blue-600'">{{ ep.title }}</span>
         </div>
         <button 
-          @click.stop="openEpisodeEditModal(ep)" 
+          @click.stop="openEpisodeRenameModal(ep)" 
           class="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-blue-600 transition px-1"
-          title="编辑集"
+          title="重命名集"
         >
           ✏️
         </button>
@@ -20,14 +20,14 @@
              class="group flex items-center"
              :class="['cursor-pointer px-2 py-1.5 rounded text-xs truncate transition', 
                       store.currentScene?.id === scene.id ? 'bg-blue-50 text-blue-700 font-bold' : 'text-gray-500 hover:bg-gray-50 hover:text-gray-700']">
-          <div class="flex items-center flex-1" @click="store.currentScene = scene; store.currentShot = null;">
+          <div class="flex items-center flex-1" @click="store.selectScene(scene)">
             <span class="mr-2 opacity-50 text-[10px] w-4 text-right">{{ scene.sequence_number }}</span>
             {{ scene.title }}
           </div>
           <button 
-            @click.stop="openSceneEditModal(scene)" 
+            @click.stop="openSceneRenameModal(scene)" 
             class="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-blue-600 transition px-1 ml-1"
-            title="编辑场"
+            title="重命名场"
           >
             ✏️
           </button>
@@ -95,11 +95,11 @@
     </div>
   </div>
 
-  <!-- 编辑集模态框 -->
+  <!-- 重命名集模态框 -->
   <div v-if="showEpisodeEditModal" class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center backdrop-blur-sm" @click="showEpisodeEditModal = false">
     <div class="bg-white rounded-xl shadow-2xl w-[600px] max-h-[90vh] flex flex-col" @click.stop>
       <div class="p-6 border-b">
-        <h3 class="text-lg font-bold text-gray-800">编辑集</h3>
+        <h3 class="text-lg font-bold text-gray-800">重命名集</h3>
       </div>
       <div class="flex-1 overflow-y-auto p-6 space-y-4">
         <div>
@@ -109,15 +109,6 @@
             class="w-full border p-2 rounded text-sm focus:ring-2 ring-blue-500 outline-none"
             placeholder="请输入集标题"
           >
-        </div>
-        <div>
-          <label class="text-xs font-bold text-gray-500">剧本内容</label>
-          <textarea 
-            v-model="editingEpisode.description" 
-            class="w-full border p-2 rounded text-sm focus:ring-2 ring-blue-500 outline-none resize-none"
-            placeholder="编写集的剧本内容..."
-            rows="12"
-          ></textarea>
         </div>
       </div>
       <div v-if="episodeEditError" class="px-6 text-red-600 text-xs">{{ episodeEditError }}</div>
@@ -130,11 +121,11 @@
     </div>
   </div>
 
-  <!-- 编辑场模态框 -->
+  <!-- 重命名场模态框 -->
   <div v-if="showSceneEditModal" class="fixed inset-0 bg-black/50 z-50 flex items-center justify-center backdrop-blur-sm" @click="showSceneEditModal = false">
     <div class="bg-white rounded-xl shadow-2xl w-[600px] max-h-[90vh] flex flex-col" @click.stop>
       <div class="p-6 border-b">
-        <h3 class="text-lg font-bold text-gray-800">编辑场</h3>
+        <h3 class="text-lg font-bold text-gray-800">重命名场</h3>
       </div>
       <div class="flex-1 overflow-y-auto p-6 space-y-4">
         <div>
@@ -144,15 +135,6 @@
             class="w-full border p-2 rounded text-sm focus:ring-2 ring-blue-500 outline-none"
             placeholder="请输入场标题"
           >
-        </div>
-        <div>
-          <label class="text-xs font-bold text-gray-500">剧本内容</label>
-          <textarea 
-            v-model="editingScene.description" 
-            class="w-full border p-2 rounded text-sm focus:ring-2 ring-blue-500 outline-none resize-none"
-            placeholder="编写场的剧本内容..."
-            rows="12"
-          ></textarea>
         </div>
       </div>
       <div v-if="sceneEditError" class="px-6 text-red-600 text-xs">{{ sceneEditError }}</div>
@@ -185,12 +167,12 @@ const isCreatingScene = ref(false);
 const currentEpisodeId = ref(null);
 
 const showEpisodeEditModal = ref(false);
-const editingEpisode = ref({ id: null, title: '', description: '' });
+const editingEpisode = ref({ id: null, title: '' });
 const episodeEditError = ref('');
 const isUpdatingEpisode = ref(false);
 
 const showSceneEditModal = ref(false);
-const editingScene = ref({ id: null, title: '', description: '' });
+const editingScene = ref({ id: null, title: '' });
 const sceneEditError = ref('');
 const isUpdatingScene = ref(false);
 
@@ -256,11 +238,10 @@ const handleCreateScene = async () => {
   }
 };
 
-const openEpisodeEditModal = (episode) => {
+const openEpisodeRenameModal = (episode) => {
   editingEpisode.value = {
     id: episode.id,
-    title: episode.title || '',
-    description: episode.description || ''
+    title: episode.title || ''
   };
   showEpisodeEditModal.value = true;
 };
@@ -276,8 +257,7 @@ const handleUpdateEpisode = async () => {
   
   try {
     await api.updateEpisode(editingEpisode.value.id, {
-      title: editingEpisode.value.title,
-      description: editingEpisode.value.description
+      title: editingEpisode.value.title
     });
     await store.fetchScript();
     showEpisodeEditModal.value = false;
@@ -289,11 +269,10 @@ const handleUpdateEpisode = async () => {
   }
 };
 
-const openSceneEditModal = (scene) => {
+const openSceneRenameModal = (scene) => {
   editingScene.value = {
     id: scene.id,
-    title: scene.title || '',
-    description: scene.description || ''
+    title: scene.title || ''
   };
   showSceneEditModal.value = true;
 };
@@ -309,8 +288,7 @@ const handleUpdateScene = async () => {
   
   try {
     await api.updateScene(editingScene.value.id, {
-      title: editingScene.value.title,
-      description: editingScene.value.description
+      title: editingScene.value.title
     });
     await store.fetchScript();
     showSceneEditModal.value = false;

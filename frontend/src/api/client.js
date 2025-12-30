@@ -154,6 +154,23 @@ export default {
     return apiClient.delete(`/storyboard/shot/${id}`);
   },
 
+  // AI (DeepSeek via backend proxy)
+  getAiSettings() {
+    return apiClient.get(`/ai/settings`);
+  },
+  updateAiSettings(data) {
+    return apiClient.put(`/ai/settings`, data);
+  },
+  testAi() {
+    return apiClient.post(`/ai/test`);
+  },
+  aiSplitScenes(data) {
+    return apiClient.post(`/ai/split-scenes`, data);
+  },
+  aiSplitShots(data) {
+    return apiClient.post(`/ai/split-shots`, data);
+  },
+
   // 资产文件删除（Asset 表）
   deleteProjectAsset(assetId) {
     return apiClient.delete(`/projects/assets/${assetId}`);

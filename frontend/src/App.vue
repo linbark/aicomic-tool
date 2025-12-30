@@ -15,6 +15,10 @@
       <router-link to="/assets" active-class="bg-blue-600 text-white" class="p-3 rounded-xl text-gray-400 hover:text-white transition">
         <span class="text-xs font-bold">资产</span>
       </router-link>
+
+      <router-link to="/settings/ai" active-class="bg-blue-600 text-white" class="p-3 rounded-xl text-gray-400 hover:text-white transition" title="AI 配置">
+        <span class="text-xs font-bold">设置</span>
+      </router-link>
     </aside>
 
     <aside class="w-64 bg-white border-r border-gray-200 flex flex-col flex-shrink-0">

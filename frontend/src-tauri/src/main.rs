@@ -8,6 +8,64 @@ use std::time::{Duration, Instant};
 
 use tauri::{Manager, Window};
 
+fn python_can_import(python: &str, backend_root: &Path, pythonpath: &str) -> bool {
+  let mut cmd = Command::new(python);
+  cmd.current_dir(backend_root);
+  cmd.env("PYTHONPATH", pythonpath);
+  cmd.arg("-c").arg("import sys; import uvicorn; import httpx; print(sys.executable)");
+  match cmd.output() {
+    Ok(out) => {
+      if out.status.success() {
+        let exe = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        eprintln!("[Tauri] Python OK: {} -> {}", python, exe);
+        true
+      } else {
+        let err = String::from_utf8_lossy(&out.stderr);
+        eprintln!("[Tauri] Python not usable: {} (need uvicorn+httpx). stderr: {}", python, err.trim());
+        false
+      }
+    }
+    Err(e) => {
+      eprintln!("[Tauri] Python probe failed for {}: {:?}", python, e);
+      false
+    }
+  }
+}
+
+fn pick_python_executable(backend_root: &Path, pythonpath: &str) -> String {
+  // 1) 用户显式指定（推荐：绝对路径）
+  if let Ok(p) = std::env::var("AICOMIC_PYTHON") {
+    let p = p.trim().to_string();
+    if !p.is_empty() && python_can_import(&p, backend_root, pythonpath) {
+      eprintln!("[Tauri] Using python from AICOMIC_PYTHON: {}", p);
+      return p;
+    }
+  }
+
+  // 2) 常见候选：优先 python3.12
+  let candidates = vec![
+    "python3.12",
+    "python3",
+    "python",
+    // Homebrew 常见位置（避免 PATH 不完整）
+    "/opt/homebrew/bin/python3.12",
+    "/usr/local/bin/python3.12",
+    "/opt/homebrew/bin/python3",
+    "/usr/local/bin/python3",
+  ];
+
+  for c in candidates {
+    if python_can_import(c, backend_root, pythonpath) {
+      eprintln!("[Tauri] Using python: {}", c);
+      return c.to_string();
+    }
+  }
+
+  // 3) 兜底：仍然返回 python3，让后续 spawn 输出更明确的 stderr
+  eprintln!("[Tauri] WARNING: No suitable python found with uvicorn+httpx. Falling back to python3.");
+  "python3".to_string()
+}
+
 fn pick_free_port() -> u16 {
   TcpListener::bind("127.0.0.1:0")
     .expect("bind ephemeral port failed")
@@ -48,7 +106,7 @@ fn find_backend_root(resource_dir: Option<PathBuf>) -> Option<PathBuf> {
   None
 }
 
-fn spawn_backend(app_data_dir: &Path, port: u16, backend_root: &Path) -> std::io::Result<Child> {
+fn spawn_backend(app_data_dir: &Path, port: u16, backend_root: &Path, python_exe: &str) -> std::io::Result<Child> {
   let db_path = app_data_dir.join("database.db");
   let data_dir = app_data_dir.join("data");
   std::fs::create_dir_all(&data_dir)?;
@@ -66,12 +124,12 @@ fn spawn_backend(app_data_dir: &Path, port: u16, backend_root: &Path) -> std::io
     port.to_string(),
   ];
 
-  eprintln!("[Tauri] Attempting to spawn backend with python3...");
-  eprintln!("[Tauri] Command: python3 -m uvicorn backend.app.main:app --host 127.0.0.1 --port {}", port);
+  eprintln!("[Tauri] Attempting to spawn backend with {}...", python_exe);
+  eprintln!("[Tauri] Command: {} -m uvicorn backend.app.main:app --host 127.0.0.1 --port {}", python_exe, port);
   eprintln!("[Tauri] Working directory: {:?}", backend_root);
   eprintln!("[Tauri] PYTHONPATH: {}", pythonpath);
   
-  let mut cmd = Command::new("python3");
+  let mut cmd = Command::new(python_exe);
   cmd.args(args.clone());
   cmd.current_dir(backend_root);
   cmd.env("PYTHONPATH", pythonpath.clone());
@@ -82,30 +140,12 @@ fn spawn_backend(app_data_dir: &Path, port: u16, backend_root: &Path) -> std::io
 
   match cmd.spawn() {
     Ok(child) => {
-      eprintln!("[Tauri] Backend process spawned successfully with python3");
+      eprintln!("[Tauri] Backend process spawned successfully with {}", python_exe);
       Ok(child)
     }
     Err(e) => {
-      eprintln!("[Tauri] Failed to spawn with python3: {:?}, trying python...", e);
-      // fallback to `python`
-      let mut cmd2 = Command::new("python");
-      cmd2.args(args);
-      cmd2.current_dir(backend_root);
-      cmd2.env("PYTHONPATH", pythonpath);
-      cmd2.env("AICOMIC_DB_PATH", db_path.to_string_lossy().to_string());
-      cmd2.env("AICOMIC_DATA_DIR", data_dir.to_string_lossy().to_string());
-      cmd2.stdout(Stdio::piped()); // 保留 stdout 以便调试
-      cmd2.stderr(Stdio::piped()); // 保留 stderr 以便调试
-      match cmd2.spawn() {
-        Ok(child) => {
-          eprintln!("[Tauri] Backend process spawned successfully with python");
-          Ok(child)
-        }
-        Err(e2) => {
-          eprintln!("[Tauri] Failed to spawn with python: {:?}", e2);
-          Err(e2)
-        }
-      }
+      eprintln!("[Tauri] Failed to spawn backend with {}: {:?}", python_exe, e);
+      Err(e)
     }
   }
 }
@@ -146,8 +186,10 @@ fn main() {
       eprintln!("[Tauri] Picked port: {}", port);
       eprintln!("[Tauri] Backend root: {:?}", backend_root);
       eprintln!("[Tauri] App data dir: {:?}", app_data_dir);
+      let pythonpath = backend_root.to_string_lossy().to_string();
+      let python_exe = pick_python_executable(&backend_root, &pythonpath);
       
-      let mut child = match spawn_backend(&app_data_dir, port, &backend_root) {
+      let mut child = match spawn_backend(&app_data_dir, port, &backend_root, &python_exe) {
         Ok(c) => {
           eprintln!("[Tauri] Backend spawned successfully");
           c
@@ -160,7 +202,7 @@ fn main() {
 
       // 读取 stderr 以便调试
       if let Some(stderr) = child.stderr.take() {
-        let app_handle = app.handle().clone();
+        let _app_handle = app.handle().clone();
         thread::spawn(move || {
           use std::io::{BufRead, BufReader};
           let reader = BufReader::new(stderr);
