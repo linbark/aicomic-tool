@@ -568,3 +568,138 @@
 {"location":"index.html:unhandled-rejection","message":"Unhandled promise rejection","data":{"reason":"The `Dialog` module is not enabled. You must enable one of its APIs in the allowlist."},"timestamp":1766896964218,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
 {"location":"index.html:unhandled-rejection","message":"Unhandled promise rejection","data":{"reason":"The `Dialog` module is not enabled. You must enable one of its APIs in the allowlist."},"timestamp":1766896967719,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
 {"location":"index.html:unhandled-rejection","message":"Unhandled promise rejection","data":{"reason":"The `Dialog` module is not enabled. You must enable one of its APIs in the allowlist."},"timestamp":1766896970051,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"index.html:inline-script","message":"HTML loaded, inline script executed","data":{},"timestamp":1766902298197,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"index.html:module-script-start","message":"Module script starting, about to import main.js","data":{},"timestamp":1766902298216,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"client.js:38","message":"baseURL found on window","data":{"url":"http://127.0.0.1:54840"},"timestamp":1766902298532,"sessionId":"debug-session","runId":"run2","hypothesisId":"B"}
+{"location":"main.js:start","message":"main.js starting","data":{},"timestamp":1766902298536,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"main.js:pinia-added","message":"Pinia added","data":{},"timestamp":1766902298537,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"main.js:app-created","message":"Vue app created","data":{},"timestamp":1766902298536,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"main.js:router-added","message":"Router added","data":{},"timestamp":1766902298538,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"App.vue:onMounted","message":"App.vue onMounted called","data":{},"timestamp":1766902298546,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"projectStore.js:24","message":"store.init called","data":{},"timestamp":1766902298546,"sessionId":"debug-session","runId":"run1","hypothesisId":"E"}
+{"location":"main.js:mounted","message":"App mounted","data":{"hasRoot":true},"timestamp":1766902298548,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"projectStore.js:27","message":"getProjects response","data":{"projectCount":1,"projects":[{"id":1,"name":"恐怖电梯","description":null}]},"timestamp":1766902298563,"sessionId":"debug-session","runId":"run1","hypothesisId":"E"}
+{"location":"App.vue:onMounted","message":"App.vue onMounted called","data":{},"timestamp":1766903637539,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"projectStore.js:24","message":"store.init called","data":{},"timestamp":1766903637540,"sessionId":"debug-session","runId":"run1","hypothesisId":"E"}
+{"location":"projectStore.js:27","message":"getProjects response","data":{"projectCount":1,"projects":[{"id":1,"name":"恐怖电梯","description":null}]},"timestamp":1766903637549,"sessionId":"debug-session","runId":"run1","hypothesisId":"E"}
+{"location":"App.vue:onMounted","message":"App.vue onMounted called","data":{},"timestamp":1766904460833,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"projectStore.js:24","message":"store.init called","data":{},"timestamp":1766904460845,"sessionId":"debug-session","runId":"run1","hypothesisId":"E"}
+{"location":"projectStore.js:27","message":"getProjects response","data":{"projectCount":1,"projects":[{"id":1,"name":"恐怖电梯","description":null}]},"timestamp":1766904460857,"sessionId":"debug-session","runId":"run1","hypothesisId":"E"}
+{"location":"index.html:inline-script","message":"HTML loaded, inline script executed","data":{},"timestamp":1766904504210,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"index.html:module-script-start","message":"Module script starting, about to import main.js","data":{},"timestamp":1766904504294,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"client.js:38","message":"baseURL found on window","data":{"url":"http://127.0.0.1:57051"},"timestamp":1766904504622,"sessionId":"debug-session","runId":"run2","hypothesisId":"B"}
+{"location":"main.js:start","message":"main.js starting","data":{},"timestamp":1766904504626,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"main.js:app-created","message":"Vue app created","data":{},"timestamp":1766904504627,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"main.js:pinia-added","message":"Pinia added","data":{},"timestamp":1766904504627,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"main.js:router-added","message":"Router added","data":{},"timestamp":1766904504629,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"App.vue:onMounted","message":"App.vue onMounted called","data":{},"timestamp":1766904504636,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"projectStore.js:24","message":"store.init called","data":{},"timestamp":1766904504637,"sessionId":"debug-session","runId":"run1","hypothesisId":"E"}
+{"location":"main.js:mounted","message":"App mounted","data":{"hasRoot":true},"timestamp":1766904504638,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"projectStore.js:27","message":"getProjects response","data":{"projectCount":1,"projects":[{"id":1,"name":"恐怖电梯","description":null}]},"timestamp":1766904504656,"sessionId":"debug-session","runId":"run1","hypothesisId":"E"}
+{"location":"index.html:inline-script","message":"HTML loaded, inline script executed","data":{},"timestamp":1766905418903,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"index.html:module-script-start","message":"Module script starting, about to import main.js","data":{},"timestamp":1766905418988,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"client.js:41","message":"baseURL not found, polling for injection","data":{"defaultUrl":"http://localhost:8000"},"timestamp":1766905419344,"sessionId":"debug-session","runId":"run2","hypothesisId":"B"}
+{"location":"main.js:start","message":"main.js starting","data":{},"timestamp":1766905419349,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"main.js:app-created","message":"Vue app created","data":{},"timestamp":1766905419350,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"main.js:pinia-added","message":"Pinia added","data":{},"timestamp":1766905419351,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"main.js:router-added","message":"Router added","data":{},"timestamp":1766905419352,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"App.vue:onMounted","message":"App.vue onMounted called","data":{},"timestamp":1766905419359,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"projectStore.js:24","message":"store.init called","data":{},"timestamp":1766905419360,"sessionId":"debug-session","runId":"run1","hypothesisId":"E"}
+{"location":"main.js:mounted","message":"App mounted","data":{"hasRoot":true},"timestamp":1766905419362,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"client.js:33","message":"baseURL event received","data":{"url":"http://127.0.0.1:57409"},"timestamp":1766905419366,"sessionId":"debug-session","runId":"run2","hypothesisId":"B"}
+{"location":"projectStore.js:33","message":"store.init error","data":{"error":"Network Error"},"timestamp":1766905419374,"sessionId":"debug-session","runId":"run1","hypothesisId":"E"}
+{"location":"client.js:50","message":"baseURL found via polling","data":{"url":"http://127.0.0.1:57409","pollCount":1},"timestamp":1766905419446,"sessionId":"debug-session","runId":"run2","hypothesisId":"B"}
+{"location":"App.vue:handleCreateProject","message":"handleCreateProject called","data":{"name":"测试","hasName":true},"timestamp":1766905429881,"sessionId":"debug-session","runId":"run3","hypothesisId":"A"}
+{"location":"App.vue:before api.createProject","message":"before api.createProject","data":{"name":"测试","baseUrl":"http://127.0.0.1:57409","currentBaseURL":"http://127.0.0.1:57409"},"timestamp":1766905429882,"sessionId":"debug-session","runId":"run3","hypothesisId":"B"}
+{"location":"client.js:45","message":"createProject API call","data":{"data":{"name":"测试"},"baseURL":"http://127.0.0.1:57409"},"timestamp":1766905429883,"sessionId":"debug-session","runId":"run1","hypothesisId":"B"}
+{"location": "projects.py:48", "message": "create_project called", "data": {"name": "\u6d4b\u8bd5", "description": null}, "timestamp": 1766905429897, "sessionId": "debug-session", "runId": "run1", "hypothesisId": "D"}
+{"location": "projects.py:54", "message": "create_project success", "data": {"id": 2, "name": "\u6d4b\u8bd5"}, "timestamp": 1766905429917, "sessionId": "debug-session", "runId": "run1", "hypothesisId": "D"}
+{"location":"App.vue:api.createProject success","message":"api.createProject success","data":{"result":{"id":2,"name":"测试","description":null},"status":200},"timestamp":1766905429919,"sessionId":"debug-session","runId":"run3","hypothesisId":"C"}
+{"location":"App.vue:before store.init","message":"before store.init","data":{},"timestamp":1766905429919,"sessionId":"debug-session","runId":"run3","hypothesisId":"E"}
+{"location":"projectStore.js:24","message":"store.init called","data":{},"timestamp":1766905429919,"sessionId":"debug-session","runId":"run1","hypothesisId":"E"}
+{"location":"projectStore.js:27","message":"getProjects response","data":{"projectCount":2,"projects":[{"id":1,"name":"恐怖电梯","description":null},{"id":2,"name":"测试","description":null}]},"timestamp":1766905429923,"sessionId":"debug-session","runId":"run1","hypothesisId":"E"}
+{"location":"App.vue:store.init completed","message":"store.init completed","data":{"projectCount":2},"timestamp":1766905429927,"sessionId":"debug-session","runId":"run3","hypothesisId":"E"}
+{"location":"index.html:unhandled-rejection","message":"Unhandled promise rejection","data":{"reason":"The `Dialog` module is not enabled. You must enable one of its APIs in the allowlist."},"timestamp":1766905433999,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"projectStore.js:24","message":"store.init called","data":{},"timestamp":1766905434014,"sessionId":"debug-session","runId":"run1","hypothesisId":"E"}
+{"location":"projectStore.js:27","message":"getProjects response","data":{"projectCount":1,"projects":[{"id":1,"name":"恐怖电梯","description":null}]},"timestamp":1766905434021,"sessionId":"debug-session","runId":"run1","hypothesisId":"E"}
+{"location":"index.html:inline-script","message":"HTML loaded, inline script executed","data":{},"timestamp":1766905622100,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"index.html:module-script-start","message":"Module script starting, about to import main.js","data":{},"timestamp":1766905622186,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"client.js:38","message":"baseURL found on window","data":{"url":"http://127.0.0.1:57799"},"timestamp":1766905622538,"sessionId":"debug-session","runId":"run2","hypothesisId":"B"}
+{"location":"main.js:start","message":"main.js starting","data":{},"timestamp":1766905622542,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"main.js:app-created","message":"Vue app created","data":{},"timestamp":1766905622542,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"main.js:pinia-added","message":"Pinia added","data":{},"timestamp":1766905622543,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"main.js:router-added","message":"Router added","data":{},"timestamp":1766905622544,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"App.vue:onMounted","message":"App.vue onMounted called","data":{},"timestamp":1766905622552,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"projectStore.js:24","message":"store.init called","data":{},"timestamp":1766905622553,"sessionId":"debug-session","runId":"run1","hypothesisId":"E"}
+{"location":"main.js:mounted","message":"App mounted","data":{"hasRoot":true},"timestamp":1766905622554,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"projectStore.js:27","message":"getProjects response","data":{"projectCount":1,"projects":[{"id":1,"name":"恐怖电梯","description":null}]},"timestamp":1766905622571,"sessionId":"debug-session","runId":"run1","hypothesisId":"E"}
+{"location":"index.html:unhandled-rejection","message":"Unhandled promise rejection","data":{"reason":"The `Dialog` module is not enabled. You must enable one of its APIs in the allowlist."},"timestamp":1766905928168,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"index.html:unhandled-rejection","message":"Unhandled promise rejection","data":{"reason":"The `Dialog` module is not enabled. You must enable one of its APIs in the allowlist."},"timestamp":1766911098556,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"index.html:unhandled-rejection","message":"Unhandled promise rejection","data":{"reason":"The `Dialog` module is not enabled. You must enable one of its APIs in the allowlist."},"timestamp":1766911102466,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"index.html:unhandled-rejection","message":"Unhandled promise rejection","data":{"reason":"The `Dialog` module is not enabled. You must enable one of its APIs in the allowlist."},"timestamp":1766911311680,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"index.html:unhandled-rejection","message":"Unhandled promise rejection","data":{"reason":"The `Dialog` module is not enabled. You must enable one of its APIs in the allowlist."},"timestamp":1766911311714,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"index.html:unhandled-rejection","message":"Unhandled promise rejection","data":{"reason":"The `Dialog` module is not enabled. You must enable one of its APIs in the allowlist."},"timestamp":1766911335503,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"index.html:unhandled-rejection","message":"Unhandled promise rejection","data":{"reason":"The `Dialog` module is not enabled. You must enable one of its APIs in the allowlist."},"timestamp":1766911339513,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"index.html:unhandled-rejection","message":"Unhandled promise rejection","data":{"reason":"The `Dialog` module is not enabled. You must enable one of its APIs in the allowlist."},"timestamp":1766911341989,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"index.html:inline-script","message":"HTML loaded, inline script executed","data":{},"timestamp":1766912080453,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"index.html:module-script-start","message":"Module script starting, about to import main.js","data":{},"timestamp":1766912080540,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"client.js:41","message":"baseURL not found, polling for injection","data":{"defaultUrl":"http://localhost:8000"},"timestamp":1766912080891,"sessionId":"debug-session","runId":"run2","hypothesisId":"B"}
+{"location":"main.js:start","message":"main.js starting","data":{},"timestamp":1766912080895,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"main.js:app-created","message":"Vue app created","data":{},"timestamp":1766912080896,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"main.js:pinia-added","message":"Pinia added","data":{},"timestamp":1766912080896,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"main.js:router-added","message":"Router added","data":{},"timestamp":1766912080898,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"App.vue:onMounted","message":"App.vue onMounted called","data":{},"timestamp":1766912080905,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"projectStore.js:24","message":"store.init called","data":{},"timestamp":1766912080906,"sessionId":"debug-session","runId":"run1","hypothesisId":"E"}
+{"location":"main.js:mounted","message":"App mounted","data":{"hasRoot":true},"timestamp":1766912080907,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"client.js:33","message":"baseURL event received","data":{"url":"http://127.0.0.1:62609"},"timestamp":1766912080912,"sessionId":"debug-session","runId":"run2","hypothesisId":"B"}
+{"location":"projectStore.js:33","message":"store.init error","data":{"error":"Network Error"},"timestamp":1766912080929,"sessionId":"debug-session","runId":"run1","hypothesisId":"E"}
+{"location":"client.js:50","message":"baseURL found via polling","data":{"url":"http://127.0.0.1:62609","pollCount":1},"timestamp":1766912080993,"sessionId":"debug-session","runId":"run2","hypothesisId":"B"}
+{"location":"projectStore.js:24","message":"store.init called","data":{},"timestamp":1766912084334,"sessionId":"debug-session","runId":"run1","hypothesisId":"E"}
+{"location":"projectStore.js:27","message":"getProjects response","data":{"projectCount":1,"projects":[{"id":1,"name":"恐怖电梯","description":null}]},"timestamp":1766912084359,"sessionId":"debug-session","runId":"run1","hypothesisId":"E"}
+{"location":"index.html:unhandled-rejection","message":"Unhandled promise rejection","data":{"reason":"The `Dialog` module is not enabled. You must enable one of its APIs in the allowlist."},"timestamp":1766912098357,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"index.html:unhandled-rejection","message":"Unhandled promise rejection","data":{"reason":"The `Dialog` module is not enabled. You must enable one of its APIs in the allowlist."},"timestamp":1766912105459,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"index.html:unhandled-rejection","message":"Unhandled promise rejection","data":{"reason":"The `Dialog` module is not enabled. You must enable one of its APIs in the allowlist."},"timestamp":1766912111178,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"index.html:unhandled-rejection","message":"Unhandled promise rejection","data":{"reason":"The `Dialog` module is not enabled. You must enable one of its APIs in the allowlist."},"timestamp":1766912120881,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"index.html:inline-script","message":"HTML loaded, inline script executed","data":{},"timestamp":1766915956497,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"index.html:module-script-start","message":"Module script starting, about to import main.js","data":{},"timestamp":1766915956733,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"client.js:41","message":"baseURL not found, polling for injection","data":{"defaultUrl":"http://localhost:8000"},"timestamp":1766915957087,"sessionId":"debug-session","runId":"run2","hypothesisId":"B"}
+{"location":"main.js:start","message":"main.js starting","data":{},"timestamp":1766915957091,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"main.js:app-created","message":"Vue app created","data":{},"timestamp":1766915957092,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"main.js:pinia-added","message":"Pinia added","data":{},"timestamp":1766915957093,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"main.js:router-added","message":"Router added","data":{},"timestamp":1766915957094,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"App.vue:onMounted","message":"App.vue onMounted called","data":{},"timestamp":1766915957102,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"projectStore.js:24","message":"store.init called","data":{},"timestamp":1766915957103,"sessionId":"debug-session","runId":"run1","hypothesisId":"E"}
+{"location":"main.js:mounted","message":"App mounted","data":{"hasRoot":true},"timestamp":1766915957105,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"projectStore.js:33","message":"store.init error","data":{"error":"Network Error"},"timestamp":1766915957118,"sessionId":"debug-session","runId":"run1","hypothesisId":"E"}
+{"location":"projectStore.js:24","message":"store.init called","data":{},"timestamp":1766915959114,"sessionId":"debug-session","runId":"run1","hypothesisId":"E"}
+{"location":"projectStore.js:33","message":"store.init error","data":{"error":"Network Error"},"timestamp":1766915959123,"sessionId":"debug-session","runId":"run1","hypothesisId":"E"}
+{"location":"projectStore.js:24","message":"store.init called","data":{},"timestamp":1766915962091,"sessionId":"debug-session","runId":"run1","hypothesisId":"E"}
+{"location":"projectStore.js:33","message":"store.init error","data":{"error":"Network Error"},"timestamp":1766915962098,"sessionId":"debug-session","runId":"run1","hypothesisId":"E"}
+{"location":"client.js:56","message":"baseURL polling timeout, using default","data":{"defaultUrl":"http://localhost:8000"},"timestamp":1766915962126,"sessionId":"debug-session","runId":"run2","hypothesisId":"B"}
+{"location":"projectStore.js:24","message":"store.init called","data":{},"timestamp":1766915964062,"sessionId":"debug-session","runId":"run1","hypothesisId":"E"}
+{"location":"projectStore.js:33","message":"store.init error","data":{"error":"Network Error"},"timestamp":1766915964067,"sessionId":"debug-session","runId":"run1","hypothesisId":"E"}
+{"location":"index.html:inline-script","message":"HTML loaded, inline script executed","data":{},"timestamp":1766916172105,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"index.html:module-script-start","message":"Module script starting, about to import main.js","data":{},"timestamp":1766916172187,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"client.js:41","message":"baseURL not found, polling for injection","data":{"defaultUrl":"http://localhost:8000"},"timestamp":1766916172534,"sessionId":"debug-session","runId":"run2","hypothesisId":"B"}
+{"location":"main.js:start","message":"main.js starting","data":{},"timestamp":1766916172537,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"main.js:app-created","message":"Vue app created","data":{},"timestamp":1766916172538,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"main.js:pinia-added","message":"Pinia added","data":{},"timestamp":1766916172538,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"main.js:router-added","message":"Router added","data":{},"timestamp":1766916172540,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"App.vue:onMounted","message":"App.vue onMounted called","data":{},"timestamp":1766916172547,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"projectStore.js:24","message":"store.init called","data":{},"timestamp":1766916172548,"sessionId":"debug-session","runId":"run1","hypothesisId":"E"}
+{"location":"main.js:mounted","message":"App mounted","data":{"hasRoot":true},"timestamp":1766916172550,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"projectStore.js:33","message":"store.init error","data":{"error":"Network Error"},"timestamp":1766916172567,"sessionId":"debug-session","runId":"run1","hypothesisId":"E"}
+{"location":"client.js:56","message":"baseURL polling timeout, using default","data":{"defaultUrl":"http://localhost:8000"},"timestamp":1766916177581,"sessionId":"debug-session","runId":"run2","hypothesisId":"B"}
+{"location":"index.html:inline-script","message":"HTML loaded, inline script executed","data":{},"timestamp":1766917282874,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"index.html:module-script-start","message":"Module script starting, about to import main.js","data":{},"timestamp":1766917282968,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"client.js:38","message":"baseURL found on window","data":{"url":"http://127.0.0.1:53108"},"timestamp":1766917283319,"sessionId":"debug-session","runId":"run2","hypothesisId":"B"}
+{"location":"main.js:start","message":"main.js starting","data":{},"timestamp":1766917283323,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"main.js:app-created","message":"Vue app created","data":{},"timestamp":1766917283324,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"main.js:pinia-added","message":"Pinia added","data":{},"timestamp":1766917283324,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"main.js:router-added","message":"Router added","data":{},"timestamp":1766917283326,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"App.vue:onMounted","message":"App.vue onMounted called","data":{},"timestamp":1766917283334,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"projectStore.js:24","message":"store.init called","data":{},"timestamp":1766917283335,"sessionId":"debug-session","runId":"run1","hypothesisId":"E"}
+{"location":"main.js:mounted","message":"App mounted","data":{"hasRoot":true},"timestamp":1766917283336,"sessionId":"debug-session","runId":"run4","hypothesisId":"F"}
+{"location":"projectStore.js:27","message":"getProjects response","data":{"projectCount":1,"projects":[{"id":1,"name":"恐怖电梯","description":null}]},"timestamp":1766917283353,"sessionId":"debug-session","runId":"run1","hypothesisId":"E"}
+{"location": "projects.py:48", "message": "create_project called", "data": {"name": "\u91cd\u751f\u540e\uff0c\u6211\u7684\u8001\u677f\u7adf\u7136\u8fd8\u6562pua", "description": null}, "timestamp": 1767452288942, "sessionId": "debug-session", "runId": "run1", "hypothesisId": "D"}
+{"location": "projects.py:54", "message": "create_project success", "data": {"id": 2, "name": "\u91cd\u751f\u540e\uff0c\u6211\u7684\u8001\u677f\u7adf\u7136\u8fd8\u6562pua"}, "timestamp": 1767452288948, "sessionId": "debug-session", "runId": "run1", "hypothesisId": "D"}

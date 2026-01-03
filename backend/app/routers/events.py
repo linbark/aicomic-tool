@@ -80,6 +80,17 @@ def update_event(event_id: int, event_update: schemas.EventUpdate, db: Session =
     db.refresh(db_event)
     return db_event
 
+
+# 删除事件（级联删除 EventNode）
+@router.delete("/{event_id}")
+def delete_event(event_id: int, db: Session = Depends(get_db)):
+    db_event = db.query(models.Event).filter(models.Event.id == event_id).first()
+    if not db_event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    db.delete(db_event)
+    db.commit()
+    return {"message": "Event deleted"}
+
 @router.get("/matrix/{project_id}")
 def get_event_matrix(project_id: int, db: Session = Depends(get_db)):
     """
