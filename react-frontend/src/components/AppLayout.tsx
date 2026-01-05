@@ -8,7 +8,7 @@ export function AppLayout({ children }: Props) {
   return (
     <div style={styles.shell}>
       <aside style={styles.sidebar}>
-        <div style={styles.brand}>AIComicTool</div>
+        <div style={styles.brand}>星晴</div>
         <nav style={styles.nav}>
           <NavItem to="/script" label="剧本" />
           <NavItem to="/events" label="事件" />
