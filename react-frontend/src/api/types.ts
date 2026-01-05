@@ -23,6 +23,14 @@ export interface AiTestResponse {
   detail?: string | null
 }
 
+export interface OutlineGenerateRequest {
+  text: string
+}
+
+export interface OutlineGenerateResponse {
+  text: string
+}
+
 export interface OutlineOptimizeRequest {
   text: string
 }
@@ -37,6 +45,87 @@ export interface ScriptGenerateRequest {
 
 export interface ScriptGenerateResponse {
   text: string
+}
+
+export interface ScriptOptimizeRequest {
+  text: string
+}
+
+export interface ScriptOptimizeResponse {
+  text: string
+}
+
+export interface WorkflowScriptOptions {
+  qc_loops?: number
+  max_scenes?: number
+  derived_split_scenes?: boolean
+}
+
+export interface WorkflowScriptRequest {
+  project_id: ID
+  input_text: string
+  options?: WorkflowScriptOptions
+}
+
+export interface WorkflowScriptResponse {
+  run_id: string
+  series_bible: Record<string, unknown>
+  beat_sheet: Record<string, unknown>[]
+  script_fountain: string
+  qc_report: Record<string, unknown>
+  derived?: Record<string, unknown> | null
+}
+
+export interface WorkflowStoryboardOptions {
+  max_shots?: number
+  asset_item_ids?: ID[]
+}
+
+export interface WorkflowStoryboardRequest {
+  project_id: ID
+  scene_text: string
+  options?: WorkflowStoryboardOptions
+}
+
+export interface WorkflowStoryboardResponse {
+  run_id: string
+  shots: Record<string, unknown>[]
+}
+
+export interface ApplyScriptWorkflowRequest {
+  project_id: ID
+  episode_id: ID
+  run_id: string
+  overwrite_scenes?: boolean
+}
+
+export interface ApplyStoryboardWorkflowRequest {
+  project_id: ID
+  scene_id: ID
+  run_id: string
+  overwrite_shots?: boolean
+}
+
+export interface AiActionRunRead {
+  id: ID
+  project_id: ID
+  target_type: 'episode'
+  target_id: ID
+  action_key: string
+  input_text?: string | null
+  output_text: string
+  meta_data?: Record<string, unknown> | null
+  created_at: string
+}
+
+export interface AiActionRunCreate {
+  project_id: ID
+  target_type?: 'episode'
+  target_id: ID
+  action_key: string
+  input_text?: string | null
+  output_text: string
+  meta_data?: Record<string, unknown> | null
 }
 
 export interface PromptTemplateRead {

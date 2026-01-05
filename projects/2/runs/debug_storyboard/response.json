@@ -1,0 +1,15 @@
+{
+  "run_id": "debug_storyboard",
+  "shots": [
+    {
+      "title": "S1",
+      "action_text": "A走进房间",
+      "dialogue": "你好",
+      "shot_size": "MS",
+      "camera_angle": "EYE",
+      "lighting_style": "SOFT",
+      "prompt": "tag1,tag2",
+      "negative_prompt": "bad,lowres"
+    }
+  ]
+}

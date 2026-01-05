@@ -3,7 +3,7 @@ import os
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from .routers import storyboard, assets, projects, events, ai
+from .routers import storyboard, assets, projects, events, ai, ai_runs
 from .database import engine, Base
 from sqlalchemy import text
 
@@ -61,8 +61,42 @@ def ensure_episode_scene_description_columns():
     except Exception as e:
         print(f"[Migration][Warning] ensure_episode_scene_description_columns failed: {e}")
 
+def ensure_ai_action_runs_table():
+    """
+    轻量 SQLite 迁移：
+    - 创建 ai_action_runs 表（用于按钮输出历史）
+    说明：Base.metadata.create_all 通常已会创建表；这里再加一道 IF NOT EXISTS，确保老环境可用。
+    """
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+CREATE TABLE IF NOT EXISTS ai_action_runs (
+  id INTEGER PRIMARY KEY,
+  project_id INTEGER NOT NULL,
+  target_type TEXT NOT NULL DEFAULT 'episode',
+  target_id INTEGER NOT NULL,
+  action_key TEXT NOT NULL,
+  input_text TEXT,
+  output_text TEXT NOT NULL,
+  meta_data JSON,
+  created_at DATETIME DEFAULT (CURRENT_TIMESTAMP),
+  FOREIGN KEY(project_id) REFERENCES projects (id)
+);
+"""
+                )
+            )
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_ai_action_runs_project_id ON ai_action_runs (project_id)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_ai_action_runs_target ON ai_action_runs (target_type, target_id)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_ai_action_runs_action_key ON ai_action_runs (action_key)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_ai_action_runs_created_at ON ai_action_runs (created_at)"))
+    except Exception as e:
+        print(f"[Migration][Warning] ensure_ai_action_runs_table failed: {e}")
+
 ensure_characters_category_column()
 ensure_episode_scene_description_columns()
+ensure_ai_action_runs_table()
 
 app = FastAPI(title="AI Comic Studio")
 
@@ -83,6 +117,7 @@ app.include_router(assets.router)
 app.include_router(projects.router)
 app.include_router(events.router)
 app.include_router(ai.router)
+app.include_router(ai_runs.router)
 
 @app.get("/")
 def read_root():

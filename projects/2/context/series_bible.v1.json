@@ -1,0 +1,10 @@
+{
+  "world_rules": {
+    "tech": "low"
+  },
+  "characters": [
+    {
+      "name": "A"
+    }
+  ]
+}

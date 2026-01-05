@@ -1,0 +1,12 @@
+{
+  "run_id": "debug_run",
+  "script_fountain": "INT. ROOM\n\nA\nHello.",
+  "derived": {
+    "scenes": [
+      {
+        "title": "场1",
+        "description": "desc1"
+      }
+    ]
+  }
+}

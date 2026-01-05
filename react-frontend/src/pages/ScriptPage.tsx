@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import api, { getApiBaseUrl } from '../api/client'
-import type { EpisodeRead, SceneRead, ShotRead, SplitSceneItem, SplitShotItem } from '../api/types'
+import type { AiActionRunRead, EpisodeRead, SceneRead, ShotRead, SplitSceneItem, SplitShotItem } from '../api/types'
 import { useProjectSelection } from '../state/useProjectSelection'
 
 type SplitScenePreview = SplitSceneItem & { _key: string }
@@ -64,6 +64,39 @@ export function ScriptPage() {
   const [aiWritingError, setAiWritingError] = useState<string | null>(null)
   const [aiResult, setAiResult] = useState<{ title: string; text: string } | null>(null)
 
+  // Workflow：生成与应用（run_id 驱动 apply-to-db）
+  const [workflowBusy, setWorkflowBusy] = useState<'script' | 'storyboard' | 'apply_script' | 'apply_storyboard' | null>(null)
+  const [workflowError, setWorkflowError] = useState<string | null>(null)
+  const [lastWorkflowRunId, setLastWorkflowRunId] = useState<string | null>(null)
+  const [lastWorkflowKind, setLastWorkflowKind] = useState<'script' | 'storyboard' | null>(null)
+
+  // EP 按钮输出历史（DB）
+  type EpActionKey = 'outline_generate' | 'outline_optimize' | 'generate_script' | 'script_optimize' | 'split_scenes'
+  const EP_ACTIONS: { key: EpActionKey; title: string; canApply: boolean }[] = [
+    { key: 'outline_generate', title: '大纲生成', canApply: true },
+    { key: 'outline_optimize', title: '大纲优化', canApply: true },
+    { key: 'generate_script', title: '剧本生成', canApply: true },
+    { key: 'script_optimize', title: '剧本优化', canApply: true },
+    { key: 'split_scenes', title: '自动分场', canApply: true },
+  ]
+  const [epActionTab, setEpActionTab] = useState<EpActionKey>('outline_generate')
+  const [workstationInput, setWorkstationInput] = useState('')
+
+  const [epRuns, setEpRuns] = useState<Record<EpActionKey, AiActionRunRead[]>>({
+    outline_generate: [],
+    outline_optimize: [],
+    generate_script: [],
+    script_optimize: [],
+    split_scenes: [],
+  })
+  const [epSelectedRunId, setEpSelectedRunId] = useState<Record<EpActionKey, number | null>>({
+    outline_generate: null,
+    outline_optimize: null,
+    generate_script: null,
+    script_optimize: null,
+    split_scenes: null,
+  })
+
   // 项目列表与 projectId 由 useProjectSelection 统一管理（含 localStorage 记忆）
 
   const selectedEpisode = useMemo(() => {
@@ -96,6 +129,21 @@ export function ScriptPage() {
     setSplitScenesPreview([])
     setStoryboardPreview([])
     setShotDraft(null)
+    setEpActionTab('outline_generate')
+    setEpRuns({
+      outline_generate: [],
+      outline_optimize: [],
+      generate_script: [],
+      script_optimize: [],
+      split_scenes: [],
+    })
+    setEpSelectedRunId({
+      outline_generate: null,
+      outline_optimize: null,
+      generate_script: null,
+      script_optimize: null,
+      split_scenes: null,
+    })
   }
 
   const currentProject = useMemo(() => {
@@ -117,6 +165,7 @@ export function ScriptPage() {
       setEpisodeDescription(ep?.description || '')
       setSplitScenesPreview([])
       setSplitError(null)
+      refreshEpRuns(selected.episodeId).catch(() => {})
       return
     }
     if (selected.kind === 'scene') {
@@ -134,6 +183,109 @@ export function ScriptPage() {
     }
     setShotDraft(null)
   }, [episodes, selected, selectedShot])
+
+  // 自动填充 Input 的逻辑
+  useEffect(() => {
+    if (selected.kind !== 'episode') return
+    // 切换 Tab 时，若 input 为空，尝试自动填充
+    // 逻辑：
+    // outline_generate -> 留空 (由用户填 logline)
+    // outline_optimize -> 优先取 outline_generate 的最新 output，否则取 episodeDescription
+    // generate_script -> 优先取 outline_optimize 的最新 output，否则取 episodeDescription
+    // script_optimize -> 优先取 generate_script 的最新 output，否则取 episodeDescription
+    // split_scenes -> 优先取 script_optimize 的最新 output，否则取 episodeDescription
+
+    let candidate = ''
+    if (epActionTab === 'outline_generate') {
+      // blank
+    } else if (epActionTab === 'outline_optimize') {
+      candidate = epRuns.outline_generate?.[0]?.output_text || episodeDescription
+    } else if (epActionTab === 'generate_script') {
+      candidate = epRuns.outline_optimize?.[0]?.output_text || episodeDescription
+    } else if (epActionTab === 'script_optimize') {
+      candidate = epRuns.generate_script?.[0]?.output_text || episodeDescription
+    } else if (epActionTab === 'split_scenes') {
+      candidate = epRuns.script_optimize?.[0]?.output_text || episodeDescription
+    }
+    
+    // 仅当 workstationInput 为空时填充，避免覆盖用户正在输入的内容
+    // 但如果切换 tab，通常希望看到对应的新 context。
+    // 简化策略：切换 tab 时总是重置 input 为 candidate
+    setWorkstationInput(candidate)
+  }, [epActionTab, selected, epRuns, episodeDescription])
+
+  async function refreshEpRuns(episodeId: number) {
+    if (!projectId) return
+    const epId = episodeId
+    try {
+      const results = await Promise.all(
+        EP_ACTIONS.map((a) => api.getAiRuns({ project_id: projectId, episode_id: epId, action_key: a.key, limit: 50 })),
+      )
+      const next: any = {}
+      const nextSel: any = {}
+      EP_ACTIONS.forEach((a, idx) => {
+        const list = results[idx].data || []
+        next[a.key] = list
+        nextSel[a.key] = list.length ? list[0].id : null
+      })
+      setEpRuns(next)
+      setEpSelectedRunId(nextSel)
+    } catch {
+      // ignore（不阻断主流程）
+    }
+  }
+
+  async function appendEpRun(action_key: EpActionKey, input_text: string | null, output_text: string, meta_data?: Record<string, unknown>) {
+    if (!projectId) return
+    if (selected.kind !== 'episode') return
+    const episodeId = selected.episodeId
+    try {
+      const res = await api.createAiRun({
+        project_id: projectId,
+        target_type: 'episode',
+        target_id: episodeId,
+        action_key,
+        input_text,
+        output_text,
+        meta_data: meta_data || null,
+      })
+      const created = res.data
+      setEpRuns((prev) => ({ ...prev, [action_key]: [created, ...(prev[action_key] || [])] }))
+      setEpSelectedRunId((prev) => ({ ...prev, [action_key]: created.id }))
+      setEpActionTab(action_key)
+    } catch {
+      // ignore
+    }
+  }
+
+  const selectedEpRun = useMemo(() => {
+    const list = epRuns[epActionTab] || []
+    const rid = epSelectedRunId[epActionTab]
+    return list.find((x) => x.id === rid) || null
+  }, [epRuns, epActionTab, epSelectedRunId])
+
+  function applyEpRunToEditor(run: AiActionRunRead | null) {
+    if (!run) return
+    if (epActionTab === 'split_scenes') {
+      // split_scenes: 尝试把 output_text 解析为分场列表，写入预览区
+      try {
+        const parsed = JSON.parse(run.output_text || 'null')
+        if (Array.isArray(parsed)) {
+          setSplitScenesPreview(
+            parsed.map((x: any, idx: number) => ({
+              _key: `${run.id}-${idx}`,
+              title: String(x?.title || `场${idx + 1}`),
+              description: String(x?.description || ''),
+            })),
+          )
+          return
+        }
+      } catch {
+        // fallthrough
+      }
+    }
+    setEpisodeDescription(run.output_text || '')
+  }
 
   const nextEpisodeOrder = useMemo(() => {
     return episodes.length > 0 ? Math.max(...episodes.map((e) => e.order || 0)) + 1 : 1
@@ -265,27 +417,73 @@ export function ScriptPage() {
     setSelected({ kind: 'shot', episodeId: selected.episodeId, sceneId: selected.sceneId, shotId: selected.shotId })
   }
 
-  async function handleDeleteEpisode(episodeId: number) {
-    if (!window.confirm('确定删除该集？')) return
-    await api.deleteEpisode(episodeId)
-    await refreshScript(projectId)
+  async function handleOutlineGenerate() {
+    if (selected.kind !== 'episode') return
+    const text = workstationInput.trim()
+    if (!text) return
+    setAiWritingBusy('outline')
+    setAiWritingError(null)
+    try {
+      const res = await api.aiOutlineGenerate({ text })
+      await appendEpRun('outline_generate', text, res.data?.text || '')
+    } catch (e: any) {
+      setAiWritingError(e?.response?.data?.detail || e?.message || '大纲生成失败')
+    } finally {
+      setAiWritingBusy(null)
+    }
   }
 
-  async function handleDeleteScene(sceneId: number) {
-    if (!window.confirm('确定删除该场？（会同时清理场下镜头与文件夹）')) return
-    await api.deleteScene(sceneId)
-    await refreshScript(projectId)
+  async function handleOutlineOptimize() {
+    if (selected.kind !== 'episode') return
+    const text = workstationInput.trim()
+    if (!text) return
+    setAiWritingBusy('outline')
+    setAiWritingError(null)
+    try {
+      const res = await api.aiOutlineOptimize({ text })
+      await appendEpRun('outline_optimize', text, res.data?.text || '')
+    } catch (e: any) {
+      setAiWritingError(e?.response?.data?.detail || e?.message || '大纲优化失败')
+    } finally {
+      setAiWritingBusy(null)
+    }
   }
 
-  async function handleDeleteShot(shotId: number) {
-    if (!window.confirm('确定删除该镜头？（会同时删除素材文件）')) return
-    await api.deleteShot(shotId)
-    await refreshScript(projectId)
+  async function handleGenerateScript() {
+    if (selected.kind !== 'episode') return
+    const text = workstationInput.trim()
+    if (!text) return
+    setAiWritingBusy('script')
+    setAiWritingError(null)
+    try {
+      const res = await api.aiGenerateScript({ text })
+      await appendEpRun('generate_script', text, res.data?.text || '')
+    } catch (e: any) {
+      setAiWritingError(e?.response?.data?.detail || e?.message || '剧本生成失败')
+    } finally {
+      setAiWritingBusy(null)
+    }
+  }
+
+  async function handleScriptOptimize() {
+    if (selected.kind !== 'episode') return
+    const text = workstationInput.trim()
+    if (!text) return
+    setAiWritingBusy('script')
+    setAiWritingError(null)
+    try {
+      const res = await api.aiScriptOptimize({ text })
+      await appendEpRun('script_optimize', text, res.data?.text || '')
+    } catch (e: any) {
+      setAiWritingError(e?.response?.data?.detail || e?.message || '剧本优化失败')
+    } finally {
+      setAiWritingBusy(null)
+    }
   }
 
   async function handleAutoSplit() {
     if (selected.kind !== 'episode') return
-    const text = (episodeDescription || '').trim()
+    const text = workstationInput.trim()
     if (!text) return
     setIsSplitting(true)
     setSplitError(null)
@@ -299,42 +497,16 @@ export function ScriptPage() {
           description: it.description,
         })),
       )
+      await appendEpRun(
+        'split_scenes',
+        text,
+        JSON.stringify(list.map((x) => ({ title: x.title, description: x.description })), null, 2),
+        { scenes: list.length },
+      )
     } catch (e: any) {
       setSplitError(e?.response?.data?.detail || e?.message || '自动分场失败')
     } finally {
       setIsSplitting(false)
-    }
-  }
-
-  async function handleOutlineOptimize() {
-    if (selected.kind !== 'episode') return
-    const text = (episodeDescription || '').trim()
-    if (!text) return
-    setAiWritingBusy('outline')
-    setAiWritingError(null)
-    try {
-      const res = await api.aiOutlineOptimize({ text })
-      setAiResult({ title: '大纲优化结果', text: res.data?.text || '' })
-    } catch (e: any) {
-      setAiWritingError(e?.response?.data?.detail || e?.message || '大纲优化失败')
-    } finally {
-      setAiWritingBusy(null)
-    }
-  }
-
-  async function handleGenerateScript() {
-    if (selected.kind !== 'episode') return
-    const text = (episodeDescription || '').trim()
-    if (!text) return
-    setAiWritingBusy('script')
-    setAiWritingError(null)
-    try {
-      const res = await api.aiGenerateScript({ text })
-      setAiResult({ title: '剧本生成结果', text: res.data?.text || '' })
-    } catch (e: any) {
-      setAiWritingError(e?.response?.data?.detail || e?.message || '剧本生成失败')
-    } finally {
-      setAiWritingBusy(null)
     }
   }
 
@@ -675,99 +847,145 @@ export function ScriptPage() {
                     <span style={styles.mono}>EP{selectedEpisode.order}</span> {selectedEpisode.title}
                   </div>
                   <button style={styles.btnPrimary} onClick={() => saveEpisodeScript().catch(() => {})}>
-                    保存修改
+                    保存剧本到云端
                   </button>
                 </div>
 
-                <div style={styles.labelRow}>
-                  <div style={styles.label}>剧本内容</div>
-                  <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                {/* Workstation Tabs */}
+                <div style={{ display: 'flex', gap: 2, borderBottom: '1px solid rgba(255,255,255,0.1)' }}>
+                  {EP_ACTIONS.map((a) => (
                     <button
-                      style={styles.btn}
-                      onClick={() => handleOutlineOptimize().catch(() => {})}
-                      disabled={aiWritingBusy !== null || !episodeDescription.trim()}
-                      title="对当前文本进行大纲优化（可在 Prompt 模板中配置）"
+                      key={a.key}
+                      style={{
+                        ...styles.tabBtn,
+                        ...(epActionTab === a.key ? styles.tabBtnActive : {}),
+                      }}
+                      onClick={() => setEpActionTab(a.key)}
                     >
-                      {aiWritingBusy === 'outline' ? '优化中…' : '优化大纲'}
+                      {a.title}
                     </button>
-                    <button
-                      style={styles.btn}
-                      onClick={() => handleGenerateScript().catch(() => {})}
-                      disabled={aiWritingBusy !== null || !episodeDescription.trim()}
-                      title="根据当前文本生成剧本（可在 Prompt 模板中配置）"
-                    >
-                      {aiWritingBusy === 'script' ? '生成中…' : '生成剧本'}
-                    </button>
-                    <button
-                      style={styles.btn}
-                      onClick={() => handleAutoSplit().catch(() => {})}
-                      disabled={isSplitting || !episodeDescription.trim()}
-                      title="自动分场"
-                    >
-                      {isSplitting ? '分场中…' : '自动分场'}
-                    </button>
+                  ))}
+                </div>
+
+                {/* Workstation Body: Input & Output */}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, height: 420 }}>
+                  {/* Left: Input */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    <div style={styles.labelRow}>
+                      <div style={styles.label}>输入 (Input)</div>
+                      <button
+                        style={styles.btnPrimary}
+                        disabled={
+                          aiWritingBusy !== null || isSplitting || !workstationInput.trim()
+                        }
+                        onClick={() => {
+                          if (epActionTab === 'outline_generate') handleOutlineGenerate().catch(() => {})
+                          else if (epActionTab === 'outline_optimize') handleOutlineOptimize().catch(() => {})
+                          else if (epActionTab === 'generate_script') handleGenerateScript().catch(() => {})
+                          else if (epActionTab === 'script_optimize') handleScriptOptimize().catch(() => {})
+                          else if (epActionTab === 'split_scenes') handleAutoSplit().catch(() => {})
+                        }}
+                      >
+                        {aiWritingBusy || isSplitting ? '运行中...' : '开始执行'}
+                      </button>
+                    </div>
+                    <textarea
+                      value={workstationInput}
+                      onChange={(e) => setWorkstationInput(e.target.value)}
+                      style={{ ...styles.textarea, flex: 1, height: 'auto' }}
+                      placeholder={
+                        epActionTab === 'outline_generate' ? '输入故事概念、Logline...' :
+                        epActionTab === 'outline_optimize' ? '输入大纲草稿...' :
+                        epActionTab === 'generate_script' ? '输入大纲...' :
+                        '输入剧本...'
+                      }
+                    />
+                    {aiWritingError || splitError ? (
+                      <div style={{ color: '#f87171', fontSize: 12, whiteSpace: 'pre-wrap' }}>
+                        {typeof (aiWritingError || splitError) === 'object'
+                          ? JSON.stringify(aiWritingError || splitError, null, 2)
+                          : String(aiWritingError || splitError)}
+                      </div>
+                    ) : null}
+                  </div>
+
+                  {/* Right: Output */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    <div style={styles.labelRow}>
+                      <div style={styles.label}>输出 (Output)</div>
+                      <div style={{ display: 'flex', gap: 8 }}>
+                        <select
+                          value={epSelectedRunId[epActionTab] || ''}
+                          onChange={(e) => setEpSelectedRunId(p => ({ ...p, [epActionTab]: Number(e.target.value) }))}
+                          style={{ ...styles.select, maxWidth: 120 }}
+                        >
+                          {(epRuns[epActionTab] || []).length === 0 && <option value="">无记录</option>}
+                          {(epRuns[epActionTab] || []).map(r => (
+                            <option key={r.id} value={r.id}>#{r.id} {r.created_at.slice(5, 16)}</option>
+                          ))}
+                        </select>
+                        <button
+                          style={styles.btn}
+                          disabled={!selectedEpRun}
+                          onClick={() => applyEpRunToEditor(selectedEpRun)}
+                          title="应用到下方 Master 编辑器"
+                        >
+                          应用结果
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Output Display */}
+                    {epActionTab === 'split_scenes' ? (
+                      <div style={{ ...styles.textarea, flex: 1, height: 'auto', overflow: 'auto', background: 'rgba(0,0,0,0.25)' }}>
+                         {/* Split Scenes Preview List */}
+                         {splitScenesPreview.length === 0 ? (
+                            <div style={styles.empty}>暂无分场结果</div>
+                         ) : (
+                           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                              <div style={{ padding: 4, fontSize: 12, opacity: 0.7 }}>
+                                <button
+                                  style={styles.smallBtn}
+                                  disabled={isImporting}
+                                  onClick={() => handleImportScenes().catch(() => {})}
+                                >
+                                  {isImporting ? '导入中...' : '一键创建场景'}
+                                </button>
+                                <label style={{ marginLeft: 8 }}><input type="checkbox" checked={overwriteOnImport} onChange={e => setOverwriteOnImport(e.target.checked)} /> 覆盖</label>
+                              </div>
+                              {splitScenesPreview.map((sc, idx) => (
+                                <div key={sc._key} style={{ padding: 8, background: 'rgba(255,255,255,0.05)', borderRadius: 6 }}>
+                                  <div style={{ fontWeight: 700, fontSize: 12 }}>{sc.title}</div>
+                                  <div style={{ fontSize: 12, opacity: 0.8 }}>{sc.description}</div>
+                                </div>
+                              ))}
+                           </div>
+                         )}
+                      </div>
+                    ) : (
+                      <textarea
+                        readOnly
+                        value={selectedEpRun?.output_text || ''}
+                        style={{ ...styles.textarea, flex: 1, height: 'auto' }}
+                        placeholder="这里显示生成结果..."
+                      />
+                    )}
                   </div>
                 </div>
 
+                <div style={{ borderTop: '1px solid rgba(255,255,255,0.1)', margin: '12px 0' }} />
+
+                {/* Master Editor */}
+                <div style={styles.labelRow}>
+                  <div style={styles.label}>最终剧本 (Master Script)</div>
+                  <div style={{ fontSize: 12, opacity: 0.5 }}>此处内容对应数据库存储</div>
+                </div>
                 <textarea
                   value={episodeDescription}
                   onChange={(e) => setEpisodeDescription(e.target.value)}
-                  style={styles.textarea}
-                  placeholder="编写本集的剧本内容…"
+                  style={{ ...styles.textarea, height: 300 }}
+                  placeholder="本集的最终剧本内容..."
                 />
-
-                <div style={{ marginTop: 12 }}>
-                  {aiWritingError ? <div style={{ color: '#f87171', fontSize: 12, marginBottom: 8 }}>{aiWritingError}</div> : null}
-                  <div style={styles.labelRow}>
-                    <div style={styles.label}>分场预览 {splitScenesPreview.length ? `(${splitScenesPreview.length} 场)` : ''}</div>
-                    <label style={{ fontSize: 12, opacity: 0.8, display: 'flex', alignItems: 'center', gap: 6 }}>
-                      <input type="checkbox" checked={overwriteOnImport} onChange={(e) => setOverwriteOnImport(e.target.checked)} />
-                      覆盖导入（先清空本集已有场）
-                    </label>
-                    <button
-                      style={styles.btnPrimary}
-                      onClick={() => handleImportScenes().catch(() => {})}
-                      disabled={isImporting || splitScenesPreview.length === 0}
-                      title="一键导入为场"
-                    >
-                      {isImporting ? '导入中…' : '一键导入'}
-                    </button>
-                  </div>
-                  {splitError ? <div style={{ color: '#f87171', fontSize: 12 }}>{splitError}</div> : null}
-                  {splitScenesPreview.length === 0 ? (
-                    <div style={styles.emptyBox}>点击“自动分场”生成预览，然后点击“一键导入”创建场景。</div>
-                  ) : (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                      {splitScenesPreview.map((sc, idx) => (
-                        <div key={sc._key} style={styles.previewCard}>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-                            <span style={styles.miniMono}>SC{idx + 1}</span>
-                            <input
-                              value={sc.title}
-                              onChange={(e) => {
-                                const v = e.target.value
-                                setSplitScenesPreview((prev) => prev.map((x) => (x._key === sc._key ? { ...x, title: v } : x)))
-                              }}
-                              style={styles.input}
-                              placeholder="场标题"
-                            />
-                          </div>
-                          <textarea
-                            value={sc.description}
-                            onChange={(e) => {
-                              const v = e.target.value
-                              setSplitScenesPreview((prev) =>
-                                prev.map((x) => (x._key === sc._key ? { ...x, description: v } : x)),
-                              )
-                            }}
-                            style={{ ...styles.textarea, height: 120 }}
-                            placeholder="该场的文本内容…"
-                          />
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
               </section>
             ) : null}
 
@@ -793,6 +1011,22 @@ export function ScriptPage() {
                   >
                     {isStoryboardSplitting ? '分镜中…' : '自动分镜'}
                   </button>
+                  <button
+                    style={styles.btn}
+                    onClick={() => handleWorkflowStoryboard().catch(() => {})}
+                    disabled={workflowBusy !== null || !sceneDescription.trim()}
+                    title="后端多代理工作流：分镜 + prompt 翻译 + run 快照"
+                  >
+                    {workflowBusy === 'storyboard' ? 'Workflow中…' : 'Workflow分镜'}
+                  </button>
+                  <button
+                    style={styles.btnPrimary}
+                    onClick={() => handleApplyWorkflowStoryboard().catch(() => {})}
+                    disabled={workflowBusy !== null || lastWorkflowKind !== 'storyboard' || !lastWorkflowRunId}
+                    title="将上一次 Workflow 分镜写回 Shot.action_text/prompt/negative_prompt"
+                  >
+                    {workflowBusy === 'apply_storyboard' ? '应用中…' : '应用Workflow'}
+                  </button>
                 </div>
 
                 <textarea
@@ -803,6 +1037,10 @@ export function ScriptPage() {
                 />
 
                 <div style={{ marginTop: 12 }}>
+                  {workflowError ? <div style={{ color: '#f87171', fontSize: 12, marginBottom: 8 }}>{workflowError}</div> : null}
+                  {lastWorkflowRunId && lastWorkflowKind === 'storyboard' ? (
+                    <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 8 }}>最近 Workflow run_id：{lastWorkflowRunId}</div>
+                  ) : null}
                   <div style={styles.labelRow}>
                     <div style={styles.label}>分镜预览 {storyboardPreview.length ? `(${storyboardPreview.length} 镜)` : ''}</div>
                     <label style={{ fontSize: 12, opacity: 0.8, display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -1165,7 +1403,7 @@ const styles: Record<string, React.CSSProperties> = {
   },
   body: {
     display: 'grid',
-    gridTemplateColumns: '320px 320px 1fr',
+    gridTemplateColumns: '15% 15% 70%',
     gap: 12,
     minHeight: 'calc(100vh - 140px)',
   },
@@ -1368,6 +1606,20 @@ const styles: Record<string, React.CSSProperties> = {
     border: '1px solid rgba(255,255,255,0.10)',
     background: '#0b1220',
     padding: 14,
+  },
+  tabBtn: {
+    padding: '8px 16px',
+    cursor: 'pointer',
+    background: 'transparent',
+    border: 'none',
+    borderBottom: '2px solid transparent',
+    color: '#94a3b8',
+    fontSize: 13,
+    fontWeight: 600,
+  },
+  tabBtnActive: {
+    color: '#6366f1',
+    borderBottom: '2px solid #6366f1',
   },
 }
 

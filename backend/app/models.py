@@ -129,3 +129,28 @@ class EventNode(Base):
     description = Column(Text) # 该粒度下的描述
     
     event = relationship("Event", back_populates="nodes")
+
+
+# =======================
+# 4. AI 动作运行记录（按钮输出历史）
+# =======================
+
+class AiActionRun(Base):
+    __tablename__ = "ai_action_runs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), index=True, nullable=False)
+
+    # 先覆盖 episode 维度：target_type 固定 episode（后续可扩展 scene/shot）
+    target_type = Column(String, nullable=False, default="episode")
+    target_id = Column(Integer, nullable=False, index=True)  # episode_id
+
+    action_key = Column(String, nullable=False, index=True)  # outline_optimize/generate_script/...
+
+    input_text = Column(Text, nullable=True)
+    output_text = Column(Text, nullable=False)
+    meta_data = Column(JSON, nullable=True)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+    project = relationship("Project")

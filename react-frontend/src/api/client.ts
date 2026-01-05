@@ -4,6 +4,10 @@ import type {
   AiSettingsUpdate,
   AiTestResponse,
   AssetItemRead,
+  AiActionRunCreate,
+  AiActionRunRead,
+  ApplyScriptWorkflowRequest,
+  ApplyStoryboardWorkflowRequest,
   EpisodeRead,
   EventCreate,
   EventRead,
@@ -20,6 +24,10 @@ import type {
   ScriptGenerateResponse,
   SplitSceneItem,
   SplitShotItem,
+  WorkflowScriptRequest,
+  WorkflowScriptResponse,
+  WorkflowStoryboardRequest,
+  WorkflowStoryboardResponse,
 } from './types'
 
 let _apiBaseUrl =
@@ -137,13 +145,30 @@ export const api = {
   testAi: () => apiClient.post<AiTestResponse>(`/ai/test`),
   aiSplitScenes: (data: { text: string; max_scenes?: number }) => apiClient.post<SplitSceneItem[]>(`/ai/split-scenes`, data),
   aiSplitShots: (data: { text: string; max_shots?: number }) => apiClient.post<SplitShotItem[]>(`/ai/split-shots`, data),
+  aiOutlineGenerate: (data: { text: string }) => apiClient.post<{ text: string }>(`/ai/outline-generate`, data),
   aiOutlineOptimize: (data: OutlineOptimizeRequest) => apiClient.post<OutlineOptimizeResponse>(`/ai/outline-optimize`, data),
   aiGenerateScript: (data: ScriptGenerateRequest) => apiClient.post<ScriptGenerateResponse>(`/ai/generate-script`, data),
+  aiScriptOptimize: (data: { text: string }) => apiClient.post<{ text: string }>(`/ai/script-optimize`, data),
+  aiWorkflowScript: (data: WorkflowScriptRequest) => apiClient.post<WorkflowScriptResponse>(`/ai/workflows/script`, data),
+  aiWorkflowStoryboard: (data: WorkflowStoryboardRequest) => apiClient.post<WorkflowStoryboardResponse>(`/ai/workflows/storyboard`, data),
+  aiApplyWorkflowScript: (data: ApplyScriptWorkflowRequest) => apiClient.post(`/ai/workflows/script/apply`, data),
+  aiApplyWorkflowStoryboard: (data: ApplyStoryboardWorkflowRequest) => apiClient.post(`/ai/workflows/storyboard/apply`, data),
   getPromptTemplates: () => apiClient.get<PromptTemplateRead[]>(`/ai/prompts`),
   createPromptTemplate: (data: PromptTemplateCreate) => apiClient.post<PromptTemplateRead>(`/ai/prompts`, data),
   upsertPromptTemplate: (key: string, data: PromptTemplateUpsert) => apiClient.put<PromptTemplateRead>(`/ai/prompts/${encodeURIComponent(key)}`, data),
   resetPromptTemplate: (key: string) => apiClient.post<PromptTemplateRead>(`/ai/prompts/${encodeURIComponent(key)}/reset`),
   deletePromptTemplate: (key: string) => apiClient.delete(`/ai/prompts/${encodeURIComponent(key)}`),
+
+  // AI Runs（按钮输出历史）
+  getAiRuns: (params: { project_id: number; episode_id?: number; action_key?: string; limit?: number }) => {
+    const qs = new URLSearchParams()
+    qs.set('project_id', String(params.project_id))
+    if (typeof params.episode_id === 'number') qs.set('episode_id', String(params.episode_id))
+    if (params.action_key) qs.set('action_key', params.action_key)
+    if (typeof params.limit === 'number') qs.set('limit', String(params.limit))
+    return apiClient.get<AiActionRunRead[]>(`/ai/runs?${qs.toString()}`)
+  },
+  createAiRun: (data: AiActionRunCreate) => apiClient.post<AiActionRunRead>(`/ai/runs`, data),
 
   // 资产文件删除（Asset 表）
   deleteProjectAsset: (assetId: number) => apiClient.delete(`/projects/assets/${assetId}`),
