@@ -55,6 +55,14 @@ export default {
   
   // 资产
   addAsset: (shotId, filePath) => apiClient.post(`/assets/shot/${shotId}?file_path=${filePath}`),
+
+  // 图片反推 JSON（一致性层）
+  // - 推荐：走契约版路径 /api/v1/assets/ingest
+  // - 兼容：后端也提供 /assets/ingest
+  ingestVisualAssets: (data) => apiClient.post('/api/v1/assets/ingest', data),
+
+  // 多代理工作流（契约版）
+  runManjuWorkflow: (data) => apiClient.post('/api/v1/workflows/manju/run', data),
   
   // 事件
   getEvents: (projectId) => apiClient.get(`/events/project/${projectId}`),
