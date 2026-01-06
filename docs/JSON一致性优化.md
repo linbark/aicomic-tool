@@ -79,3 +79,24 @@
 ### 4. 总结
 
 使用 JSON 描述作为中间层，本质上是将**“Prompt Engineering”升级为“Configuration Engineering”**。它将模糊的自然语言变成了可版本控制、可校验的代码，这正是您作为架构师最擅长的领域。
+
+---
+
+## 实现状态
+
+✅ **已实现**（详见 `docs/architecture/workflow-implementation.md` Phase 3）：
+
+- **Visual DNA 摄取 API**: `POST /ai/visual-dna/ingest`
+  - 支持从图片文件路径自动提取 Visual DNA JSON
+  - 文件路径安全校验（必须在 `/files` 目录下）
+  - 自动写入 Context Store
+  - 生成 run 快照用于审计
+
+- **前端集成**: 在 `ContextPage` 的 Visual DNA 编辑器中，可选择资产条目的图片文件进行自动摄取
+
+- **当前限制**: LLM 接口为纯 chat，不支持真正的图片识别。当前实现通过文件路径和文件名进行推断，效果有限。后续可接入 GPT-4V、Claude Vision 等真正的 vision API。
+
+## 相关文档
+
+- [Workflow 功能实现文档](./architecture/workflow-implementation.md) - 完整的实现细节
+- [AI Workflows 架构设计](./architecture/ai-workflows.md) - 整体架构

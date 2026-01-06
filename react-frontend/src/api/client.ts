@@ -24,6 +24,8 @@ import type {
   ScriptGenerateResponse,
   SplitSceneItem,
   SplitShotItem,
+  VisualDnaIngestRequest,
+  VisualDnaIngestResponse,
   WorkflowScriptRequest,
   WorkflowScriptResponse,
   WorkflowStoryboardRequest,
@@ -53,6 +55,9 @@ export function getFileUrl(path: string) {
 
 const apiClient = axios.create({
   baseURL: _apiBaseUrl,
+  // 某些 WebView/XHR 环境可能存在默认超时，显式设置为较长时间以适配 workflow（多次 LLM 调用）
+  // 注意：单位是毫秒
+  timeout: 310_000,
   headers: {
     'Content-Type': 'application/json',
   },
@@ -169,6 +174,42 @@ export const api = {
     return apiClient.get<AiActionRunRead[]>(`/ai/runs?${qs.toString()}`)
   },
   createAiRun: (data: AiActionRunCreate) => apiClient.post<AiActionRunRead>(`/ai/runs`, data),
+
+  // Context 管理（Series Bible / Visual DNA）
+  getSeriesBible: (projectId: number, version: string = 'v1') => {
+    const qs = new URLSearchParams()
+    qs.set('project_id', String(projectId))
+    qs.set('version', version)
+    return apiClient.get(`/ai/context/series-bible?${qs.toString()}`)
+  },
+  putSeriesBible: (projectId: number, data: { data: Record<string, unknown>; version?: string }) => {
+    const qs = new URLSearchParams()
+    qs.set('project_id', String(projectId))
+    return apiClient.put(`/ai/context/series-bible?${qs.toString()}`, data)
+  },
+  getVisualDna: (projectId: number, itemId: number, version: string = 'v1') => {
+    const qs = new URLSearchParams()
+    qs.set('project_id', String(projectId))
+    qs.set('item_id', String(itemId))
+    qs.set('version', version)
+    return apiClient.get(`/ai/context/visual-dna?${qs.toString()}`)
+  },
+  putVisualDna: (projectId: number, itemId: number, data: { data: Record<string, unknown>; version?: string }) => {
+    const qs = new URLSearchParams()
+    qs.set('project_id', String(projectId))
+    qs.set('item_id', String(itemId))
+    return apiClient.put(`/ai/context/visual-dna?${qs.toString()}`, data)
+  },
+
+  // Run 快照审计
+  listRunFiles: (projectId: number) => apiClient.get(`/ai/runs-files?project_id=${projectId}`),
+  getRunFile: (projectId: number, runId: string) => apiClient.get(`/ai/runs-files/${encodeURIComponent(runId)}?project_id=${projectId}`),
+  listRunStages: (projectId: number, runId: string) => apiClient.get(`/ai/runs-files/${encodeURIComponent(runId)}/stages?project_id=${projectId}`),
+  getRunStage: (projectId: number, runId: string, stageName: string) =>
+    apiClient.get(`/ai/runs-files/${encodeURIComponent(runId)}/stages/${encodeURIComponent(stageName)}?project_id=${projectId}`),
+
+  // Visual DNA 摄取
+  ingestVisualDna: (data: VisualDnaIngestRequest) => apiClient.post<VisualDnaIngestResponse>(`/ai/visual-dna/ingest`, data),
 
   // 资产文件删除（Asset 表）
   deleteProjectAsset: (assetId: number) => apiClient.delete(`/projects/assets/${assetId}`),

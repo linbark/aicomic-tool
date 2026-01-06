@@ -7,6 +7,8 @@ import { EventMatrixPage } from './pages/EventMatrixPage'
 import { EventFlowPage } from './pages/EventFlowPage'
 import { AssetLibraryPage } from './pages/AssetLibraryPage'
 import { PromptsSettingsPage } from './pages/PromptsSettingsPage'
+import { ContextPage } from './pages/ContextPage'
+import { RunInspectorPage } from './pages/RunInspectorPage'
 
 function App() {
   return (
@@ -17,6 +19,8 @@ function App() {
         <Route path="/events" element={<EventMatrixPage />} />
         <Route path="/events/flow" element={<EventFlowPage />} />
         <Route path="/assets" element={<AssetLibraryPage />} />
+        <Route path="/context" element={<ContextPage />} />
+        <Route path="/runs" element={<RunInspectorPage />} />
         <Route path="/settings/ai" element={<AiSettingsPage />} />
         <Route path="/settings/prompts" element={<PromptsSettingsPage />} />
         <Route path="*" element={<PlaceholderPage title="404" />} />

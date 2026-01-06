@@ -58,7 +58,7 @@ def default_prompt_templates() -> Dict[str, Dict[str, Any]]:
                 "You are a professional story editor. "
                 "Given a story outline, improve structure, pacing, character motivations, and clarity. "
                 "Return the improved outline in Chinese with clear bullet sections: "
-                "Logline, Characters, Act1, Act2, Act3, KeyBeats."
+                "Logline, Characters, act_1, act_2, act_3, KeyBeats."
             ),
             "variables": [],
         },
@@ -136,6 +136,59 @@ def default_prompt_templates() -> Dict[str, Dict[str, Any]]:
             "prompt": (
                 "你是一位视觉提示词工程师。"
                 "将 ShotSpec 翻译为 Stable Diffusion/Flux tags 风格的 prompt 与 negative_prompt。"
+                "只输出 JSON（不要 markdown/代码块）。"
+            ),
+            "variables": [],
+        },
+        "visual_dna_ingest_system": {
+            "title": "Visual DNA 摄取代理（system）",
+            "category": "workflow",
+            "prompt": (
+                "你是一位资深视觉技术总监。"
+                "分析用户提供的图片（通过文件路径引用），并输出为严格的 JSON 格式。"
+                "忽略无关背景，重点提取以下用于 AI 绘图模型（如 Midjourney/SD）复现的参数："
+                "\n"
+                "JSON Schema:\n"
+                "{\n"
+                '  "character_core": {\n'
+                '    "visual_dna": {\n'
+                '      "face": "...",\n'
+                '      "body_type": "...",\n'
+                '      "hair_style": "...",\n'
+                '      "distinguishing_marks": "..."\n'
+                "    },\n"
+                '    "attire": {\n'
+                '      "base_layer": "...",\n'
+                '      "accessories": "..."\n'
+                "    }\n"
+                "  },\n"
+                '  "technical_specs": {\n'
+                '    "lighting_style": "...",\n'
+                '    "camera_angle": "...",\n'
+                '    "composition": "...",\n'
+                '    "color_palette": ["#Hex1", "#Hex2"]\n'
+                "  },\n"
+                '  "stable_diffusion_tags": "..."\n'
+                "}\n"
+                "\n"
+                "只输出 JSON（不要 markdown/代码块）。"
+            ),
+            "variables": [],
+        },
+        "prompt_translate_mj_system": {
+            "title": "提示词翻译代理（Midjourney v6）",
+            "category": "workflow",
+            "prompt": (
+                "你是一位视觉提示词工程师，专门为 Midjourney v6 生成提示词。"
+                "将 ShotSpec 翻译为 Midjourney 风格的提示词。"
+                "\n"
+                "Midjourney v6 语法特点：\n"
+                "- 使用 :: 分隔符区分主体、环境和风格（如 Cyberpunk City :: K standing in rain :: Neon lights）\n"
+                "- 偏好自然语言描述，强调形容词堆叠\n"
+                "- 输出格式：JSON object，包含 prompt(string) 字段\n"
+                "- 根据 aspect_ratio 自动添加 --ar 参数（如 --ar 16:9 或 --ar 9:16）\n"
+                "- 自动添加 --v 6.0 --stylize 250\n"
+                "\n"
                 "只输出 JSON（不要 markdown/代码块）。"
             ),
             "variables": [],

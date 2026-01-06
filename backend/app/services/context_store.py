@@ -5,7 +5,7 @@ import os
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException
 
@@ -114,5 +114,69 @@ class ContextStore:
     def read_run_response(self, project_id: int, run_id: str) -> Optional[Dict[str, Any]]:
         path = os.path.join(project_runs_dir(project_id), run_id, "response.json")
         return _read_json(path)
+
+    def list_runs(self, project_id: int) -> List[Dict[str, Any]]:
+        """
+        列出项目的所有 runs（按时间倒序）。
+        返回每个 run 的 meta.json 内容。
+        """
+        runs_dir = project_runs_dir(project_id)
+        if not os.path.exists(runs_dir):
+            return []
+        out: List[Dict[str, Any]] = []
+        for run_id_dir in os.listdir(runs_dir):
+            run_path = os.path.join(runs_dir, run_id_dir)
+            if not os.path.isdir(run_path):
+                continue
+            meta_path = os.path.join(run_path, "meta.json")
+            meta = _read_json(meta_path)
+            if isinstance(meta, dict):
+                out.append(meta)
+        # 按 created_at_ms 倒序
+        out.sort(key=lambda x: x.get("created_at_ms", 0), reverse=True)
+        return out
+
+    def read_run(self, project_id: int, run_id: str) -> Optional[Dict[str, Any]]:
+        """
+        读取完整的 run 信息（request + response + meta）。
+        """
+        run_dir = os.path.join(project_runs_dir(project_id), run_id)
+        if not os.path.exists(run_dir):
+            return None
+        request = _read_json(os.path.join(run_dir, "request.json"))
+        response = _read_json(os.path.join(run_dir, "response.json"))
+        meta = _read_json(os.path.join(run_dir, "meta.json"))
+        return {
+            "request": request or {},
+            "response": response or {},
+            "meta": meta or {},
+        }
+
+    def list_stages(self, project_id: int, run_id: str) -> List[str]:
+        """
+        列出该 run 的所有 stage 文件名（不含 .json 后缀）。
+        """
+        stages_dir = os.path.join(project_runs_dir(project_id), run_id, "stages")
+        if not os.path.exists(stages_dir):
+            return []
+        out: List[str] = []
+        for fname in os.listdir(stages_dir):
+            if fname.endswith(".json"):
+                out.append(fname[:-5])  # 去掉 .json
+        return sorted(out)
+
+    def read_stage(self, project_id: int, run_id: str, stage_name: str) -> Optional[Any]:
+        """
+        读取指定 stage 的内容。
+        """
+        path = self.stage_path(project_id, run_id, stage_name)
+        if not os.path.exists(path):
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                import json as _json
+                return _json.load(f)
+        except Exception:
+            return None
 
 

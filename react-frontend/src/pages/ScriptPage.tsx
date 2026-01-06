@@ -1,16 +1,156 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import api, { getApiBaseUrl } from '../api/client'
 import type { AiActionRunRead, EpisodeRead, SceneRead, ShotRead, SplitSceneItem, SplitShotItem } from '../api/types'
 import { useProjectSelection } from '../state/useProjectSelection'
 
 type SplitScenePreview = SplitSceneItem & { _key: string }
-type SplitShotPreview = SplitShotItem & { _key: string }
+type SplitShotPreview = SplitShotItem & {
+  _key: string
+  prompt?: string
+  negative_prompt?: string
+  shot_size?: string
+  camera_angle?: string
+  lighting_style?: string
+}
 
 type Selected =
   | { kind: 'episode'; episodeId: number }
   | { kind: 'scene'; episodeId: number; sceneId: number }
   | { kind: 'shot'; episodeId: number; sceneId: number; shotId: number }
   | { kind: 'none' }
+
+function stripMarkdownCodeFences(input: string): string {
+  const raw = String(input ?? '')
+  const t = raw.trim()
+  // 整段被 ```lang ... ``` 包裹
+  const m = t.match(/^```[a-zA-Z0-9_-]*\s*\n([\s\S]*?)\n```$/)
+  if (m && typeof m[1] === 'string') return m[1].trim()
+  // 有些模型会输出 ```json{...}```（无换行）
+  if (t.startsWith('```') && t.endsWith('```')) {
+    const withoutStart = t.replace(/^```[a-zA-Z0-9_-]*\s*/i, '')
+    const withoutEnd = withoutStart.replace(/\s*```$/i, '')
+    return withoutEnd.trim()
+  }
+  return t
+}
+
+function sanitizeOutputForDisplay(input: string): string {
+  let t = stripMarkdownCodeFences(input)
+  // 如果是 JSON，展示时做格式化（更易读），失败则保持原样
+  const s = t.trim()
+  if ((s.startsWith('{') && s.endsWith('}')) || (s.startsWith('[') && s.endsWith(']'))) {
+    try {
+      return JSON.stringify(JSON.parse(s), null, 2)
+    } catch {
+      // keep original
+    }
+  }
+  return t
+}
+
+function tryParseJsonObject(input: string): any | null {
+  const t = stripMarkdownCodeFences(input).trim()
+  if (!t) return null
+  try {
+    const parsed = JSON.parse(t)
+    return parsed && typeof parsed === 'object' ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+function pickFirst(obj: any, keys: string[]): any {
+  if (!obj || typeof obj !== 'object') return undefined
+  const lowerMap: Record<string, any> = {}
+  for (const k of Object.keys(obj)) lowerMap[String(k).toLowerCase()] = (obj as any)[k]
+  for (const k of keys) {
+    const v = lowerMap[k.toLowerCase()]
+    if (v !== undefined && v !== null) return v
+  }
+  return undefined
+}
+
+function extractActs(outline: any): { key: string; title: string; data: any }[] {
+  if (!outline || typeof outline !== 'object') return []
+  const acts: { key: string; title: string; data: any }[] = []
+
+  const collectFrom = (obj: any, prefix: string) => {
+    if (!obj || typeof obj !== 'object') return
+    for (const k of Object.keys(obj)) {
+      const lk = k.toLowerCase().replace(/\s+/g, '')
+      if (lk === 'act1' || lk === 'act_1' || lk === 'act-1')
+        acts.push({ key: `${prefix}${k}`, title: '第一幕（act_1）', data: obj[k] })
+      if (lk === 'act2' || lk === 'act_2' || lk === 'act-2')
+        acts.push({ key: `${prefix}${k}`, title: '第二幕（act_2）', data: obj[k] })
+      if (lk === 'act3' || lk === 'act_3' || lk === 'act-3')
+        acts.push({ key: `${prefix}${k}`, title: '第三幕（act_3）', data: obj[k] })
+    }
+  }
+
+  // 递归/BFS 搜索：很多输出会包一层 output_schema / result / data 等
+  const visited = new Set<any>()
+  const queue: Array<{ obj: any; path: string; depth: number }> = [{ obj: outline, path: '', depth: 0 }]
+  const maxDepth = 6
+  while (queue.length) {
+    const cur = queue.shift()!
+    const obj = cur.obj
+    if (!obj || typeof obj !== 'object') continue
+    if (visited.has(obj)) continue
+    visited.add(obj)
+
+    // 只要当前对象含有 act_1/2/3，直接收集
+    collectFrom(obj, cur.path)
+
+    if (cur.depth >= maxDepth) continue
+
+    // 常见 wrapper 优先展开
+    const wrappers = [
+      pickFirst(obj, ['output_schema', 'outputSchema', 'schema', 'result', 'data', 'payload']),
+      pickFirst(obj, ['optimized_beat_sheet', 'optimized_beatsheet', 'optimizedBeatSheet']),
+      pickFirst(obj, ['beat_sheet', 'beatsheet', 'beatSheet']),
+      pickFirst(obj, ['acts', 'act', 'three_act', 'threeact', 'three_act_structure', 'threeactstructure', 'act_structure', 'actstructure']),
+    ].filter(Boolean)
+    for (let i = 0; i < wrappers.length; i++) {
+      queue.push({ obj: wrappers[i], path: cur.path + `w${cur.depth}.${i}.`, depth: cur.depth + 1 })
+    }
+
+    // 普通字段也适度展开（避免漏掉 output_schema.optimized_beat_sheet 这种深层组合）
+    for (const k of Object.keys(obj)) {
+      const v = (obj as any)[k]
+      if (v && typeof v === 'object') {
+        queue.push({ obj: v, path: cur.path + `${k}.`, depth: cur.depth + 1 })
+      }
+    }
+  }
+
+  // 去重 + 排序
+  const seen = new Set<string>()
+  const uniq = acts.filter((a) => {
+    const sig = `${a.title}:${a.key}`
+    if (seen.has(sig)) return false
+    seen.add(sig)
+    return true
+  })
+  const order = { '第一幕（act_1）': 1, '第二幕（act_2）': 2, '第三幕（act_3）': 3 } as any
+  uniq.sort((a, b) => (order[a.title] || 99) - (order[b.title] || 99))
+  return uniq
+}
+
+function looksLikeTruncatedJson(input: string): boolean {
+  const t = stripMarkdownCodeFences(input).trim()
+  if (!t) return false
+  const startsJson = t.startsWith('{') || t.startsWith('[')
+  if (!startsJson) return false
+  try {
+    JSON.parse(t)
+    return false
+  } catch {
+    // parse fail 且末尾明显没闭合时，基本可判定为截断
+    if (t.startsWith('{') && !t.endsWith('}')) return true
+    if (t.startsWith('[') && !t.endsWith(']')) return true
+    return true
+  }
+}
 
 export function ScriptPage() {
   const { projects, projectId, setProjectId, refreshProjects } = useProjectSelection()
@@ -20,6 +160,57 @@ export function ScriptPage() {
 
   const [episodeDescription, setEpisodeDescription] = useState('')
   const [sceneDescription, setSceneDescription] = useState('')
+  const [episodeDirty, setEpisodeDirty] = useState(false)
+  const [sceneDirty, setSceneDirty] = useState(false)
+  const [workstationDirty, setWorkstationDirty] = useState(false)
+
+  const prevProjectIdRef = useRef<number | null>(null)
+  const episodeDirtyForIdRef = useRef<number | null>(null)
+  const sceneDirtyForIdRef = useRef<number | null>(null)
+  const workstationDirtyKeyRef = useRef<string | null>(null)
+
+  function _lsGet(key: string): string | null {
+    try {
+      return window.localStorage.getItem(key)
+    } catch {
+      return null
+    }
+  }
+  function _lsSet(key: string, value: string) {
+    try {
+      window.localStorage.setItem(key, value)
+    } catch {
+      // ignore
+    }
+  }
+  function _lsDel(key: string) {
+    try {
+      window.localStorage.removeItem(key)
+    } catch {
+      // ignore
+    }
+  }
+  function _draftKeyEpisode(pid: number, episodeId: number) {
+    return `aicomic.script.draft.episode.${pid}.${episodeId}`
+  }
+  function _draftKeyScene(pid: number, sceneId: number) {
+    return `aicomic.script.draft.scene.${pid}.${sceneId}`
+  }
+  function _draftKeyWorkstation(pid: number, episodeId: number, tab: string) {
+    return `aicomic.script.draft.workstation.${pid}.${episodeId}.${tab}`
+  }
+  function _selectedKey(pid: number) {
+    return `aicomic.script.selected.${pid}`
+  }
+  function _readJson<T = any>(key: string): T | null {
+    const raw = _lsGet(key)
+    if (!raw) return null
+    try {
+      return JSON.parse(raw) as T
+    } catch {
+      return null
+    }
+  }
 
   // 新建项目（避免使用 window.prompt，兼容 Tauri WebView）
   const [showCreateProject, setShowCreateProject] = useState(false)
@@ -63,12 +254,16 @@ export function ScriptPage() {
   const [aiWritingBusy, setAiWritingBusy] = useState<'outline' | 'script' | null>(null)
   const [aiWritingError, setAiWritingError] = useState<string | null>(null)
   const [aiResult, setAiResult] = useState<{ title: string; text: string } | null>(null)
+  const [outlinePreview, setOutlinePreview] = useState<{ raw: string; parsed: any | null } | null>(null)
+  const [outlinePreviewMode, setOutlinePreviewMode] = useState<'preview' | 'raw'>('preview')
 
   // Workflow：生成与应用（run_id 驱动 apply-to-db）
   const [workflowBusy, setWorkflowBusy] = useState<'script' | 'storyboard' | 'apply_script' | 'apply_storyboard' | null>(null)
   const [workflowError, setWorkflowError] = useState<string | null>(null)
   const [lastWorkflowRunId, setLastWorkflowRunId] = useState<string | null>(null)
   const [lastWorkflowKind, setLastWorkflowKind] = useState<'script' | 'storyboard' | null>(null)
+  const [storyboardPromptStyle, setStoryboardPromptStyle] = useState<'sd_tags' | 'mj_v6'>('sd_tags')
+  const [storyboardAspectRatio, setStoryboardAspectRatio] = useState<string>('')
 
   // EP 按钮输出历史（DB）
   type EpActionKey = 'outline_generate' | 'outline_optimize' | 'generate_script' | 'script_optimize' | 'split_scenes'
@@ -123,27 +318,8 @@ export function ScriptPage() {
     if (!nextProjectId) return
     const res = await api.getScript(nextProjectId)
     setEpisodes(res.data || [])
-    setSelected({ kind: 'none' })
-    setEpisodeDescription('')
-    setSceneDescription('')
-    setSplitScenesPreview([])
-    setStoryboardPreview([])
-    setShotDraft(null)
-    setEpActionTab('outline_generate')
-    setEpRuns({
-      outline_generate: [],
-      outline_optimize: [],
-      generate_script: [],
-      script_optimize: [],
-      split_scenes: [],
-    })
-    setEpSelectedRunId({
-      outline_generate: null,
-      outline_optimize: null,
-      generate_script: null,
-      script_optimize: null,
-      split_scenes: null,
-    })
+    // 注意：不要在 refresh 时清空编辑器状态，否则切换页面/回来会导致输入丢失。
+    // 如需彻底重置（例如切换 project），在外层 effect 中处理。
   }
 
   const currentProject = useMemo(() => {
@@ -152,26 +328,100 @@ export function ScriptPage() {
   }, [projects, projectId])
 
   useEffect(() => {
+    const prev = prevProjectIdRef.current
+    prevProjectIdRef.current = projectId ?? null
+
+    // project 切换：重置 UI（这是用户预期的“切项目清空”）
+    if (prev !== null && projectId && prev !== projectId) {
+      setSelected({ kind: 'none' })
+      setEpisodeDescription('')
+      setSceneDescription('')
+      setEpisodeDirty(false)
+      setSceneDirty(false)
+      setWorkstationDirty(false)
+      setSplitScenesPreview([])
+      setStoryboardPreview([])
+      setShotDraft(null)
+      setEpActionTab('outline_generate')
+      setWorkstationInput('')
+      setEpRuns({
+        outline_generate: [],
+        outline_optimize: [],
+        generate_script: [],
+        script_optimize: [],
+        split_scenes: [],
+      })
+      setEpSelectedRunId({
+        outline_generate: null,
+        outline_optimize: null,
+        generate_script: null,
+        script_optimize: null,
+        split_scenes: null,
+      })
+    }
+
     refreshScript().catch(() => {
       // ignore
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId])
 
-  // 同步选中对象的 description 到右侧编辑区
+  // 记住/恢复当前选中项（避免切换页面回来后 selection 丢失）
   useEffect(() => {
+    if (!projectId) return
+    _lsSet(_selectedKey(projectId), JSON.stringify(selected))
+  }, [projectId, selected])
+
+  // 恢复选中项（仅当当前为 none 且数据已加载）
+  useEffect(() => {
+    if (!projectId) return
+    if (selected.kind !== 'none') return
+    if (!episodes.length) return
+    const saved = _readJson<Selected>(_selectedKey(projectId))
+    if (!saved || typeof saved !== 'object' || !('kind' in saved)) return
+    // 校验 saved 是否仍然存在
+    const ok =
+      saved.kind === 'episode'
+        ? episodes.some((e) => e.id === (saved as any).episodeId)
+        : saved.kind === 'scene' || saved.kind === 'shot'
+          ? episodes.some((e) => e.id === (saved as any).episodeId)
+          : false
+    if (ok) setSelected(saved)
+    else _lsDel(_selectedKey(projectId))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [episodes, projectId, selected.kind])
+
+  // 同步选中对象的 description 到右侧编辑区（优先使用本地草稿；避免覆盖用户手动编辑）
+  useEffect(() => {
+    if (!projectId) return
     if (selected.kind === 'episode') {
+      // 切换到不同 episode：重置 dirty（dirty 只应作用于当前选中对象）
+      if (episodeDirtyForIdRef.current !== selected.episodeId) {
+        episodeDirtyForIdRef.current = selected.episodeId
+        setEpisodeDirty(false)
+      }
       const ep = episodes.find((e) => e.id === selected.episodeId)
-      setEpisodeDescription(ep?.description || '')
+      const draft = _lsGet(_draftKeyEpisode(projectId, selected.episodeId))
+      // 只有在未 dirty 时才会跟随 DB 刷新；dirty 时保持用户输入
+      if (!episodeDirty) setEpisodeDescription(draft ?? ep?.description ?? '')
+      setSceneDescription('')
+      setSceneDirty(false)
       setSplitScenesPreview([])
       setSplitError(null)
       refreshEpRuns(selected.episodeId).catch(() => {})
       return
     }
     if (selected.kind === 'scene') {
+      if (sceneDirtyForIdRef.current !== selected.sceneId) {
+        sceneDirtyForIdRef.current = selected.sceneId
+        setSceneDirty(false)
+      }
       const ep = episodes.find((e) => e.id === selected.episodeId)
       const sc = ep?.scenes?.find((s) => s.id === selected.sceneId)
-      setSceneDescription(sc?.description || '')
+      const draft = _lsGet(_draftKeyScene(projectId, selected.sceneId))
+      if (!sceneDirty) setSceneDescription(draft ?? sc?.description ?? '')
+      setEpisodeDescription('')
+      setEpisodeDirty(false)
       setStoryboardPreview([])
       setStoryboardError(null)
       return
@@ -182,11 +432,27 @@ export function ScriptPage() {
       return
     }
     setShotDraft(null)
-  }, [episodes, selected, selectedShot])
+  }, [episodes, projectId, selected, selectedShot, episodeDirty, sceneDirty])
 
-  // 自动填充 Input 的逻辑
+  // 自动填充 Input 的逻辑（不覆盖用户手动输入；并持久化到本地）
   useEffect(() => {
+    if (!projectId) return
     if (selected.kind !== 'episode') return
+    const epId = selected.episodeId
+
+    // 如果该 tab 已有草稿，优先恢复草稿（用于“切换页面再回来”）
+    const wsKey = _draftKeyWorkstation(projectId, epId, epActionTab)
+    // 切换 episode/tab：重置 dirty（dirty 仅针对当前 wsKey）
+    if (workstationDirtyKeyRef.current !== wsKey) {
+      workstationDirtyKeyRef.current = null
+      setWorkstationDirty(false)
+    }
+    const draft = _lsGet(wsKey)
+    if (!workstationDirty && typeof draft === 'string') {
+      setWorkstationInput(draft)
+      return
+    }
+
     // 切换 Tab 时，若 input 为空，尝试自动填充
     // 逻辑：
     // outline_generate -> 留空 (由用户填 logline)
@@ -208,11 +474,12 @@ export function ScriptPage() {
       candidate = epRuns.script_optimize?.[0]?.output_text || episodeDescription
     }
     
-    // 仅当 workstationInput 为空时填充，避免覆盖用户正在输入的内容
-    // 但如果切换 tab，通常希望看到对应的新 context。
-    // 简化策略：切换 tab 时总是重置 input 为 candidate
-    setWorkstationInput(candidate)
-  }, [epActionTab, selected, epRuns, episodeDescription])
+    // 仅当用户尚未手动编辑或当前 input 为空时才自动填充，避免覆盖用户输入
+    if (!workstationDirty || !(workstationInput || '').trim()) {
+      setWorkstationInput(candidate)
+      _lsSet(wsKey, candidate)
+    }
+  }, [epActionTab, projectId, selected, epRuns, episodeDescription, workstationDirty, workstationInput])
 
   async function refreshEpRuns(episodeId: number) {
     if (!projectId) return
@@ -284,7 +551,11 @@ export function ScriptPage() {
         // fallthrough
       }
     }
+    setEpisodeDirty(true)
     setEpisodeDescription(run.output_text || '')
+    if (projectId && selected.kind === 'episode') {
+      _lsSet(_draftKeyEpisode(projectId, selected.episodeId), run.output_text || '')
+    }
   }
 
   const nextEpisodeOrder = useMemo(() => {
@@ -390,11 +661,51 @@ export function ScriptPage() {
     await refreshScript(projectId)
   }
 
+  async function handleDeleteEpisode(episodeId: number) {
+    if (!projectId) return
+    await api.deleteEpisode(episodeId)
+    // 删除后刷新并回到 none（由恢复逻辑决定是否自动选中）
+    await refreshScript(projectId)
+    setSelected({ kind: 'none' })
+    setEpisodeDescription('')
+    setSceneDescription('')
+    setEpisodeDirty(false)
+    setSceneDirty(false)
+  }
+
+  async function handleDeleteScene(sceneId: number) {
+    if (!projectId) return
+    await api.deleteScene(sceneId)
+    await refreshScript(projectId)
+    // 回到 episode 级
+    if (selected.kind === 'scene' || selected.kind === 'shot') {
+      setSelected({ kind: 'episode', episodeId: selected.episodeId })
+    } else {
+      setSelected({ kind: 'none' })
+    }
+    setSceneDescription('')
+    setSceneDirty(false)
+  }
+
+  async function handleDeleteShot(shotId: number) {
+    if (!projectId) return
+    await api.deleteShot(shotId)
+    await refreshScript(projectId)
+    // 回到 scene 级
+    if (selected.kind === 'shot') {
+      setSelected({ kind: 'scene', episodeId: selected.episodeId, sceneId: selected.sceneId })
+    }
+  }
+
   async function saveEpisodeScript() {
     if (selected.kind !== 'episode') return
     await api.updateEpisode(selected.episodeId, { description: episodeDescription })
     await refreshScript(projectId)
     setSelected({ kind: 'episode', episodeId: selected.episodeId })
+    // 保存成功：认为已落库，不再处于“未保存手动编辑”状态
+    setEpisodeDirty(false)
+    if (projectId) _lsDel(_draftKeyEpisode(projectId, selected.episodeId))
+    episodeDirtyForIdRef.current = selected.episodeId
   }
 
   async function saveSceneScript() {
@@ -402,6 +713,9 @@ export function ScriptPage() {
     await api.updateScene(selected.sceneId, { description: sceneDescription })
     await refreshScript(projectId)
     setSelected({ kind: 'scene', episodeId: selected.episodeId, sceneId: selected.sceneId })
+    setSceneDirty(false)
+    if (projectId) _lsDel(_draftKeyScene(projectId, selected.sceneId))
+    sceneDirtyForIdRef.current = selected.sceneId
   }
 
   async function saveShot() {
@@ -584,6 +898,147 @@ export function ScriptPage() {
       setSelected({ kind: 'scene', episodeId: selected.episodeId, sceneId: sc.id })
     } finally {
       setIsStoryboardImporting(false)
+    }
+  }
+
+  // Workflow: Script (Episode 级别)
+  async function handleWorkflowScript() {
+    if (selected.kind !== 'episode' || !projectId) return
+    const text = (episodeDescription || workstationInput || '').trim()
+    if (!text) {
+      setWorkflowError('请输入输入文本（大纲/章节/需求）')
+      return
+    }
+    setWorkflowBusy('script')
+    setWorkflowError(null)
+    try {
+      const res = await api.aiWorkflowScript({
+        project_id: projectId,
+        input_text: text,
+        options: {
+          qc_loops: 1,
+          max_scenes: 50,
+          derived_split_scenes: false,
+        },
+      })
+      const data = res.data
+      if (data) {
+        setLastWorkflowRunId(data.run_id)
+        setLastWorkflowKind('script')
+        // 显示结果预览
+        setAiResult({
+          title: 'Workflow Script 生成结果',
+          text: `Run ID: ${data.run_id}\n\nSeries Bible:\n${JSON.stringify(data.series_bible, null, 2)}\n\nBeat Sheet:\n${JSON.stringify(data.beat_sheet, null, 2)}\n\nScript Fountain:\n${data.script_fountain}\n\nQC Report:\n${JSON.stringify(data.qc_report, null, 2)}`,
+        })
+        // 可选：自动填充到 episodeDescription
+        if (data.script_fountain) {
+          setEpisodeDirty(true)
+          setEpisodeDescription(data.script_fountain)
+          _lsSet(_draftKeyEpisode(projectId, selected.episodeId), data.script_fountain)
+          episodeDirtyForIdRef.current = selected.episodeId
+        }
+      }
+    } catch (e: any) {
+      setWorkflowError(e?.response?.data?.detail || e?.message || 'Workflow Script 失败')
+    } finally {
+      setWorkflowBusy(null)
+    }
+  }
+
+  async function handleApplyWorkflowScript() {
+    if (selected.kind !== 'episode' || !projectId || !lastWorkflowRunId || lastWorkflowKind !== 'script') return
+    const ep = selectedEpisode
+    if (!ep) return
+    setWorkflowBusy('apply_script')
+    setWorkflowError(null)
+    try {
+      await api.aiApplyWorkflowScript({
+        project_id: projectId,
+        episode_id: ep.id,
+        run_id: lastWorkflowRunId,
+        overwrite_scenes: false,
+      })
+      await refreshScript(projectId)
+      setSelected({ kind: 'episode', episodeId: ep.id })
+      setWorkflowError(null)
+      setLastWorkflowRunId(null)
+      setLastWorkflowKind(null)
+    } catch (e: any) {
+      setWorkflowError(e?.response?.data?.detail || e?.message || '应用 Workflow Script 失败')
+    } finally {
+      setWorkflowBusy(null)
+    }
+  }
+
+  // Workflow: Storyboard (Scene 级别)
+  async function handleWorkflowStoryboard() {
+    if (selected.kind !== 'scene' || !projectId) return
+    const text = (sceneDescription || '').trim()
+    if (!text) {
+      setWorkflowError('请输入场景文本')
+      return
+    }
+    setWorkflowBusy('storyboard')
+    setWorkflowError(null)
+    try {
+      const res = await api.aiWorkflowStoryboard({
+        project_id: projectId,
+        scene_text: text,
+        options: {
+          max_shots: 80,
+          asset_item_ids: [],
+          prompt_style: storyboardPromptStyle,
+          aspect_ratio: storyboardAspectRatio || undefined,
+        },
+      })
+      const data = res.data
+      if (data && Array.isArray(data.shots)) {
+        setLastWorkflowRunId(data.run_id)
+        setLastWorkflowKind('storyboard')
+        // 转换为预览格式
+        setStoryboardPreview(
+          data.shots.map((sh: any, idx: number) => ({
+            _key: `${data.run_id}_${idx}`,
+            title: sh.title || null,
+            action_text: sh.action_text || '',
+            prompt: sh.prompt || '',
+            negative_prompt: sh.negative_prompt || '',
+            shot_size: sh.shot_size || '',
+            camera_angle: sh.camera_angle || '',
+            lighting_style: sh.lighting_style || '',
+          })),
+        )
+      }
+    } catch (e: any) {
+      setWorkflowError(e?.response?.data?.detail || e?.message || 'Workflow Storyboard 失败')
+    } finally {
+      setWorkflowBusy(null)
+    }
+  }
+
+  async function handleApplyWorkflowStoryboard() {
+    if (selected.kind !== 'scene' || !projectId || !lastWorkflowRunId || lastWorkflowKind !== 'storyboard') return
+    const sc = selectedScene
+    if (!sc) return
+    setWorkflowBusy('apply_storyboard')
+    setWorkflowError(null)
+    try {
+      await api.aiApplyWorkflowStoryboard({
+        project_id: projectId,
+        scene_id: sc.id,
+        run_id: lastWorkflowRunId,
+        overwrite_shots: true,
+      })
+      await refreshScript(projectId)
+      setSelected({ kind: 'scene', episodeId: selected.episodeId, sceneId: sc.id })
+      setWorkflowError(null)
+      setLastWorkflowRunId(null)
+      setLastWorkflowKind(null)
+      setStoryboardPreview([])
+    } catch (e: any) {
+      setWorkflowError(e?.response?.data?.detail || e?.message || '应用 Workflow Storyboard 失败')
+    } finally {
+      setWorkflowBusy(null)
     }
   }
 
@@ -846,9 +1301,27 @@ export function ScriptPage() {
                   <div style={{ fontWeight: 700, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>
                     <span style={styles.mono}>EP{selectedEpisode.order}</span> {selectedEpisode.title}
                   </div>
-                  <button style={styles.btnPrimary} onClick={() => saveEpisodeScript().catch(() => {})}>
-                    保存剧本到云端
-                  </button>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <button
+                      style={styles.btn}
+                      onClick={() => handleWorkflowScript().catch(() => {})}
+                      disabled={workflowBusy !== null || (!episodeDescription.trim() && !workstationInput.trim())}
+                      title="后端多代理工作流：架构师+编剧+QC+分场"
+                    >
+                      {workflowBusy === 'script' ? 'Workflow中…' : 'Workflow剧本'}
+                    </button>
+                    <button
+                      style={styles.btnPrimary}
+                      onClick={() => handleApplyWorkflowScript().catch(() => {})}
+                      disabled={workflowBusy !== null || lastWorkflowKind !== 'script' || !lastWorkflowRunId}
+                      title="将上一次 Workflow 剧本写回 Episode.description（可选覆盖 scenes）"
+                    >
+                      {workflowBusy === 'apply_script' ? '应用中…' : '应用Workflow'}
+                    </button>
+                    <button style={styles.btnPrimary} onClick={() => saveEpisodeScript().catch(() => {})}>
+                      保存剧本到云端
+                    </button>
+                  </div>
                 </div>
 
                 {/* Workstation Tabs */}
@@ -867,6 +1340,14 @@ export function ScriptPage() {
                   ))}
                 </div>
 
+                {/* Workflow 状态提示 */}
+                {workflowError ? <div style={{ color: '#f87171', fontSize: 12, marginBottom: 8 }}>{workflowError}</div> : null}
+                {lastWorkflowRunId && lastWorkflowKind === 'script' ? (
+                  <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 8 }}>
+                    最近 Workflow run_id：{lastWorkflowRunId}
+                  </div>
+                ) : null}
+
                 {/* Workstation Body: Input & Output */}
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, height: 420 }}>
                   {/* Left: Input */}
@@ -876,7 +1357,7 @@ export function ScriptPage() {
                       <button
                         style={styles.btnPrimary}
                         disabled={
-                          aiWritingBusy !== null || isSplitting || !workstationInput.trim()
+                          aiWritingBusy !== null || isSplitting || workflowBusy !== null || !workstationInput.trim()
                         }
                         onClick={() => {
                           if (epActionTab === 'outline_generate') handleOutlineGenerate().catch(() => {})
@@ -886,12 +1367,21 @@ export function ScriptPage() {
                           else if (epActionTab === 'split_scenes') handleAutoSplit().catch(() => {})
                         }}
                       >
-                        {aiWritingBusy || isSplitting ? '运行中...' : '开始执行'}
+                        {aiWritingBusy || isSplitting || workflowBusy === 'script' ? '运行中...' : '开始执行'}
                       </button>
                     </div>
                     <textarea
                       value={workstationInput}
-                      onChange={(e) => setWorkstationInput(e.target.value)}
+                      onChange={(e) => {
+                        const v = e.target.value
+                        setWorkstationDirty(true)
+                        setWorkstationInput(v)
+                        if (projectId && selected.kind === 'episode') {
+                          const wsKey = _draftKeyWorkstation(projectId, selected.episodeId, epActionTab)
+                          workstationDirtyKeyRef.current = wsKey
+                          _lsSet(wsKey, v)
+                        }
+                      }}
                       style={{ ...styles.textarea, flex: 1, height: 'auto' }}
                       placeholder={
                         epActionTab === 'outline_generate' ? '输入故事概念、Logline...' :
@@ -924,6 +1414,20 @@ export function ScriptPage() {
                             <option key={r.id} value={r.id}>#{r.id} {r.created_at.slice(5, 16)}</option>
                           ))}
                         </select>
+                        {epActionTab === 'outline_generate' || epActionTab === 'outline_optimize' ? (
+                          <button
+                            style={styles.btn}
+                            disabled={!selectedEpRun}
+                            onClick={() => {
+                              const raw = selectedEpRun?.output_text || ''
+                              setOutlinePreview({ raw, parsed: tryParseJsonObject(raw) })
+                              setOutlinePreviewMode('preview')
+                            }}
+                            title="将大纲以预览界面展示（优先解析 JSON；否则展示分段文本）"
+                          >
+                            预览结果
+                          </button>
+                        ) : null}
                         <button
                           style={styles.btn}
                           disabled={!selectedEpRun}
@@ -953,7 +1457,7 @@ export function ScriptPage() {
                                 </button>
                                 <label style={{ marginLeft: 8 }}><input type="checkbox" checked={overwriteOnImport} onChange={e => setOverwriteOnImport(e.target.checked)} /> 覆盖</label>
                               </div>
-                              {splitScenesPreview.map((sc, idx) => (
+                              {splitScenesPreview.map((sc) => (
                                 <div key={sc._key} style={{ padding: 8, background: 'rgba(255,255,255,0.05)', borderRadius: 6 }}>
                                   <div style={{ fontWeight: 700, fontSize: 12 }}>{sc.title}</div>
                                   <div style={{ fontSize: 12, opacity: 0.8 }}>{sc.description}</div>
@@ -965,11 +1469,16 @@ export function ScriptPage() {
                     ) : (
                       <textarea
                         readOnly
-                        value={selectedEpRun?.output_text || ''}
+                        value={sanitizeOutputForDisplay(selectedEpRun?.output_text || '')}
                         style={{ ...styles.textarea, flex: 1, height: 'auto' }}
                         placeholder="这里显示生成结果..."
                       />
                     )}
+                    {selectedEpRun?.output_text && looksLikeTruncatedJson(selectedEpRun.output_text) ? (
+                      <div style={{ color: '#fbbf24', fontSize: 12, whiteSpace: 'pre-wrap' }}>
+                        提示：该输出看起来像被截断（常见原因：AI 设置里的 max_tokens 太小）。请到「AI 设置」把 max_tokens 调大后重试。
+                      </div>
+                    ) : null}
                   </div>
                 </div>
 
@@ -982,7 +1491,15 @@ export function ScriptPage() {
                 </div>
                 <textarea
                   value={episodeDescription}
-                  onChange={(e) => setEpisodeDescription(e.target.value)}
+                  onChange={(e) => {
+                    const v = e.target.value
+                    setEpisodeDirty(true)
+                    setEpisodeDescription(v)
+                    if (projectId && selected.kind === 'episode') {
+                      episodeDirtyForIdRef.current = selected.episodeId
+                      _lsSet(_draftKeyEpisode(projectId, selected.episodeId), v)
+                    }
+                  }}
                   style={{ ...styles.textarea, height: 300 }}
                   placeholder="本集的最终剧本内容..."
                 />
@@ -1003,35 +1520,64 @@ export function ScriptPage() {
 
                 <div style={styles.labelRow}>
                   <div style={styles.label}>剧本内容</div>
-                  <button
-                    style={styles.btn}
-                    onClick={() => handleAutoStoryboard().catch(() => {})}
-                    disabled={isStoryboardSplitting || !sceneDescription.trim()}
-                    title="自动分镜"
-                  >
-                    {isStoryboardSplitting ? '分镜中…' : '自动分镜'}
-                  </button>
-                  <button
-                    style={styles.btn}
-                    onClick={() => handleWorkflowStoryboard().catch(() => {})}
-                    disabled={workflowBusy !== null || !sceneDescription.trim()}
-                    title="后端多代理工作流：分镜 + prompt 翻译 + run 快照"
-                  >
-                    {workflowBusy === 'storyboard' ? 'Workflow中…' : 'Workflow分镜'}
-                  </button>
-                  <button
-                    style={styles.btnPrimary}
-                    onClick={() => handleApplyWorkflowStoryboard().catch(() => {})}
-                    disabled={workflowBusy !== null || lastWorkflowKind !== 'storyboard' || !lastWorkflowRunId}
-                    title="将上一次 Workflow 分镜写回 Shot.action_text/prompt/negative_prompt"
-                  >
-                    {workflowBusy === 'apply_storyboard' ? '应用中…' : '应用Workflow'}
-                  </button>
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                    <select
+                      value={storyboardPromptStyle}
+                      onChange={(e) => setStoryboardPromptStyle(e.target.value as 'sd_tags' | 'mj_v6')}
+                      style={{ ...styles.select, fontSize: 11, padding: '6px 8px' }}
+                      title="提示词风格"
+                    >
+                      <option value="sd_tags">SD/Flux Tags</option>
+                      <option value="mj_v6">Midjourney v6</option>
+                    </select>
+                    {storyboardPromptStyle === 'mj_v6' ? (
+                      <input
+                        type="text"
+                        value={storyboardAspectRatio}
+                        onChange={(e) => setStoryboardAspectRatio(e.target.value)}
+                        placeholder="--ar 16:9"
+                        style={{ ...styles.input, width: 100, fontSize: 11, padding: '6px 8px' }}
+                        title="Aspect Ratio (如 16:9, 9:16, 2:3)"
+                      />
+                    ) : null}
+                    <button
+                      style={styles.btn}
+                      onClick={() => handleAutoStoryboard().catch(() => {})}
+                      disabled={isStoryboardSplitting || !sceneDescription.trim()}
+                      title="自动分镜"
+                    >
+                      {isStoryboardSplitting ? '分镜中…' : '自动分镜'}
+                    </button>
+                    <button
+                      style={styles.btn}
+                      onClick={() => handleWorkflowStoryboard().catch(() => {})}
+                      disabled={workflowBusy !== null || !sceneDescription.trim()}
+                      title="后端多代理工作流：分镜 + prompt 翻译 + run 快照"
+                    >
+                      {workflowBusy === 'storyboard' ? 'Workflow中…' : 'Workflow分镜'}
+                    </button>
+                    <button
+                      style={styles.btnPrimary}
+                      onClick={() => handleApplyWorkflowStoryboard().catch(() => {})}
+                      disabled={workflowBusy !== null || lastWorkflowKind !== 'storyboard' || !lastWorkflowRunId}
+                      title="将上一次 Workflow 分镜写回 Shot.action_text/prompt/negative_prompt"
+                    >
+                      {workflowBusy === 'apply_storyboard' ? '应用中…' : '应用Workflow'}
+                    </button>
+                  </div>
                 </div>
 
                 <textarea
                   value={sceneDescription}
-                  onChange={(e) => setSceneDescription(e.target.value)}
+                  onChange={(e) => {
+                    const v = e.target.value
+                    setSceneDirty(true)
+                    setSceneDescription(v)
+                    if (projectId && selected.kind === 'scene') {
+                      sceneDirtyForIdRef.current = selected.sceneId
+                      _lsSet(_draftKeyScene(projectId, selected.sceneId), v)
+                    }
+                  }}
                   style={styles.textarea}
                   placeholder="编写本场的剧本内容…"
                 />
@@ -1090,6 +1636,22 @@ export function ScriptPage() {
                             style={{ ...styles.textarea, height: 120 }}
                             placeholder="镜头描述…"
                           />
+                          {sh.prompt ? (
+                            <div style={{ marginTop: 8 }}>
+                              <div style={{ fontSize: 11, opacity: 0.7, marginBottom: 4 }}>Prompt:</div>
+                              <div style={{ fontSize: 11, padding: 6, background: 'rgba(99,102,241,0.1)', borderRadius: 6, fontFamily: 'monospace' }}>
+                                {sh.prompt}
+                              </div>
+                            </div>
+                          ) : null}
+                          {sh.negative_prompt ? (
+                            <div style={{ marginTop: 8 }}>
+                              <div style={{ fontSize: 11, opacity: 0.7, marginBottom: 4 }}>Negative Prompt:</div>
+                              <div style={{ fontSize: 11, padding: 6, background: 'rgba(248,113,113,0.1)', borderRadius: 6, fontFamily: 'monospace' }}>
+                                {sh.negative_prompt}
+                              </div>
+                            </div>
+                          ) : null}
                         </div>
                       ))}
                     </div>
@@ -1180,7 +1742,7 @@ export function ScriptPage() {
                 关闭
               </button>
             </div>
-            <textarea value={aiResult.text} readOnly style={{ ...styles.textarea, height: 420 }} />
+            <textarea value={sanitizeOutputForDisplay(aiResult.text)} readOnly style={{ ...styles.textarea, height: 420 }} />
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 10 }}>
               <button
                 style={styles.btn}
@@ -1200,6 +1762,329 @@ export function ScriptPage() {
                 应用到当前文本
               </button>
             </div>
+          </div>
+        </div>
+      ) : null}
+
+      {/* 大纲生成：精美预览弹窗 */}
+      {outlinePreview ? (
+        <div style={styles.modalMask} onClick={() => setOutlinePreview(null)}>
+          <div
+            style={{ ...styles.modal, width: 980, maxWidth: '95vw' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', marginBottom: 10 }}>
+              <div style={{ fontWeight: 900 }}>
+                {(() => {
+                  const t = outlinePreview.parsed ? pickFirst(outlinePreview.parsed, ['title', 'name', '作品名']) : null
+                  return t ? `大纲预览：${String(t)}` : '大纲预览'
+                })()}
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button
+                  style={outlinePreviewMode === 'preview' ? styles.btnPrimary : styles.btn}
+                  onClick={() => setOutlinePreviewMode('preview')}
+                >
+                  预览
+                </button>
+                <button
+                  style={outlinePreviewMode === 'raw' ? styles.btnPrimary : styles.btn}
+                  onClick={() => setOutlinePreviewMode('raw')}
+                >
+                  原始
+                </button>
+                <button
+                  style={styles.btn}
+                  onClick={() => {
+                    navigator.clipboard?.writeText(stripMarkdownCodeFences(outlinePreview.raw) || '').catch(() => {})
+                  }}
+                >
+                  复制原文
+                </button>
+                <button style={styles.btn} onClick={() => setOutlinePreview(null)}>
+                  关闭
+                </button>
+              </div>
+            </div>
+
+            {outlinePreviewMode === 'raw' ? (
+              <textarea
+                readOnly
+                value={sanitizeOutputForDisplay(outlinePreview.raw)}
+                style={{ ...styles.textarea, height: '70vh', width: '100%' }}
+              />
+            ) : (
+              /* 内容（预览模式） */
+              <div style={{ display: 'grid', gridTemplateColumns: '460px 1fr', gap: 12 }}>
+                {/* 左：总览 + 视觉基调 + 角色速览（避免大块空白） */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                  <div style={{ border: '1px solid rgba(255,255,255,0.10)', borderRadius: 12, padding: 14, background: 'rgba(255,255,255,0.03)' }}>
+                    <div style={{ fontWeight: 900, marginBottom: 8, fontSize: 14 }}>总览</div>
+                    {outlinePreview.parsed ? (
+                      (() => {
+                        const o = outlinePreview.parsed
+                        const title = pickFirst(o, ['title', 'name', '作品名'])
+                        const logline = pickFirst(o, ['revised_logline', 'logline', 'Logline', '一句话梗概', '梗概', '概念', 'story_concept'])
+                        const theme = pickFirst(o, ['theme', '主题'])
+                        const tone = pickFirst(o, ['tone', '风格', '基调'])
+                        const editorNotes = pickFirst(o, ['editor_notes', 'editorNotes', 'notes', '编辑备注'])
+                        return (
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                            {title ? (
+                              <div style={{ fontWeight: 900, fontSize: 18, lineHeight: 1.2 }}>{String(title)}</div>
+                            ) : null}
+                            <div style={{ padding: 10, borderRadius: 10, background: 'rgba(0,0,0,0.25)' }}>
+                              <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 6 }}>Logline</div>
+                              <div style={{ whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>{String(logline ?? '（未提供）')}</div>
+                            </div>
+                            {editorNotes && typeof editorNotes === 'object' ? (
+                              <div style={{ padding: 10, borderRadius: 10, background: 'rgba(0,0,0,0.25)' }}>
+                                <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 6 }}>编辑备注</div>
+                                <div style={{ whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>
+                                  {pickFirst(editorNotes, ['major_issues_fixed']) ? `修复要点：${String(pickFirst(editorNotes, ['major_issues_fixed']))}\n` : ''}
+                                  {pickFirst(editorNotes, ['pacing_verdict']) ? `节奏结论：${String(pickFirst(editorNotes, ['pacing_verdict']))}` : ''}
+                                </div>
+                              </div>
+                            ) : null}
+                            {(theme || tone) ? (
+                              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                                <div style={{ padding: 10, borderRadius: 10, background: 'rgba(0,0,0,0.25)' }}>
+                                  <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 6 }}>主题</div>
+                                  <div style={{ whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>{theme ? String(theme) : '—'}</div>
+                                </div>
+                                <div style={{ padding: 10, borderRadius: 10, background: 'rgba(0,0,0,0.25)' }}>
+                                  <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 6 }}>基调</div>
+                                  <div style={{ whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>{tone ? String(tone) : '—'}</div>
+                                </div>
+                              </div>
+                            ) : null}
+                          </div>
+                        )
+                      })()
+                    ) : (
+                      <div style={{ opacity: 0.85, lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>
+                        {sanitizeOutputForDisplay(outlinePreview.raw)}
+                      </div>
+                    )}
+                  </div>
+
+                  <div style={{ border: '1px solid rgba(255,255,255,0.10)', borderRadius: 12, padding: 14, background: 'rgba(255,255,255,0.03)' }}>
+                    <div style={{ fontWeight: 900, marginBottom: 8, fontSize: 14 }}>视觉基调</div>
+                    <div style={{ padding: 10, borderRadius: 10, background: 'rgba(0,0,0,0.25)', whiteSpace: 'pre-wrap', lineHeight: 1.55 }}>
+                      {outlinePreview.parsed ? String(pickFirst(outlinePreview.parsed, ['visual_tone', 'visualTone', 'visual_style', 'visualStyle', '视觉风格']) ?? '—') : '—'}
+                    </div>
+                  </div>
+
+                  <div style={{ border: '1px solid rgba(255,255,255,0.10)', borderRadius: 12, padding: 14, background: 'rgba(255,255,255,0.03)' }}>
+                    <div style={{ fontWeight: 900, marginBottom: 8, fontSize: 14 }}>角色速览</div>
+                    {outlinePreview.parsed ? (
+                      (() => {
+                        const chars = pickFirst(outlinePreview.parsed, ['characters', 'character_optimizations', 'characterOptimizations', '角色', '人物'])
+                        if (Array.isArray(chars)) {
+                          return (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                              {chars.slice(0, 8).map((c, idx) => (
+                                <div key={idx} style={{ padding: 10, borderRadius: 10, background: 'rgba(0,0,0,0.25)' }}>
+                                  <div style={{ fontWeight: 800 }}>
+                                    {String(pickFirst(c, ['name', '姓名', '角色名']) ?? `角色${idx + 1}`)}
+                                    {pickFirst(c, ['role', '定位', '身份']) ? (
+                                      <span style={{ marginLeft: 8, fontSize: 12, opacity: 0.7 }}>{String(pickFirst(c, ['role', '定位', '身份']))}</span>
+                                    ) : null}
+                                  </div>
+                                  {pickFirst(c, ['core_conflict', 'coreConflict', 'conflict', '矛盾']) ? (
+                                    <div style={{ marginTop: 6, fontSize: 12, opacity: 0.85, whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>
+                                      {String(pickFirst(c, ['core_conflict', 'coreConflict', 'conflict', '矛盾']))}
+                                    </div>
+                                  ) : null}
+                                </div>
+                              ))}
+                              {chars.length > 8 ? <div style={{ fontSize: 12, opacity: 0.6 }}>… 还有 {chars.length - 8} 个角色</div> : null}
+                            </div>
+                          )
+                        }
+                        return <div style={{ opacity: 0.75, fontSize: 12 }}>未提供角色列表。</div>
+                      })()
+                    ) : (
+                      <div style={{ opacity: 0.75, fontSize: 12 }}>（仅 JSON 输出时可结构化展示）</div>
+                    )}
+                  </div>
+                </div>
+
+                {/* 右：分幕 / 角色 */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                <div style={{ border: '1px solid rgba(255,255,255,0.10)', borderRadius: 12, padding: 14, background: 'rgba(255,255,255,0.03)' }}>
+                  <div style={{ fontWeight: 900, marginBottom: 8, fontSize: 14 }}>三幕结构</div>
+                  {outlinePreview.parsed ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                      {extractActs(outlinePreview.parsed).length ? (
+                        extractActs(outlinePreview.parsed).map((a) => {
+                          const beats = pickFirst(a.data, ['beats', '节拍', 'key_beats', 'keyBeats'])
+                          const actHook = pickFirst(a.data, ['act_climax_hook', 'climax_hook', 'hook', '悬念', '钩子'])
+                          const finalImage = pickFirst(a.data, ['final_image', 'ending_image', 'finalImage', '终幕画面', '结尾画面'])
+                          const summary = pickFirst(a.data, ['summary', '梗概', '概要']) ?? (typeof a.data === 'string' ? a.data : '')
+                          const climax = pickFirst(a.data, ['climax_visual', 'climax', '高潮', '高潮画面'])
+                          const resolution = pickFirst(a.data, ['resolution', '结局', '收束', '结尾'])
+                          const inciting = pickFirst(a.data, ['inciting_incident', 'incitingIncident', 'inciting', '导火索', '引爆点'])
+                          const midpoint = pickFirst(a.data, ['midpoint', 'mid_point', 'midPoint', '中点'])
+                          const allIsLost = pickFirst(a.data, ['all_is_lost_moment', 'allIsLostMoment', 'all_is_lost', 'allIsLost', '至暗时刻'])
+                          const actBreakHook = pickFirst(a.data, ['act_break_hook', 'actBreakHook', 'break_hook', '转折钩子'])
+                          const emoShift = pickFirst(a.data, ['emotional_shift', 'emotionalShift', '情绪转折', '情绪变化'])
+                          return (
+                            <div key={a.key} style={{ padding: 10, borderRadius: 10, background: 'rgba(0,0,0,0.25)' }}>
+                              <div style={{ fontWeight: 800, marginBottom: 6 }}>{a.title}</div>
+                              {/* 你的 schema：beats + hook/final_image */}
+                              {Array.isArray(beats) ? (
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                                  {beats.slice(0, 12).map((b, idx) => {
+                                    const beatName = pickFirst(b, ['beat_name', 'beatName', 'name', '节拍名', '节点']) ?? `Beat ${idx + 1}`
+                                    const actionDesc = pickFirst(b, ['action_description', 'actionDescription', 'action', '动作', '画面']) ?? ''
+                                    const emo = pickFirst(b, ['emotional_charge', 'emotionalCharge', 'emotion', '情绪', '情绪电荷'])
+                                    const vf = pickFirst(b, ['visual_focus', 'visualFocus', 'focus', '视觉重点', '关键画面'])
+                                    return (
+                                      <div key={idx} style={{ padding: 8, borderRadius: 10, background: 'rgba(255,255,255,0.04)' }}>
+                                        <div style={{ fontWeight: 800, marginBottom: 4, fontSize: 12 }}>{String(beatName)}</div>
+                                        {actionDesc ? <div style={{ whiteSpace: 'pre-wrap', lineHeight: 1.45, opacity: 0.9 }}>{String(actionDesc)}</div> : null}
+                                        {(emo || vf) ? (
+                                          <div style={{ marginTop: 6, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, fontSize: 12, opacity: 0.85 }}>
+                                            <div>情绪：{emo ? String(emo) : '—'}</div>
+                                            <div>视觉：{vf ? String(vf) : '—'}</div>
+                                          </div>
+                                        ) : null}
+                                      </div>
+                                    )
+                                  })}
+                                  {(actHook || finalImage) ? (
+                                    <div style={{ marginTop: 2, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                                      <div style={{ padding: 8, borderRadius: 10, background: 'rgba(255,255,255,0.04)' }}>
+                                        <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 4 }}>幕末钩子</div>
+                                        <div style={{ whiteSpace: 'pre-wrap', lineHeight: 1.45 }}>{actHook ? String(actHook) : '—'}</div>
+                                      </div>
+                                      <div style={{ padding: 8, borderRadius: 10, background: 'rgba(255,255,255,0.04)' }}>
+                                        <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 4 }}>终幕画面</div>
+                                        <div style={{ whiteSpace: 'pre-wrap', lineHeight: 1.45 }}>{finalImage ? String(finalImage) : '—'}</div>
+                                      </div>
+                                    </div>
+                                  ) : null}
+                                </div>
+                              ) : (
+                                <>
+                                  {summary ? <div style={{ whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>{String(summary)}</div> : null}
+                                  {(inciting || midpoint || allIsLost || actBreakHook || emoShift) ? (
+                                    <div style={{ marginTop: 8, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                                      {inciting ? (
+                                        <div style={{ padding: 8, borderRadius: 10, background: 'rgba(255,255,255,0.04)' }}>
+                                          <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 4 }}>引爆点</div>
+                                          <div style={{ whiteSpace: 'pre-wrap', lineHeight: 1.45 }}>{String(inciting)}</div>
+                                        </div>
+                                      ) : null}
+                                      {midpoint ? (
+                                        <div style={{ padding: 8, borderRadius: 10, background: 'rgba(255,255,255,0.04)' }}>
+                                          <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 4 }}>中点</div>
+                                          <div style={{ whiteSpace: 'pre-wrap', lineHeight: 1.45 }}>{String(midpoint)}</div>
+                                        </div>
+                                      ) : null}
+                                      {allIsLost ? (
+                                        <div style={{ padding: 8, borderRadius: 10, background: 'rgba(255,255,255,0.04)' }}>
+                                          <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 4 }}>至暗时刻</div>
+                                          <div style={{ whiteSpace: 'pre-wrap', lineHeight: 1.45 }}>{String(allIsLost)}</div>
+                                        </div>
+                                      ) : null}
+                                      {actBreakHook ? (
+                                        <div style={{ padding: 8, borderRadius: 10, background: 'rgba(255,255,255,0.04)' }}>
+                                          <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 4 }}>幕末钩子</div>
+                                          <div style={{ whiteSpace: 'pre-wrap', lineHeight: 1.45 }}>{String(actBreakHook)}</div>
+                                        </div>
+                                      ) : null}
+                                      {emoShift ? (
+                                        <div style={{ padding: 8, borderRadius: 10, background: 'rgba(255,255,255,0.04)' }}>
+                                          <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 4 }}>情绪转折</div>
+                                          <div style={{ whiteSpace: 'pre-wrap', lineHeight: 1.45 }}>{String(emoShift)}</div>
+                                        </div>
+                                      ) : null}
+                                    </div>
+                                  ) : null}
+                                  {(climax || resolution) ? (
+                                    <div style={{ marginTop: 8, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                                      <div style={{ padding: 8, borderRadius: 10, background: 'rgba(255,255,255,0.04)' }}>
+                                        <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 4 }}>高潮画面</div>
+                                        <div style={{ whiteSpace: 'pre-wrap', lineHeight: 1.45 }}>{climax ? String(climax) : '—'}</div>
+                                      </div>
+                                      <div style={{ padding: 8, borderRadius: 10, background: 'rgba(255,255,255,0.04)' }}>
+                                        <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 4 }}>收束</div>
+                                        <div style={{ whiteSpace: 'pre-wrap', lineHeight: 1.45 }}>{resolution ? String(resolution) : '—'}</div>
+                                      </div>
+                                    </div>
+                                  ) : null}
+                                </>
+                              )}
+                            </div>
+                          )
+                        })
+                      ) : (
+                        <div style={{ opacity: 0.75, fontSize: 12 }}>未识别到 Act1/Act2/Act3 字段（可在 Prompt 模板里统一成 JSON schema 以获得最佳预览）。</div>
+                      )}
+                    </div>
+                  ) : (
+                    <div style={{ opacity: 0.75, fontSize: 12 }}>当前输出不是 JSON，将以文本方式展示（可在 Prompt 模板中让大纲生成输出 JSON）。</div>
+                  )}
+                </div>
+
+                <div style={{ border: '1px solid rgba(255,255,255,0.10)', borderRadius: 12, padding: 14, background: 'rgba(255,255,255,0.03)' }}>
+                  <div style={{ fontWeight: 900, marginBottom: 8, fontSize: 14 }}>角色</div>
+                  {outlinePreview.parsed ? (
+                    (() => {
+                      const chars = pickFirst(outlinePreview.parsed, ['character_optimizations', 'characterOptimizations', 'characters', '角色', '人物'])
+                      if (Array.isArray(chars)) {
+                        return (
+                          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                            {chars.slice(0, 12).map((c, idx) => {
+                              const name = pickFirst(c, ['name', '姓名', '角色名']) ?? `角色${idx + 1}`
+                              const role = pickFirst(c, ['role', '定位', '身份'])
+                              const mv = pickFirst(c, ['motivation_visualized', 'motivationVisualized', 'visual', '视觉化动机'])
+                              const visualDna = pickFirst(c, ['visual_dna', 'visualDna', 'dna', '视觉DNA'])
+                              const coreConflict = pickFirst(c, ['core_conflict', 'coreConflict', 'conflict', '矛盾'])
+                              const goal = pickFirst(c, ['goal', '目标'])
+                              const conflict = pickFirst(c, ['conflict', '矛盾', '阻力'])
+                              return (
+                                <div key={idx} style={{ padding: 10, borderRadius: 10, background: 'rgba(0,0,0,0.25)' }}>
+                                  <div style={{ fontWeight: 800, marginBottom: 6 }}>{String(name)}</div>
+                                  <div style={{ fontSize: 12, opacity: 0.85, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
+                                    {role ? `身份：${String(role)}\n` : ''}
+                                    {mv ? `动机（视觉化）：${String(mv)}\n` : ''}
+                                    {visualDna ? `外观：${String(visualDna)}\n` : ''}
+                                    {coreConflict ? `核心矛盾：${String(coreConflict)}\n` : ''}
+                                    {goal ? `目标：${String(goal)}\n` : ''}
+                                    {conflict ? `矛盾：${String(conflict)}` : ''}
+                                  </div>
+                                </div>
+                              )
+                            })}
+                          </div>
+                        )
+                      }
+                      if (chars && typeof chars === 'object') {
+                        return (
+                          <div style={{ opacity: 0.9, whiteSpace: 'pre-wrap', lineHeight: 1.6 }}>
+                            {JSON.stringify(chars, null, 2)}
+                          </div>
+                        )
+                      }
+                      return <div style={{ opacity: 0.75, fontSize: 12 }}>未提供角色结构。</div>
+                    })()
+                  ) : (
+                    <div style={{ opacity: 0.75, fontSize: 12 }}>（仅 JSON 输出时可结构化展示角色）</div>
+                  )}
+                </div>
+              </div>
+              </div>
+            )}
+
+            {/* 底部：截断提示 */}
+            {looksLikeTruncatedJson(outlinePreview.raw) ? (
+              <div style={{ color: '#fbbf24', fontSize: 12, marginTop: 10, whiteSpace: 'pre-wrap' }}>
+                提示：该输出看起来像被截断（常见原因：max_tokens 太小）。如果你刚调到 8192 仍出现截断，建议提升到更高或拆分任务。
+              </div>
+            ) : null}
           </div>
         </div>
       ) : null}

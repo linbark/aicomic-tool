@@ -19,7 +19,7 @@ export function AiSettingsPage() {
     base_url: 'https://api.deepseek.com',
     model: 'deepseek-chat',
     temperature: 0.2,
-    max_tokens: 2048,
+    max_tokens: 8192,
     timeout_seconds: 30,
   })
 
@@ -34,7 +34,7 @@ export function AiSettingsPage() {
         base_url: data?.base_url || 'https://api.deepseek.com',
         model: data?.model || 'deepseek-chat',
         temperature: Number(data?.temperature ?? 0.2),
-        max_tokens: Number(data?.max_tokens ?? 2048),
+        max_tokens: Number(data?.max_tokens ?? 8192),
         timeout_seconds: Number(data?.timeout_seconds ?? 30),
       })
     } catch (e: any) {

@@ -79,6 +79,8 @@ export interface WorkflowScriptResponse {
 export interface WorkflowStoryboardOptions {
   max_shots?: number
   asset_item_ids?: ID[]
+  prompt_style?: 'sd_tags' | 'mj_v6'
+  aspect_ratio?: string
 }
 
 export interface WorkflowStoryboardRequest {
@@ -258,4 +260,17 @@ export interface AssetItemRead {
   category: string
   avatar_asset_id?: ID | null
   assets?: AssetRead[]
+}
+
+export interface VisualDnaIngestRequest {
+  project_id: ID
+  item_id: ID
+  asset_file_path: string
+  version?: string
+}
+
+export interface VisualDnaIngestResponse {
+  run_id: string
+  visual_dna: Record<string, unknown>
+  qc_report?: Record<string, unknown> | null
 }

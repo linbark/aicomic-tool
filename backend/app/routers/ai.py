@@ -78,7 +78,7 @@ def _mask_settings(raw: Dict[str, Any]) -> "AiSettingsRead":
         base_url=raw.get("base_url") or "https://api.deepseek.com",
         model=raw.get("model") or "deepseek-chat",
         temperature=float(raw.get("temperature") or 0.2),
-        max_tokens=int(raw.get("max_tokens") or 2048),
+        max_tokens=int(raw.get("max_tokens") or 8192),
         timeout_seconds=float(raw.get("timeout_seconds") or 120.0),
     )
 
@@ -474,13 +474,15 @@ async def outline_generate(req: OutlineGenerateRequest):
         return OutlineGenerateResponse(text="")
 
     system_prompt = prompt_registry.get_template_prompt("outline_generate_system")
+    # 大纲类输出容易较长，给一个最低 max_tokens，避免中途截断
+    effective_max_tokens = max(int(settings.max_tokens or 0), 4096)
     content = await _chat_client.chat(
         settings=LlmChatSettings(
             base_url=settings.base_url,
             api_key=raw.get("api_key") or "",
             model=settings.model,
             temperature=settings.temperature,
-            max_tokens=settings.max_tokens,
+            max_tokens=effective_max_tokens,
             timeout_seconds=settings.timeout_seconds,
         ),
         messages=[
@@ -511,13 +513,14 @@ async def outline_optimize(req: OutlineOptimizeRequest):
         return OutlineOptimizeResponse(text="")
 
     system_prompt = prompt_registry.get_template_prompt("outline_optimize_system")
+    effective_max_tokens = max(int(settings.max_tokens or 0), 4096)
     content = await _chat_client.chat(
         settings=LlmChatSettings(
             base_url=settings.base_url,
             api_key=raw.get("api_key") or "",
             model=settings.model,
             temperature=settings.temperature,
-            max_tokens=settings.max_tokens,
+            max_tokens=effective_max_tokens,
             timeout_seconds=settings.timeout_seconds,
         ),
         messages=[
@@ -548,13 +551,14 @@ async def generate_script(req: ScriptGenerateRequest):
         return ScriptGenerateResponse(text="")
 
     system_prompt = prompt_registry.get_template_prompt("script_generate_system")
+    effective_max_tokens = max(int(settings.max_tokens or 0), 4096)
     content = await _chat_client.chat(
         settings=LlmChatSettings(
             base_url=settings.base_url,
             api_key=raw.get("api_key") or "",
             model=settings.model,
             temperature=settings.temperature,
-            max_tokens=settings.max_tokens,
+            max_tokens=effective_max_tokens,
             timeout_seconds=settings.timeout_seconds,
         ),
         messages=[
@@ -585,13 +589,14 @@ async def script_optimize(req: ScriptOptimizeRequest):
         return ScriptOptimizeResponse(text="")
 
     system_prompt = prompt_registry.get_template_prompt("script_optimize_system")
+    effective_max_tokens = max(int(settings.max_tokens or 0), 4096)
     content = await _chat_client.chat(
         settings=LlmChatSettings(
             base_url=settings.base_url,
             api_key=raw.get("api_key") or "",
             model=settings.model,
             temperature=settings.temperature,
-            max_tokens=settings.max_tokens,
+            max_tokens=effective_max_tokens,
             timeout_seconds=settings.timeout_seconds,
         ),
         messages=[
@@ -641,6 +646,13 @@ def get_series_bible(project_id: int, version: str = "v1"):
 
 @router.put("/context/series-bible", response_model=ContextWriteResponse)
 def put_series_bible(project_id: int, payload: ContextWriteRequest):
+    # 校验 version 格式（允许 v1, v2, ...）
+    import re
+    if not re.match(r'^v\d+$', payload.version):
+        raise HTTPException(status_code=400, detail=f"version 格式无效，应为 v1, v2, ... 格式，当前: {payload.version}")
+    # 校验 data 必须是 dict
+    if not isinstance(payload.data, dict):
+        raise HTTPException(status_code=400, detail="data 必须是 JSON object")
     meta = _context_store.put_series_bible(project_id=project_id, data=payload.data, version=payload.version)
     return ContextWriteResponse(
         project_id=project_id,
@@ -665,6 +677,13 @@ def get_visual_dna(project_id: int, item_id: int, version: str = "v1"):
 
 @router.put("/context/visual-dna", response_model=ContextWriteResponse)
 def put_visual_dna(project_id: int, item_id: int, payload: ContextWriteRequest):
+    # 校验 version 格式（允许 v1, v2, ...）
+    import re
+    if not re.match(r'^v\d+$', payload.version):
+        raise HTTPException(status_code=400, detail=f"version 格式无效，应为 v1, v2, ... 格式，当前: {payload.version}")
+    # 校验 data 必须是 dict
+    if not isinstance(payload.data, dict):
+        raise HTTPException(status_code=400, detail="data 必须是 JSON object")
     meta = _context_store.put_visual_dna(project_id=project_id, item_id=item_id, data=payload.data, version=payload.version)
     return ContextWriteResponse(
         project_id=project_id,
@@ -713,6 +732,8 @@ async def workflow_script(req: WorkflowScriptRequest):
 
     run_id = new_run_id()
     project_id = int(req.project_id)
+    # workflow 输出通常更长，给一个最低 max_tokens，避免中途截断
+    effective_max_tokens = max(int(settings.max_tokens or 0), 4096)
 
     # 读取已有 series_bible（可为空）
     existing_bible = _context_store.get_series_bible(project_id=project_id, version="v1")
@@ -742,7 +763,7 @@ async def workflow_script(req: WorkflowScriptRequest):
             api_key=raw.get("api_key") or "",
             model=settings.model,
             temperature=settings.temperature,
-            max_tokens=settings.max_tokens,
+            max_tokens=effective_max_tokens,
             timeout_seconds=settings.timeout_seconds,
         ),
         messages=[
@@ -760,7 +781,7 @@ async def workflow_script(req: WorkflowScriptRequest):
                 api_key=raw.get("api_key") or "",
                 model=settings.model,
                 temperature=settings.temperature,
-                max_tokens=settings.max_tokens,
+                max_tokens=effective_max_tokens,
                 timeout_seconds=settings.timeout_seconds,
             ),
             system_prompt=architect_system,
@@ -784,7 +805,7 @@ async def workflow_script(req: WorkflowScriptRequest):
                 api_key=raw.get("api_key") or "",
                 model=settings.model,
                 temperature=settings.temperature,
-                max_tokens=settings.max_tokens,
+                max_tokens=effective_max_tokens,
                 timeout_seconds=settings.timeout_seconds,
             ),
             system_prompt=architect_system,
@@ -834,7 +855,7 @@ async def workflow_script(req: WorkflowScriptRequest):
             api_key=raw.get("api_key") or "",
             model=settings.model,
             temperature=settings.temperature,
-            max_tokens=settings.max_tokens,
+            max_tokens=effective_max_tokens,
             timeout_seconds=settings.timeout_seconds,
         ),
         messages=[
@@ -851,7 +872,7 @@ async def workflow_script(req: WorkflowScriptRequest):
                 api_key=raw.get("api_key") or "",
                 model=settings.model,
                 temperature=settings.temperature,
-                max_tokens=settings.max_tokens,
+                max_tokens=effective_max_tokens,
                 timeout_seconds=settings.timeout_seconds,
             ),
             system_prompt=writer_system,
@@ -893,7 +914,7 @@ async def workflow_script(req: WorkflowScriptRequest):
                 api_key=raw.get("api_key") or "",
                 model=settings.model,
                 temperature=settings.temperature,
-                max_tokens=settings.max_tokens,
+                max_tokens=effective_max_tokens,
                 timeout_seconds=settings.timeout_seconds,
             ),
             messages=[
@@ -917,7 +938,7 @@ async def workflow_script(req: WorkflowScriptRequest):
                         api_key=raw.get("api_key") or "",
                         model=settings.model,
                         temperature=settings.temperature,
-                        max_tokens=settings.max_tokens,
+                        max_tokens=effective_max_tokens,
                         timeout_seconds=settings.timeout_seconds,
                     ),
                     system_prompt=qc_system,
@@ -945,7 +966,7 @@ async def workflow_script(req: WorkflowScriptRequest):
                 api_key=raw.get("api_key") or "",
                 model=settings.model,
                 temperature=settings.temperature,
-                max_tokens=settings.max_tokens,
+                max_tokens=effective_max_tokens,
                 timeout_seconds=settings.timeout_seconds,
             ),
             messages=[
@@ -981,6 +1002,8 @@ async def workflow_script(req: WorkflowScriptRequest):
 class WorkflowStoryboardOptions(BaseModel):
     max_shots: int = 80
     asset_item_ids: List[int] = Field(default_factory=list)
+    prompt_style: str = "sd_tags"  # "sd_tags" | "mj_v6"
+    aspect_ratio: Optional[str] = None  # 如 "16:9", "9:16", "2:3"
 
 
 class WorkflowStoryboardRequest(BaseModel):
@@ -1099,29 +1122,61 @@ async def workflow_storyboard(req: WorkflowStoryboardRequest):
     shot_list = shot_specs
     _context_store.snapshot_stage(project_id=project_id, run_id=run_id, stage_name="storyboard.parsed", data={"shots": shot_list})
 
-    # Step2: 翻译为 SD prompt
-    translate_role = prompt_registry.get_template_prompt("prompt_translate_system")
-    translate_system = compose_system_prompt_xml(
-        PromptModules(
-            role_definition=translate_role,
-            series_bible=series_bible,
-            constraints=[
-                "输出必须是 JSON array，与输入 shots 等长。",
-                "每项必须包含 keys: prompt, negative_prompt。",
-                "prompt 使用逗号分隔 tags；negative_prompt 也使用 tags。",
-            ],
-            instruction=[
-                "读取 shots（含镜头参数与动作）。",
-                "为每个镜头生成 prompt/negative_prompt，并尽量复用 locked_visual_dna 的核心要素。",
-                "仅输出 JSON，不要任何额外文本。",
-            ],
-            output_format="json",
-            extra_blocks={
-                "shots": json.dumps(shot_list, ensure_ascii=False, indent=2),
-                "locked_visual_dna": json.dumps(visual_dna_list, ensure_ascii=False, indent=2) if visual_dna_list else "",
-            },
+    # Step2: 翻译为 prompt（根据 prompt_style 选择模板）
+    prompt_style = (req.options.prompt_style or "sd_tags").strip()
+    aspect_ratio = req.options.aspect_ratio
+
+    if prompt_style == "mj_v6":
+        # Midjourney v6 模式
+        translate_role = prompt_registry.get_template_prompt("prompt_translate_mj_system")
+        translate_system = compose_system_prompt_xml(
+            PromptModules(
+                role_definition=translate_role,
+                series_bible=series_bible,
+                constraints=[
+                    "输出必须是 JSON array，与输入 shots 等长。",
+                    "每项必须包含 key: prompt(string)。",
+                    "prompt 使用 Midjourney v6 语法（:: 分隔符，自然语言描述）。",
+                    f"根据 aspect_ratio={aspect_ratio or 'auto'} 添加 --ar 参数。",
+                ],
+                instruction=[
+                    "读取 shots（含镜头参数与动作）。",
+                    "为每个镜头生成 Midjourney v6 风格的 prompt，并尽量复用 locked_visual_dna 的核心要素。",
+                    "在 prompt 末尾添加 --v 6.0 --stylize 250 和 --ar 参数。",
+                    "仅输出 JSON，不要任何额外文本。",
+                ],
+                output_format="json",
+                extra_blocks={
+                    "shots": json.dumps(shot_list, ensure_ascii=False, indent=2),
+                    "locked_visual_dna": json.dumps(visual_dna_list, ensure_ascii=False, indent=2) if visual_dna_list else "",
+                    "aspect_ratio": aspect_ratio or "auto",
+                },
+            )
         )
-    )
+    else:
+        # SD/Flux tags 模式（默认）
+        translate_role = prompt_registry.get_template_prompt("prompt_translate_system")
+        translate_system = compose_system_prompt_xml(
+            PromptModules(
+                role_definition=translate_role,
+                series_bible=series_bible,
+                constraints=[
+                    "输出必须是 JSON array，与输入 shots 等长。",
+                    "每项必须包含 keys: prompt, negative_prompt。",
+                    "prompt 使用逗号分隔 tags；negative_prompt 也使用 tags。",
+                ],
+                instruction=[
+                    "读取 shots（含镜头参数与动作）。",
+                    "为每个镜头生成 prompt/negative_prompt，并尽量复用 locked_visual_dna 的核心要素。",
+                    "仅输出 JSON，不要任何额外文本。",
+                ],
+                output_format="json",
+                extra_blocks={
+                    "shots": json.dumps(shot_list, ensure_ascii=False, indent=2),
+                    "locked_visual_dna": json.dumps(visual_dna_list, ensure_ascii=False, indent=2) if visual_dna_list else "",
+                },
+            )
+        )
     step2_content = await _chat_client.chat(
         settings=LlmChatSettings(
             base_url=settings.base_url,
@@ -1156,26 +1211,62 @@ async def workflow_storyboard(req: WorkflowStoryboardRequest):
         step2_parsed = repaired
     if not isinstance(step2_parsed, list) or len(step2_parsed) != len(shot_list):
         raise HTTPException(status_code=422, detail="Prompt translate output length mismatch")
-    try:
-        prompt_pairs = [PromptPair.model_validate(x).model_dump() for x in step2_parsed]
-    except Exception as e:
-        repaired = await _repair_json_with_same_agent(
-            llm_settings=LlmChatSettings(
-                base_url=settings.base_url,
-                api_key=raw.get("api_key") or "",
-                model=settings.model,
-                temperature=settings.temperature,
-                max_tokens=settings.max_tokens,
-                timeout_seconds=settings.timeout_seconds,
-            ),
-            system_prompt=translate_system,
-            bad_output_text=json.dumps(step2_parsed, ensure_ascii=False),
-            error_hint=str(e),
-            expected_hint=f"JSON array length == {len(shot_list)}, each item has non-empty prompt and non-empty negative_prompt",
-        )
-        if not isinstance(repaired, list) or len(repaired) != len(shot_list):
-            raise HTTPException(status_code=422, detail=f"Prompt translate output schema invalid: {e}")
-        prompt_pairs = [PromptPair.model_validate(x).model_dump() for x in repaired]
+    
+    # 根据 prompt_style 处理不同的输出格式
+    if prompt_style == "mj_v6":
+        # MJ 模式：只有 prompt 字段
+        try:
+            prompt_pairs = []
+            for x in step2_parsed:
+                if not isinstance(x, dict):
+                    raise ValueError("Each item must be a dict")
+                prompt_str = str(x.get("prompt") or "").strip()
+                if not prompt_str:
+                    raise ValueError("prompt is required")
+                prompt_pairs.append({"prompt": prompt_str, "negative_prompt": ""})  # MJ 不需要 negative_prompt
+        except Exception as e:
+            repaired = await _repair_json_with_same_agent(
+                llm_settings=LlmChatSettings(
+                    base_url=settings.base_url,
+                    api_key=raw.get("api_key") or "",
+                    model=settings.model,
+                    temperature=settings.temperature,
+                    max_tokens=settings.max_tokens,
+                    timeout_seconds=settings.timeout_seconds,
+                ),
+                system_prompt=translate_system,
+                bad_output_text=json.dumps(step2_parsed, ensure_ascii=False),
+                error_hint=str(e),
+                expected_hint=f"JSON array length == {len(shot_list)}, each item has non-empty prompt",
+            )
+            if not isinstance(repaired, list) or len(repaired) != len(shot_list):
+                raise HTTPException(status_code=422, detail=f"Prompt translate output schema invalid: {e}")
+            prompt_pairs = []
+            for x in repaired:
+                prompt_str = str(x.get("prompt") or "").strip()
+                prompt_pairs.append({"prompt": prompt_str, "negative_prompt": ""})
+    else:
+        # SD/Flux 模式：需要 prompt 和 negative_prompt
+        try:
+            prompt_pairs = [PromptPair.model_validate(x).model_dump() for x in step2_parsed]
+        except Exception as e:
+            repaired = await _repair_json_with_same_agent(
+                llm_settings=LlmChatSettings(
+                    base_url=settings.base_url,
+                    api_key=raw.get("api_key") or "",
+                    model=settings.model,
+                    temperature=settings.temperature,
+                    max_tokens=settings.max_tokens,
+                    timeout_seconds=settings.timeout_seconds,
+                ),
+                system_prompt=translate_system,
+                bad_output_text=json.dumps(step2_parsed, ensure_ascii=False),
+                error_hint=str(e),
+                expected_hint=f"JSON array length == {len(shot_list)}, each item has non-empty prompt and non-empty negative_prompt",
+            )
+            if not isinstance(repaired, list) or len(repaired) != len(shot_list):
+                raise HTTPException(status_code=422, detail=f"Prompt translate output schema invalid: {e}")
+            prompt_pairs = [PromptPair.model_validate(x).model_dump() for x in repaired]
 
     merged: List[Dict[str, Any]] = []
     for i, sh in enumerate(shot_list):
@@ -1328,5 +1419,183 @@ def apply_workflow_storyboard(payload: ApplyStoryboardWorkflowRequest, db: Sessi
 
     db.commit()
     return {"ok": True, "scene_id": sc.id, "run_id": run_id}
+
+
+# ==========================
+# Run 快照审计 API
+# ==========================
+
+@router.get("/runs-files")
+def list_runs_files(project_id: int):
+    """
+    列出项目的所有 run 快照（仅返回 meta 信息）。
+    """
+    runs = _context_store.list_runs(project_id=project_id)
+    return {"project_id": project_id, "runs": runs}
+
+
+@router.get("/runs-files/{run_id}")
+def get_run_file(project_id: int, run_id: str):
+    """
+    读取指定 run 的完整信息（request + response + meta）。
+    """
+    run_data = _context_store.read_run(project_id=project_id, run_id=run_id)
+    if not run_data:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return {"project_id": project_id, "run_id": run_id, **run_data}
+
+
+@router.get("/runs-files/{run_id}/stages")
+def list_run_stages(project_id: int, run_id: str):
+    """
+    列出该 run 的所有 stage 名称。
+    """
+    stages = _context_store.list_stages(project_id=project_id, run_id=run_id)
+    return {"project_id": project_id, "run_id": run_id, "stages": stages}
+
+
+@router.get("/runs-files/{run_id}/stages/{stage_name}")
+def get_run_stage(project_id: int, run_id: str, stage_name: str):
+    """
+    读取指定 stage 的内容。
+    """
+    stage_data = _context_store.read_stage(project_id=project_id, run_id=run_id, stage_name=stage_name)
+    if stage_data is None:
+        raise HTTPException(status_code=404, detail="Stage not found")
+    return {"project_id": project_id, "run_id": run_id, "stage_name": stage_name, "data": stage_data}
+
+
+# ==========================
+# Visual DNA 摄取（图片→JSON）
+# ==========================
+
+class VisualDnaIngestRequest(BaseModel):
+    project_id: int
+    item_id: int
+    asset_file_path: str
+    version: str = "v1"
+
+
+class VisualDnaIngestResponse(BaseModel):
+    run_id: str
+    visual_dna: Dict[str, Any]
+    qc_report: Optional[Dict[str, Any]] = None
+
+
+@router.post("/visual-dna/ingest", response_model=VisualDnaIngestResponse)
+async def ingest_visual_dna(req: VisualDnaIngestRequest):
+    """
+    从图片文件路径摄取 Visual DNA JSON。
+    注意：当前 LLM 接口为纯 chat，不支持 vision。此 API 先读取文件元数据/路径信息，
+    然后通过文本描述让 LLM 生成 Visual DNA JSON（后续可扩展为真正的 vision provider）。
+    """
+    raw = _read_settings_raw()
+    settings = _mask_settings(raw)
+    if not settings.has_api_key:
+        raise HTTPException(status_code=400, detail="AI API Key 未配置")
+
+    project_id = int(req.project_id)
+    item_id = int(req.item_id)
+    file_path = (req.asset_file_path or "").strip()
+    if not file_path:
+        raise HTTPException(status_code=400, detail="asset_file_path 不能为空")
+
+    # 校验文件路径在 /files 目录下（安全约束）
+    from ..services.app_paths import data_dir
+    import os
+    data_dir_path = data_dir()
+    full_path = os.path.join(data_dir_path, file_path.lstrip("/"))
+    if not os.path.exists(full_path) or not full_path.startswith(os.path.abspath(data_dir_path)):
+        raise HTTPException(status_code=400, detail="文件路径无效或不在允许的目录下")
+
+    run_id = new_run_id()
+
+    # 读取 series_bible（用于上下文）
+    series_bible = _context_store.get_series_bible(project_id=project_id, version="v1") or {}
+
+    # 构建 ingest prompt
+    ingest_role = prompt_registry.get_template_prompt("visual_dna_ingest_system")
+    ingest_system = compose_system_prompt_xml(
+        PromptModules(
+            role_definition=ingest_role,
+            series_bible=series_bible,
+            constraints=[
+                "输出必须是严格的 JSON object，符合指定的 schema。",
+                "visual_dna 字段必须包含角色的核心视觉特征（不可变）。",
+                "technical_specs 字段包含光影/角度等可变参数。",
+            ],
+            instruction=[
+                f"分析文件路径：{file_path}",
+                "提取角色的 Visual DNA（面部特征、体型、发型、服装等）。",
+                "提取技术参数（光影、角度、构图、色彩）。",
+                "生成 stable_diffusion_tags（逗号分隔的标签串）。",
+                "仅输出 JSON，不要任何额外文本。",
+            ],
+            output_format="json",
+        )
+    )
+
+    # 注意：当前 LLM 不支持 vision，这里用文件路径作为文本描述
+    # 后续可扩展为真正的 vision API（如 GPT-4V、Claude Vision）
+    user_prompt = f"请分析以下图片文件并提取 Visual DNA：\n文件路径：{file_path}\n\n如果无法直接查看图片，请基于文件路径和可能的文件名信息进行合理推断。"
+
+    ingest_content = await _chat_client.chat(
+        settings=LlmChatSettings(
+            base_url=settings.base_url,
+            api_key=raw.get("api_key") or "",
+            model=settings.model,
+            temperature=settings.temperature,
+            max_tokens=settings.max_tokens,
+            timeout_seconds=settings.timeout_seconds,
+        ),
+        messages=[
+            {"role": "system", "content": ingest_system},
+            {"role": "user", "content": user_prompt},
+        ],
+    )
+
+    _context_store.snapshot_stage(project_id=project_id, run_id=run_id, stage_name="ingest.raw", data={"text": ingest_content})
+
+    # 解析 JSON
+    parsed = extract_json_any(ingest_content)
+    if not isinstance(parsed, dict):
+        repaired = await _repair_json_with_same_agent(
+            llm_settings=LlmChatSettings(
+                base_url=settings.base_url,
+                api_key=raw.get("api_key") or "",
+                model=settings.model,
+                temperature=0.0,
+                max_tokens=settings.max_tokens,
+                timeout_seconds=settings.timeout_seconds,
+            ),
+            system_prompt=ingest_system,
+            bad_output_text=str(ingest_content),
+            error_hint="Root type is not JSON object",
+            expected_hint="JSON object with keys: character_core, technical_specs, stable_diffusion_tags",
+        )
+        parsed = repaired
+        if not isinstance(parsed, dict):
+            raise HTTPException(status_code=422, detail="Visual DNA output must be a JSON object")
+
+    visual_dna = parsed
+    _context_store.snapshot_stage(project_id=project_id, run_id=run_id, stage_name="ingest.parsed", data={"visual_dna": visual_dna})
+
+    # 写入 context store
+    _context_store.put_visual_dna(project_id=project_id, item_id=item_id, data=visual_dna, version=req.version)
+
+    # 落盘 run 快照
+    _context_store.snapshot_run(
+        project_id=project_id,
+        run_id=run_id,
+        request=req.model_dump(),
+        response={"visual_dna": visual_dna},
+        meta={"workflow": "visual_dna_ingest", "item_id": item_id},
+    )
+
+    return VisualDnaIngestResponse(
+        run_id=run_id,
+        visual_dna=visual_dna,
+        qc_report=None,  # 可选：后续可加入 QC 检查
+    )
 
 

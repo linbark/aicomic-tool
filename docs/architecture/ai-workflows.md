@@ -18,8 +18,8 @@
 - **模块化 Prompt 组装**：role + context + constraints + instruction + output_format
 
 ## 非目标（阶段性不做）
-- 不做“图片→JSON”视觉识别（当前 LLM 接口为纯 chat；后续可抽象 vision provider）
-- 不强制把 workflow 结果自动写入数据库 Episode/Scene/Shot（先返回给前端 + 落 runs 快照；后续再做 Apply-to-DB）
+- ~~不做“图片→JSON”视觉识别（当前 LLM 接口为纯 chat；后续可抽象 vision provider）~~ ✅ **已实现**（见 `docs/architecture/workflow-implementation.md` Phase 3）
+- ~~不强制把 workflow 结果自动写入数据库 Episode/Scene/Shot（先返回给前端 + 落 runs 快照；后续再做 Apply-to-DB）~~ ✅ **已实现**（见 `docs/architecture/workflow-implementation.md` Phase 0）
 
 ---
 
@@ -43,7 +43,8 @@
     - `list_templates_read()`：给前端模板管理 UI
   - 新增 workflow 模板 keys：
     - `architect_system` / `writer_system` / `qc_system`
-    - `storyboard_system` / `prompt_translate_system`
+    - `storyboard_system` / `prompt_translate_system` / `prompt_translate_mj_system`
+    - `visual_dna_ingest_system`
 
 - `backend/app/services/prompt_composer.py`
   - `PromptModules`：role_definition / series_bible / constraints / instruction / output_format / extra_blocks
@@ -54,7 +55,10 @@
     - `series_bible.v1.json`
     - `visual_dna.asset_item_{item_id}.v1.json`
     - 每次 workflow：`runs/{run_id}/{request,response,meta}.json`
+    - 每个 stage：`runs/{run_id}/stages/{stage_name}.json`
   - `snapshot_run()`：落盘可审计输入输出
+  - `snapshot_stage()`：落盘每个 stage 的中间产物
+  - `list_runs()` / `read_run()` / `list_stages()` / `read_stage()`：浏览和审计功能
 
 ---
 
@@ -124,6 +128,10 @@
 4. （可选）SplitScenes：从最终 `script_fountain` 派生场列表
 5. 落盘：`runs/{run_id}` 快照
 
+**前端集成**：✅ 已实现（`ScriptPage.tsx` 中的 `handleWorkflowScript` 和 `handleApplyWorkflowScript`）
+
+**前端集成**：✅ 已实现（`ScriptPage.tsx` 中的 `handleWorkflowScript` 和 `handleApplyWorkflowScript`）
+
 ### 3) Workflow：分镜 + 提示词（storyboard）
 
 - `POST /ai/workflows/storyboard`
@@ -133,14 +141,20 @@
   - `options`：
     - `max_shots`
     - `asset_item_ids`：用于锁定视觉 DNA（从 context 读取）
+    - `prompt_style`：`"sd_tags"` | `"mj_v6"`（新增）
+    - `aspect_ratio`：如 `"16:9"`（新增，仅 MJ v6 模式）
 - Response：
   - `run_id`
   - `shots`：镜头列表（包含 prompt/negative_prompt）
 
 工作流步骤：
 1. StoryboardAgent：输出镜头结构（ShotSpec 列表，严格 JSON）
-2. PromptTranslateAgent：为每个镜头生成 SD/Flux 风格 `prompt/negative_prompt`（严格 JSON）
+2. PromptTranslateAgent：根据 `prompt_style` 选择模板，为每个镜头生成对应风格的 `prompt/negative_prompt`（严格 JSON）
+   - `sd_tags`：SD/Flux tags 风格（逗号分隔）
+   - `mj_v6`：Midjourney v6 风格（自然语言，`::` 分隔符，含 `--ar`、`--v 6.0`、`--stylize 250`）
 3. 合并输出并落盘快照
+
+**前端集成**：✅ 已实现（`ScriptPage.tsx` 中的 `handleWorkflowStoryboard` 和 `handleApplyWorkflowStoryboard`，含 prompt style 选择器）
 
 ---
 
@@ -173,9 +187,15 @@ workflow 的 system prompt 最终由 `PromptComposer` 组装，模板内容主�
 - `request.json`：原始输入（含 options）
 - `response.json`：最终输出（含 run_id）
 - `meta.json`：`{ project_id, run_id, created_at_ms, workflow }`
+- `stages/{stage_name}.json`：每个 stage 的中间产物（✅ 已实现）
 
-后续可扩展：
-- `stages/architect.json`、`stages/writer.json`、`stages/qc_1.json` …（用于更细粒度追踪）
+**审计 API**：✅ 已实现
+- `GET /ai/runs-files?project_id=...` - 列出所有 runs
+- `GET /ai/runs-files/{run_id}?project_id=...` - 读取完整 run
+- `GET /ai/runs-files/{run_id}/stages?project_id=...` - 列出所有 stages
+- `GET /ai/runs-files/{run_id}/stages/{stage_name}?project_id=...` - 读取指定 stage
+
+**前端页面**：✅ 已实现（`RunInspectorPage.tsx`，路由 `/runs`）
 
 ---
 
@@ -194,8 +214,25 @@ workflow 的 system prompt 最终由 `PromptComposer` 组装，模板内容主�
 ## 错误处理与限流策略（当前实现）
 
 - 未配置 API Key：`400 AI API Key 未配置`
-- LLM 输出不符合 schema：`422`
+- LLM 输出不符合 schema：`422`（自动修复一次，失败则返回错误）
 - `qc_loops` 做上限保护：最多 5 次（避免失控的成本/时间）
 - `asset_item_ids` 上限 50（避免 prompt 过长）
+- Context 版本格式校验：`v\d+`（如 `v1`、`v2`）
+- Visual DNA 摄取文件路径校验：必须在 `/files` 目录下
+
+## 新增功能（实现状态）
+
+✅ **已实现**（详见 `docs/architecture/workflow-implementation.md`）：
+- Phase 0: 前端 Workflow 集成（ScriptPage 的 handler 函数）
+- Phase 1: Context 管理 UI（ContextPage，路由 `/context`）
+- Phase 2: Run 快照审计（RunInspectorPage，路由 `/runs`）
+- Phase 3: Visual DNA 摄取（`POST /ai/visual-dna/ingest`）
+- Phase 4: 多平台提示词方言（SD tags / Midjourney v6）
+
+## 相关文档
+
+- [Workflow 功能实现文档](./workflow-implementation.md) - 详细的功能实现说明
+- [JSON 一致性优化](../JSON一致性优化.md) - Visual DNA 的设计理念
+- [AI 漫剧创作 Prompt 指导原则](../AI%20漫剧创作%20Prompt%20指导原则.md) - Prompt 工程最佳实践
 
 
