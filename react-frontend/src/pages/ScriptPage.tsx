@@ -1348,137 +1348,202 @@ export function ScriptPage() {
                   </div>
                 ) : null}
 
-                {/* Workstation Body: Input & Output */}
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, height: 420 }}>
-                  {/* Left: Input */}
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                    <div style={styles.labelRow}>
-                      <div style={styles.label}>输入 (Input)</div>
-                      <button
-                        style={styles.btnPrimary}
-                        disabled={
-                          aiWritingBusy !== null || isSplitting || workflowBusy !== null || !workstationInput.trim()
-                        }
-                        onClick={() => {
-                          if (epActionTab === 'outline_generate') handleOutlineGenerate().catch(() => {})
-                          else if (epActionTab === 'outline_optimize') handleOutlineOptimize().catch(() => {})
-                          else if (epActionTab === 'generate_script') handleGenerateScript().catch(() => {})
-                          else if (epActionTab === 'script_optimize') handleScriptOptimize().catch(() => {})
-                          else if (epActionTab === 'split_scenes') handleAutoSplit().catch(() => {})
-                        }}
-                      >
-                        {aiWritingBusy || isSplitting || workflowBusy === 'script' ? '运行中...' : '开始执行'}
-                      </button>
-                    </div>
-                    <textarea
-                      value={workstationInput}
-                      onChange={(e) => {
-                        const v = e.target.value
-                        setWorkstationDirty(true)
-                        setWorkstationInput(v)
-                        if (projectId && selected.kind === 'episode') {
-                          const wsKey = _draftKeyWorkstation(projectId, selected.episodeId, epActionTab)
-                          workstationDirtyKeyRef.current = wsKey
-                          _lsSet(wsKey, v)
-                        }
-                      }}
-                      style={{ ...styles.textarea, flex: 1, height: 'auto' }}
-                      placeholder={
-                        epActionTab === 'outline_generate' ? '输入故事概念、Logline...' :
-                        epActionTab === 'outline_optimize' ? '输入大纲草稿...' :
-                        epActionTab === 'generate_script' ? '输入大纲...' :
-                        '输入剧本...'
-                      }
-                    />
-                    {aiWritingError || splitError ? (
-                      <div style={{ color: '#f87171', fontSize: 12, whiteSpace: 'pre-wrap' }}>
-                        {typeof (aiWritingError || splitError) === 'object'
-                          ? JSON.stringify(aiWritingError || splitError, null, 2)
-                          : String(aiWritingError || splitError)}
-                      </div>
-                    ) : null}
-                  </div>
-
-                  {/* Right: Output */}
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                    <div style={styles.labelRow}>
-                      <div style={styles.label}>输出 (Output)</div>
-                      <div style={{ display: 'flex', gap: 8 }}>
-                        <select
-                          value={epSelectedRunId[epActionTab] || ''}
-                          onChange={(e) => setEpSelectedRunId(p => ({ ...p, [epActionTab]: Number(e.target.value) }))}
-                          style={{ ...styles.select, maxWidth: 120 }}
-                        >
-                          {(epRuns[epActionTab] || []).length === 0 && <option value="">无记录</option>}
-                          {(epRuns[epActionTab] || []).map(r => (
-                            <option key={r.id} value={r.id}>#{r.id} {r.created_at.slice(5, 16)}</option>
-                          ))}
-                        </select>
-                        {epActionTab === 'outline_generate' || epActionTab === 'outline_optimize' ? (
-                          <button
-                            style={styles.btn}
-                            disabled={!selectedEpRun}
-                            onClick={() => {
-                              const raw = selectedEpRun?.output_text || ''
-                              setOutlinePreview({ raw, parsed: tryParseJsonObject(raw) })
-                              setOutlinePreviewMode('preview')
-                            }}
-                            title="将大纲以预览界面展示（优先解析 JSON；否则展示分段文本）"
-                          >
-                            预览结果
-                          </button>
-                        ) : null}
+                {/* Workstation Body: 新建区域 + 历史版本列表 */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                  {/* 新建区域 */}
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                    {/* Left: Input */}
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      <div style={styles.labelRow}>
+                        <div style={styles.label}>新建输入</div>
                         <button
-                          style={styles.btn}
-                          disabled={!selectedEpRun}
-                          onClick={() => applyEpRunToEditor(selectedEpRun)}
-                          title="应用到下方 Master 编辑器"
+                          style={styles.btnPrimary}
+                          disabled={
+                            aiWritingBusy !== null || isSplitting || workflowBusy !== null || !workstationInput.trim()
+                          }
+                          onClick={() => {
+                            if (epActionTab === 'outline_generate') handleOutlineGenerate().catch(() => {})
+                            else if (epActionTab === 'outline_optimize') handleOutlineOptimize().catch(() => {})
+                            else if (epActionTab === 'generate_script') handleGenerateScript().catch(() => {})
+                            else if (epActionTab === 'script_optimize') handleScriptOptimize().catch(() => {})
+                            else if (epActionTab === 'split_scenes') handleAutoSplit().catch(() => {})
+                          }}
                         >
-                          应用结果
+                          {aiWritingBusy || isSplitting || workflowBusy === 'script' ? '运行中...' : '开始执行'}
                         </button>
                       </div>
+                      <textarea
+                        value={workstationInput}
+                        onChange={(e) => {
+                          const v = e.target.value
+                          setWorkstationDirty(true)
+                          setWorkstationInput(v)
+                          if (projectId && selected.kind === 'episode') {
+                            const wsKey = _draftKeyWorkstation(projectId, selected.episodeId, epActionTab)
+                            workstationDirtyKeyRef.current = wsKey
+                            _lsSet(wsKey, v)
+                          }
+                        }}
+                        style={{ ...styles.textarea, height: 120 }}
+                        placeholder={
+                          epActionTab === 'outline_generate' ? '输入故事概念、Logline...' :
+                          epActionTab === 'outline_optimize' ? '输入大纲草稿...' :
+                          epActionTab === 'generate_script' ? '输入大纲...' :
+                          '输入剧本...'
+                        }
+                      />
+                      {aiWritingError || splitError ? (
+                        <div style={{ color: '#f87171', fontSize: 12, whiteSpace: 'pre-wrap' }}>
+                          {typeof (aiWritingError || splitError) === 'object'
+                            ? JSON.stringify(aiWritingError || splitError, null, 2)
+                            : String(aiWritingError || splitError)}
+                        </div>
+                      ) : null}
+                    </div>
+                    {/* Right: 提示区域 */}
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.15)', borderRadius: 8, padding: 16 }}>
+                      <div style={{ textAlign: 'center', opacity: 0.5, fontSize: 13 }}>
+                        <div style={{ marginBottom: 8 }}>点击「开始执行」后</div>
+                        <div>结果将显示在下方历史记录中</div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* 历史版本区域 */}
+                  <div style={{ borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: 12 }}>
+                    <div style={{ ...styles.labelRow, marginBottom: 8 }}>
+                      <div style={styles.label}>
+                        历史版本 ({(epRuns[epActionTab] || []).length} 条)
+                      </div>
+                      <div style={{ fontSize: 11, opacity: 0.5 }}>滚动查看更多</div>
                     </div>
 
-                    {/* Output Display */}
+                    {/* Split Scenes 特殊处理 */}
                     {epActionTab === 'split_scenes' ? (
-                      <div style={{ ...styles.textarea, flex: 1, height: 'auto', overflow: 'auto', background: 'rgba(0,0,0,0.25)' }}>
-                         {/* Split Scenes Preview List */}
-                         {splitScenesPreview.length === 0 ? (
-                            <div style={styles.empty}>暂无分场结果</div>
-                         ) : (
-                           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                              <div style={{ padding: 4, fontSize: 12, opacity: 0.7 }}>
-                                <button
-                                  style={styles.smallBtn}
-                                  disabled={isImporting}
-                                  onClick={() => handleImportScenes().catch(() => {})}
-                                >
-                                  {isImporting ? '导入中...' : '一键创建场景'}
-                                </button>
-                                <label style={{ marginLeft: 8 }}><input type="checkbox" checked={overwriteOnImport} onChange={e => setOverwriteOnImport(e.target.checked)} /> 覆盖</label>
+                      <div style={{ maxHeight: 400, overflowY: 'auto', background: 'rgba(0,0,0,0.15)', borderRadius: 8, padding: 12 }}>
+                        {splitScenesPreview.length === 0 ? (
+                          <div style={styles.empty}>暂无分场结果，请在上方输入剧本并点击「开始执行」</div>
+                        ) : (
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                            <div style={{ padding: 4, fontSize: 12, opacity: 0.7 }}>
+                              <button
+                                style={styles.smallBtn}
+                                disabled={isImporting}
+                                onClick={() => handleImportScenes().catch(() => {})}
+                              >
+                                {isImporting ? '导入中...' : '一键创建场景'}
+                              </button>
+                              <label style={{ marginLeft: 8 }}><input type="checkbox" checked={overwriteOnImport} onChange={e => setOverwriteOnImport(e.target.checked)} /> 覆盖</label>
+                            </div>
+                            {splitScenesPreview.map((sc) => (
+                              <div key={sc._key} style={{ padding: 8, background: 'rgba(255,255,255,0.05)', borderRadius: 6 }}>
+                                <div style={{ fontWeight: 700, fontSize: 12 }}>{sc.title}</div>
+                                <div style={{ fontSize: 12, opacity: 0.8 }}>{sc.description}</div>
                               </div>
-                              {splitScenesPreview.map((sc) => (
-                                <div key={sc._key} style={{ padding: 8, background: 'rgba(255,255,255,0.05)', borderRadius: 6 }}>
-                                  <div style={{ fontWeight: 700, fontSize: 12 }}>{sc.title}</div>
-                                  <div style={{ fontSize: 12, opacity: 0.8 }}>{sc.description}</div>
-                                </div>
-                              ))}
-                           </div>
-                         )}
+                            ))}
+                          </div>
+                        )}
                       </div>
                     ) : (
-                      <textarea
-                        readOnly
-                        value={sanitizeOutputForDisplay(selectedEpRun?.output_text || '')}
-                        style={{ ...styles.textarea, flex: 1, height: 'auto' }}
-                        placeholder="这里显示生成结果..."
-                      />
-                    )}
-                    {selectedEpRun?.output_text && looksLikeTruncatedJson(selectedEpRun.output_text) ? (
-                      <div style={{ color: '#fbbf24', fontSize: 12, whiteSpace: 'pre-wrap' }}>
-                        提示：该输出看起来像被截断（常见原因：AI 设置里的 max_tokens 太小）。请到「AI 设置」把 max_tokens 调大后重试。
+                      /* 历史版本列表 - 双列布局（最新的在上面） */
+                      <div style={{ maxHeight: 400, overflowY: 'auto' }}>
+                        {(epRuns[epActionTab] || []).length === 0 ? (
+                          <div style={{ ...styles.empty, padding: 32 }}>暂无历史记录，请在上方输入内容并点击「开始执行」</div>
+                        ) : (
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                            {(epRuns[epActionTab] || []).slice().sort((a, b) => a.id - b.id).map((run, idx) => (
+                              <div
+                                key={run.id}
+                                style={{
+                                  display: 'grid',
+                                  gridTemplateColumns: '1fr 1fr',
+                                  gap: 12,
+                                  background: 'rgba(0,0,0,0.15)',
+                                  borderRadius: 8,
+                                  padding: 12,
+                                  border: '1px solid rgba(255,255,255,0.05)',
+                                }}
+                              >
+                                {/* Left: Input */}
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                    <div style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.6)' }}>
+                                      #{run.id} · {run.created_at.slice(0, 16).replace('T', ' ')}
+                                    </div>
+                                    <div style={{ fontSize: 10, opacity: 0.4 }}>输入</div>
+                                  </div>
+                                  <div
+                                    style={{
+                                      flex: 1,
+                                      background: 'rgba(0,0,0,0.2)',
+                                      borderRadius: 6,
+                                      padding: 8,
+                                      fontSize: 12,
+                                      lineHeight: 1.5,
+                                      maxHeight: 150,
+                                      overflowY: 'auto',
+                                      whiteSpace: 'pre-wrap',
+                                      wordBreak: 'break-word',
+                                    }}
+                                  >
+                                    {run.input_text || '(无输入)'}
+                                  </div>
+                                </div>
+                                {/* Right: Output */}
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                    <div style={{ fontSize: 10, opacity: 0.4 }}>输出</div>
+                                    <div style={{ display: 'flex', gap: 6 }}>
+                                      {(epActionTab === 'outline_generate' || epActionTab === 'outline_optimize') && (
+                                        <button
+                                          style={{ ...styles.smallBtn, fontSize: 10, padding: '2px 6px' }}
+                                          onClick={() => {
+                                            const raw = run.output_text || ''
+                                            setOutlinePreview({ raw, parsed: tryParseJsonObject(raw) })
+                                            setOutlinePreviewMode('preview')
+                                          }}
+                                          title="预览大纲"
+                                        >
+                                          预览
+                                        </button>
+                                      )}
+                                      <button
+                                        style={{ ...styles.smallBtn, fontSize: 10, padding: '2px 6px' }}
+                                        onClick={() => applyEpRunToEditor(run)}
+                                        title="应用到下方 Master 编辑器"
+                                      >
+                                        应用
+                                      </button>
+                                    </div>
+                                  </div>
+                                  <div
+                                    style={{
+                                      flex: 1,
+                                      background: 'rgba(0,0,0,0.2)',
+                                      borderRadius: 6,
+                                      padding: 8,
+                                      fontSize: 12,
+                                      lineHeight: 1.5,
+                                      maxHeight: 150,
+                                      overflowY: 'auto',
+                                      whiteSpace: 'pre-wrap',
+                                      wordBreak: 'break-word',
+                                    }}
+                                  >
+                                    {sanitizeOutputForDisplay(run.output_text || '')}
+                                  </div>
+                                  {run.output_text && looksLikeTruncatedJson(run.output_text) ? (
+                                    <div style={{ color: '#fbbf24', fontSize: 10 }}>
+                                      提示：输出可能被截断，请调大 max_tokens
+                                    </div>
+                                  ) : null}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
-                    ) : null}
+                    )}
                   </div>
                 </div>
 

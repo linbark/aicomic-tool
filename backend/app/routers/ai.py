@@ -456,8 +456,29 @@ def delete_prompt(key: str):
 # 写作类能力：大纲优化 / 剧本生成
 # ==========================
 
+# 记忆系统辅助函数
+def _build_memory_context(retrieval_results: Dict[str, Any]) -> str:
+    """将检索结果格式化为可注入 prompt 的上下文"""
+    from ..services.memory_retriever import MemoryRetriever
+    retriever = MemoryRetriever()
+    formatted = retriever.format_for_prompt(retrieval_results)
+    
+    parts = []
+    if "L2_static" in formatted and formatted["L2_static"]:
+        parts.append(f"## 世界观与角色设定\n{formatted['L2_static']}")
+    if "L1" in formatted and formatted["L1"]:
+        parts.append(f"## 已有剧情\n{formatted['L1']}")
+    if "L2_dynamic" in formatted and formatted["L2_dynamic"]:
+        parts.append(f"## 剧情进展\n{formatted['L2_dynamic']}")
+    if "negative_constraints" in formatted and formatted["negative_constraints"]:
+        parts.append(f"## 约束条件（必须遵守）\n{formatted['negative_constraints']}")
+    
+    return "\n\n".join(parts) if parts else ""
+
+
 class OutlineGenerateRequest(BaseModel):
     text: str
+    project_id: Optional[int] = None  # 新增：如果提供则启用记忆检索
 
 class OutlineGenerateResponse(BaseModel):
     text: str
@@ -474,6 +495,32 @@ async def outline_generate(req: OutlineGenerateRequest):
         return OutlineGenerateResponse(text="")
 
     system_prompt = prompt_registry.get_template_prompt("outline_generate_system")
+    
+    # 如果提供了 project_id，检索并注入记忆
+    if req.project_id:
+        try:
+            from ..services.memory_retriever import get_memory_retriever
+            from ..services.memory_indexer import MemoryIndexer
+            
+            # 确保记忆已索引
+            indexer = MemoryIndexer()
+            indexer.index_series_bible(project_id=req.project_id, version="v1")
+            
+            # 检索记忆
+            retriever = get_memory_retriever()
+            retrieval_results = retriever.retrieve_for_task(
+                project_id=req.project_id,
+                task_description=f"生成大纲: {user_text[:200]}",
+            )
+            
+            # 格式化并注入到 system prompt
+            memory_context = _build_memory_context(retrieval_results)
+            if memory_context:
+                system_prompt = f"{system_prompt}\n\n## 记忆上下文\n\n{memory_context}"
+        except Exception as e:
+            # 记忆检索失败不阻断主流程，只记录日志
+            print(f"[AI][outline_generate] Memory retrieval failed: {e}")
+    
     # 大纲类输出容易较长，给一个最低 max_tokens，避免中途截断
     effective_max_tokens = max(int(settings.max_tokens or 0), 4096)
     content = await _chat_client.chat(
@@ -495,6 +542,7 @@ async def outline_generate(req: OutlineGenerateRequest):
 
 class OutlineOptimizeRequest(BaseModel):
     text: str
+    project_id: Optional[int] = None  # 新增：如果提供则启用记忆检索
 
 
 class OutlineOptimizeResponse(BaseModel):
@@ -513,6 +561,31 @@ async def outline_optimize(req: OutlineOptimizeRequest):
         return OutlineOptimizeResponse(text="")
 
     system_prompt = prompt_registry.get_template_prompt("outline_optimize_system")
+    
+    # 如果提供了 project_id，检索并注入记忆
+    if req.project_id:
+        try:
+            from ..services.memory_retriever import get_memory_retriever
+            from ..services.memory_indexer import MemoryIndexer
+            
+            # 确保记忆已索引
+            indexer = MemoryIndexer()
+            indexer.index_series_bible(project_id=req.project_id, version="v1")
+            
+            # 检索记忆
+            retriever = get_memory_retriever()
+            retrieval_results = retriever.retrieve_for_task(
+                project_id=req.project_id,
+                task_description=f"优化大纲: {user_text[:200]}",
+            )
+            
+            # 格式化并注入到 system prompt
+            memory_context = _build_memory_context(retrieval_results)
+            if memory_context:
+                system_prompt = f"{system_prompt}\n\n## 记忆上下文\n\n{memory_context}"
+        except Exception as e:
+            print(f"[AI][outline_optimize] Memory retrieval failed: {e}")
+    
     effective_max_tokens = max(int(settings.max_tokens or 0), 4096)
     content = await _chat_client.chat(
         settings=LlmChatSettings(
@@ -533,6 +606,7 @@ async def outline_optimize(req: OutlineOptimizeRequest):
 
 class ScriptGenerateRequest(BaseModel):
     text: str
+    project_id: Optional[int] = None  # 新增：如果提供则启用记忆检索
 
 
 class ScriptGenerateResponse(BaseModel):
@@ -551,6 +625,36 @@ async def generate_script(req: ScriptGenerateRequest):
         return ScriptGenerateResponse(text="")
 
     system_prompt = prompt_registry.get_template_prompt("script_generate_system")
+    
+    # 如果提供了 project_id，检索并注入记忆
+    if req.project_id:
+        try:
+            from ..services.memory_retriever import get_memory_retriever
+            from ..services.memory_indexer import MemoryIndexer
+            
+            # 确保记忆已索引
+            indexer = MemoryIndexer()
+            indexer.index_series_bible(project_id=req.project_id, version="v1")
+            
+            # 检索记忆（剧本生成需要更多上下文）
+            retriever = get_memory_retriever()
+            retrieval_results = retriever.retrieve_for_task(
+                project_id=req.project_id,
+                task_description=f"生成剧本: {user_text[:200]}",
+                top_k_per_layer={
+                    "L1": 15,  # 更多历史剧情
+                    "L2_static": 10,  # 更多世界观设定
+                    "L2_dynamic": 10,
+                },
+            )
+            
+            # 格式化并注入到 system prompt
+            memory_context = _build_memory_context(retrieval_results)
+            if memory_context:
+                system_prompt = f"{system_prompt}\n\n## 记忆上下文\n\n{memory_context}"
+        except Exception as e:
+            print(f"[AI][generate_script] Memory retrieval failed: {e}")
+    
     effective_max_tokens = max(int(settings.max_tokens or 0), 4096)
     content = await _chat_client.chat(
         settings=LlmChatSettings(
@@ -571,6 +675,7 @@ async def generate_script(req: ScriptGenerateRequest):
 
 class ScriptOptimizeRequest(BaseModel):
     text: str
+    project_id: Optional[int] = None  # 新增：如果提供则启用记忆检索
 
 
 class ScriptOptimizeResponse(BaseModel):
@@ -589,6 +694,31 @@ async def script_optimize(req: ScriptOptimizeRequest):
         return ScriptOptimizeResponse(text="")
 
     system_prompt = prompt_registry.get_template_prompt("script_optimize_system")
+    
+    # 如果提供了 project_id，检索并注入记忆
+    if req.project_id:
+        try:
+            from ..services.memory_retriever import get_memory_retriever
+            from ..services.memory_indexer import MemoryIndexer
+            
+            # 确保记忆已索引
+            indexer = MemoryIndexer()
+            indexer.index_series_bible(project_id=req.project_id, version="v1")
+            
+            # 检索记忆
+            retriever = get_memory_retriever()
+            retrieval_results = retriever.retrieve_for_task(
+                project_id=req.project_id,
+                task_description=f"优化剧本: {user_text[:200]}",
+            )
+            
+            # 格式化并注入到 system prompt
+            memory_context = _build_memory_context(retrieval_results)
+            if memory_context:
+                system_prompt = f"{system_prompt}\n\n## 记忆上下文\n\n{memory_context}"
+        except Exception as e:
+            print(f"[AI][script_optimize] Memory retrieval failed: {e}")
+    
     effective_max_tokens = max(int(settings.max_tokens or 0), 4096)
     content = await _chat_client.chat(
         settings=LlmChatSettings(
@@ -738,23 +868,61 @@ async def workflow_script(req: WorkflowScriptRequest):
     # 读取已有 series_bible（可为空）
     existing_bible = _context_store.get_series_bible(project_id=project_id, version="v1")
 
+    # 检索并注入记忆（增强一致性）
+    memory_context = ""
+    try:
+        from ..services.memory_retriever import get_memory_retriever
+        from ..services.memory_indexer import MemoryIndexer
+        
+        # 确保记忆已索引
+        indexer = MemoryIndexer()
+        indexer.index_series_bible(project_id=project_id, version="v1")
+        
+        # 检索记忆
+        retriever = get_memory_retriever()
+        retrieval_results = retriever.retrieve_for_task(
+            project_id=project_id,
+            task_description=f"架构师：生成世界观和节拍表 - {user_text[:200]}",
+            top_k_per_layer={
+                "L1": 10,
+                "L2_static": 10,
+                "L2_dynamic": 5,
+            },
+        )
+        
+        # 格式化记忆
+        memory_context = _build_memory_context(retrieval_results)
+    except Exception as e:
+        print(f"[AI][workflow_script][architect] Memory retrieval failed: {e}")
+
     # 1) 架构师：产出 series_bible + beat_sheet
     architect_role = prompt_registry.get_template_prompt("architect_system")
+    
+    # 构建约束（包含检索到的负向约束）
+    architect_constraints = [
+        "视觉优先：忽略内心独白，只提取可被镜头呈现的信息。",
+        "输出必须是 JSON object，且仅包含 keys: series_bible(object), beat_sheet(array)。",
+    ]
+    
+    # 构建 extra_blocks（包含记忆上下文）
+    extra_blocks = {}
+    if memory_context:
+        extra_blocks["memory_context"] = memory_context
+    
     architect_system = compose_system_prompt_xml(
         PromptModules(
             role_definition=architect_role,
             series_bible=existing_bible,
-            constraints=[
-                "视觉优先：忽略内心独白，只提取可被镜头呈现的信息。",
-                "输出必须是 JSON object，且仅包含 keys: series_bible(object), beat_sheet(array)。",
-            ],
+            constraints=architect_constraints,
             instruction=[
                 "阅读 user 输入（可能是大纲/章节/需求）。",
+                "参考 memory_context 中已有的设定和约束。",
                 "生成 series_bible（世界观规则、角色、视觉DNA引用、术语表、禁忌）。",
                 "生成 beat_sheet（节拍类型/情感电荷/视觉重点/预估格数）。",
                 "仅输出 JSON，不要任何额外文本。",
             ],
             output_format="json",
+            extra_blocks=extra_blocks,
         )
     )
     architect_content = await _chat_client.chat(
@@ -827,6 +995,14 @@ async def workflow_script(req: WorkflowScriptRequest):
 
     # 写回 context（file-first）
     _context_store.put_series_bible(project_id=project_id, data=series_bible, version="v1")
+    
+    # 重新索引记忆（SeriesBible 更新后）
+    try:
+        from ..services.memory_indexer import MemoryIndexer
+        indexer = MemoryIndexer()
+        indexer.index_series_bible(project_id=project_id, version="v1", source_ref=f"{run_id}.architect")
+    except Exception as e:
+        print(f"[AI][workflow_script] Memory indexing failed: {e}")
 
     # 2) 编剧：产出 Fountain（放在 JSON 字段里传输）
     writer_role = prompt_registry.get_template_prompt("writer_system")
@@ -885,6 +1061,46 @@ async def workflow_script(req: WorkflowScriptRequest):
             raise HTTPException(status_code=422, detail="Writer output must be a JSON object")
     script_fountain = str(writer_parsed.get("script_fountain") or "").strip()
     _context_store.snapshot_stage(project_id=project_id, run_id=run_id, stage_name="writer.parsed", data={"script_fountain": script_fountain})
+
+    # Writer 完成：提取并写入 dynamic_plot（章节摘要、人物关系）
+    try:
+        from ..services.state_extractor import StateChangeExtractor
+        from ..services.memory_store import get_memory_store
+        from ..workflows.memory_schemas import MemoryNamespace, MemoryRecord, MemoryType
+        
+        extractor = StateChangeExtractor()
+        memory_store = get_memory_store()
+        
+        # 从 beat_sheet 和 script_fountain 提取状态变更
+        structured_data = {
+            "beat_sheet": beat_sheet,
+            "script_fountain": script_fountain,
+        }
+        extractor.extract_from_structured_output(
+            project_id=project_id,
+            structured_data=structured_data,
+            source_ref=f"{run_id}.writer",
+        )
+        
+        # 写入 dynamic_plot（章节摘要）
+        # 简化：将 beat_sheet 摘要写入 dynamic_plot
+        if beat_sheet:
+            summary_text = f"章节摘要：包含 {len(beat_sheet)} 个节拍。主要节拍：{', '.join([b.get('title', '') or b.get('description', '')[:30] for b in beat_sheet[:5]])}"
+            dynamic_record = MemoryRecord(
+                project_id=project_id,
+                namespace=MemoryNamespace.DYNAMIC_PLOT,
+                type=MemoryType.EVENT,
+                entity=None,
+                content=summary_text,
+                payload_json={
+                    "beat_count": len(beat_sheet),
+                    "beat_sheet": beat_sheet[:10],  # 只存前10个节拍
+                },
+                source_ref=f"{run_id}.writer",
+            )
+            memory_store.write(dynamic_record)
+    except Exception as e:
+        print(f"[AI][workflow_script][writer] Memory write failed: {e}")
 
     # 3) QC：循环自检/修订
     qc_role = prompt_registry.get_template_prompt("qc_system")
@@ -955,6 +1171,19 @@ async def workflow_script(req: WorkflowScriptRequest):
                 except Exception as e2:
                     raise HTTPException(status_code=422, detail=f"QC output schema invalid: {e2}")
         _context_store.snapshot_stage(project_id=project_id, run_id=run_id, stage_name=f"qc.parsed.{_i+1}", data={"qc_report": qc_report, "script_fountain": script_fountain})
+        
+        # 每轮 QC：写入修订原因+变化摘要到 episodic 记忆
+        if qc_report.get("issues"):
+            try:
+                from ..services.state_extractor import StateChangeExtractor
+                extractor = StateChangeExtractor()
+                extractor.extract_from_qc_report(
+                    project_id=project_id,
+                    qc_report=qc_report,
+                    source_ref=f"{run_id}.qc.{_i+1}",
+                )
+            except Exception as e:
+                print(f"[AI][workflow_script][qc.{_i+1}] Memory write failed: {e}")
 
     derived: Optional[Dict[str, Any]] = None
     if bool(req.options.derived_split_scenes):
@@ -1037,9 +1266,46 @@ async def workflow_storyboard(req: WorkflowStoryboardRequest):
         dna = _context_store.get_visual_dna(project_id=project_id, item_id=int(item_id), version="v1")
         if isinstance(dna, dict) and dna:
             visual_dna_list.append({"item_id": int(item_id), "visual_dna": dna})
+    
+    # 检索并注入记忆（增强视觉一致性）
+    memory_context = ""
+    try:
+        from ..services.memory_retriever import get_memory_retriever
+        from ..services.memory_indexer import MemoryIndexer
+        
+        # 确保记忆已索引（包括 VisualDNA）
+        indexer = MemoryIndexer()
+        indexer.index_series_bible(project_id=project_id, version="v1")
+        for item_id in req.options.asset_item_ids[:50]:
+            indexer.index_visual_dna(project_id=project_id, item_id=int(item_id), version="v1")
+        
+        # 检索记忆（重点检索角色设计和视觉规则）
+        retriever = get_memory_retriever()
+        retrieval_results = retriever.retrieve_for_task(
+            project_id=project_id,
+            task_description=f"分镜师：拆分场景为镜头列表 - {scene_text[:200]}",
+            top_k_per_layer={
+                "L1": 5,  # 较少历史剧情
+                "L2_static": 15,  # 更多角色设计和世界观
+                "L2_dynamic": 5,
+            },
+        )
+        
+        # 格式化记忆
+        memory_context = _build_memory_context(retrieval_results)
+    except Exception as e:
+        print(f"[AI][workflow_storyboard] Memory retrieval failed: {e}")
 
     # Step1: storyboard 拆分 ShotSpec（不含 SD prompt）
     storyboard_role = prompt_registry.get_template_prompt("storyboard_system")
+    
+    # 构建 extra_blocks（包含 visual_dna 和记忆上下文）
+    extra_blocks = {
+        "locked_visual_dna": json.dumps(visual_dna_list, ensure_ascii=False, indent=2) if visual_dna_list else "",
+    }
+    if memory_context:
+        extra_blocks["memory_context"] = memory_context
+    
     storyboard_system = compose_system_prompt_xml(
         PromptModules(
             role_definition=storyboard_role,
@@ -1051,13 +1317,12 @@ async def workflow_storyboard(req: WorkflowStoryboardRequest):
             ],
             instruction=[
                 "把 scene_text 拆成镜头列表。",
+                "参考 locked_visual_dna 和 memory_context 中的角色设计，确保视觉一致性。",
                 "动作原子化：每个镜头只包含一个清晰可视动作。",
                 "仅输出 JSON，不要任何额外文本。",
             ],
             output_format="json",
-            extra_blocks={
-                "locked_visual_dna": json.dumps(visual_dna_list, ensure_ascii=False, indent=2) if visual_dna_list else "",
-            },
+            extra_blocks=extra_blocks,
         )
     )
     step1_content = await _chat_client.chat(
@@ -1121,6 +1386,18 @@ async def workflow_storyboard(req: WorkflowStoryboardRequest):
             raise HTTPException(status_code=422, detail=f"Storyboard output schema invalid: {e2}")
     shot_list = shot_specs
     _context_store.snapshot_stage(project_id=project_id, run_id=run_id, stage_name="storyboard.parsed", data={"shots": shot_list})
+
+    # Storyboard 完成：写入 episodic（镜头层状态变更：新增道具、伤势、人物入场/退场）
+    try:
+        from ..services.state_extractor import StateChangeExtractor
+        extractor = StateChangeExtractor()
+        extractor.extract_from_structured_output(
+            project_id=project_id,
+            structured_data={"shots": shot_list},
+            source_ref=f"{run_id}.storyboard",
+        )
+    except Exception as e:
+        print(f"[AI][workflow_storyboard][storyboard] Memory write failed: {e}")
 
     # Step2: 翻译为 prompt（根据 prompt_style 选择模板）
     prompt_style = (req.options.prompt_style or "sd_tags").strip()
@@ -1276,6 +1553,37 @@ async def workflow_storyboard(req: WorkflowStoryboardRequest):
         item["negative_prompt"] = add.get("negative_prompt")
         merged.append(item)
     _context_store.snapshot_stage(project_id=project_id, run_id=run_id, stage_name="prompt_translate.parsed", data={"shots": merged})
+
+    # PromptTranslate 完成：写入 production 记忆（prompt 参数、成功样例）
+    try:
+        from ..services.memory_store import get_memory_store
+        from ..workflows.memory_schemas import MemoryNamespace, MemoryRecord, MemoryType
+        
+        memory_store = get_memory_store()
+        
+        # 写入成功的 prompt 样例（只存前几个作为参考）
+        for i, shot in enumerate(merged[:5]):  # 只存前5个作为样例
+            if shot.get("prompt"):
+                production_record = MemoryRecord(
+                    project_id=project_id,
+                    namespace=MemoryNamespace.PRODUCTION,
+                    type=MemoryType.PROMPT_TEMPLATE,
+                    entity=None,
+                    content=f"Prompt 样例 {i+1}: {shot.get('prompt', '')[:200]}",
+                    payload_json={
+                        "prompt": shot.get("prompt"),
+                        "negative_prompt": shot.get("negative_prompt"),
+                        "prompt_style": req.options.prompt_style,
+                        "aspect_ratio": req.options.aspect_ratio,
+                        "shot_size": shot.get("shot_size"),
+                        "camera_angle": shot.get("camera_angle"),
+                        "lighting_style": shot.get("lighting_style"),
+                    },
+                    source_ref=f"{run_id}.prompt_translate",
+                )
+                memory_store.write(production_record)
+    except Exception as e:
+        print(f"[AI][workflow_storyboard][prompt_translate] Memory write failed: {e}")
 
     response: Dict[str, Any] = {"run_id": run_id, "shots": merged}
     _context_store.snapshot_run(

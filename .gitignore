@@ -1,0 +1,92 @@
+# General
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# IDE / Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+.env
+.venv
+venv/
+ENV/
+env/
+exvenv/
+status.json
+celerybeat-schedule
+celerybeat.pid
+
+# Node / Web
+node_modules/
+npm-cache/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+.npm
+.cache/
+dist/
+out/
+build/
+.next/
+.nuxt/
+.vuepress/dist
+.serverless/
+.fusebox/
+.dynamodb/
+.docusaurus/
+coverage/
+.nyc_output/
+
+# Rust / Tauri
+target/
+**/*.rs.bk
+Cargo.lock
+
+# Database
+*.db
+*.sqlite3
+*.sqlite
+
+# Logs
+*.log
+logs/
+
+# Project Specific
+# Ignore user generated projects but keep the directory structure if needed
+projects/*
+!projects/.gitkeep
+# Ignore local run data
+*/runs/
+*/context/
+

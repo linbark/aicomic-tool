@@ -1,9 +1,9 @@
 {
   "build": {
-    "beforeDevCommand": "sh -c \"npm --prefix ../react-frontend run dev -- --host 0.0.0.0 --port 5173 --strictPort || npm --prefix ../../react-frontend run dev -- --host 0.0.0.0 --port 5173 --strictPort\"",
-    "beforeBuildCommand": "sh -c \"npm --prefix ../react-frontend run build || npm --prefix ../../react-frontend run build\"",
+    "beforeDevCommand": "npm run dev -- --host 0.0.0.0 --port 5173 --strictPort",
+    "beforeBuildCommand": "npm run build",
     "devPath": "http://127.0.0.1:5173",
-    "distDir": "../../react-frontend/dist"
+    "distDir": "../dist"
   },
   "package": {
     "productName": "星晴",
@@ -49,5 +49,3 @@
     }
   }
 }
-
-
