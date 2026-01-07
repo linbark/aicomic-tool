@@ -1,3 +1,19 @@
+# AI Comic Tool (星晴)
+
+AI 漫剧创作工具 - 集成记忆系统的智能剧本生成与分镜工具。
+
+## 项目结构
+
+```
+aicomic-tool/
+├── backend/           # FastAPI 后端
+├── react-frontend/    # React + Tauri 前端
+│   ├── src/           # React 源码
+│   └── src-tauri/     # Tauri 桌面打包配置
+├── docs/              # 文档
+└── requirements.txt   # Python 依赖
+```
+
 ## 开发运行
 
 ### 后端（FastAPI）
@@ -17,10 +33,8 @@ npm run dev
 
 ### 桌面端（Tauri + React）
 
-> Tauri 壳在 `frontend/src-tauri/`，但 UI 已切换到 `react-frontend/`。
-
 ```bash
-cd frontend
+cd react-frontend
 npm install
 
 # 如需指定 Python（用于桌面端内置后端）
@@ -31,12 +45,25 @@ npm run tauri:dev
 
 ## 构建
 
+### Web 构建
+
 ```bash
-cd frontend
+cd react-frontend
+npm run build
+```
+
+### 桌面应用构建
+
+```bash
+cd react-frontend
 npm run tauri:build
 ```
 
-## 迁移说明
+构建产物位于 `react-frontend/src-tauri/target/release/bundle/`。
 
-- 旧 Vue 前端仍保留在 `frontend/src/`，作为迁移期间的回退与参考。
-- 新 React 前端在 `react-frontend/`，后续页面会逐步迁移替换。
+## 技术栈
+
+- **后端**: FastAPI + SQLite + Qdrant (向量数据库)
+- **前端**: React 19 + TypeScript + Vite
+- **桌面**: Tauri (Rust)
+- **AI**: DeepSeek API + BGE-M3 (Embedding)
