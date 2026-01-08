@@ -45,11 +45,19 @@ class DeepSeekChatClient:
         async with httpx.AsyncClient(timeout=timeout) as client:
             try:
                 resp = await client.post(url, headers=headers, json=payload)
-            except httpx.RequestError as e:
+            except Exception as e:
                 # 打印到终端以便排查
-                print(f"[AI][Error] Request failed: {type(e).__name__}: {e}")
-                # 返回详细错误给前端
-                raise HTTPException(status_code=502, detail=f"AI request failed: {type(e).__name__} - {e}")
+                error_name = type(e).__name__
+                error_msg = str(e)
+                print(f"[AI][Error] Request failed: {error_name}: {error_msg}")
+                
+                # SSL 错误特殊提示
+                if "SSL" in error_name or "ssl" in error_msg.lower():
+                    detail = f"SSL 连接失败 ({error_name})。可能原因：1) 正在使用代理（Clash等），请关闭或添加直连规则；2) Base URL 配置错误。原始错误: {error_msg}"
+                else:
+                    detail = f"AI request failed: {error_name} - {error_msg}"
+                
+                raise HTTPException(status_code=502, detail=detail)
 
         if resp.status_code >= 400:
             # 尝试透出错误内容，便于用户排查

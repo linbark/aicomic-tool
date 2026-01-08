@@ -58,6 +58,9 @@ class ContextStore:
     def series_bible_path(self, project_id: int, version: str = "v1") -> str:
         return os.path.join(project_context_dir(project_id), f"series_bible.{version}.json")
 
+    def project_outline_path(self, project_id: int, version: str = "v1") -> str:
+        return os.path.join(project_context_dir(project_id), f"project_outline.{version}.json")
+
     def visual_dna_path(self, project_id: int, item_id: int, version: str = "v1") -> str:
         return os.path.join(project_context_dir(project_id), f"visual_dna.asset_item_{int(item_id)}.{version}.json")
 
@@ -66,6 +69,14 @@ class ContextStore:
 
     def put_series_bible(self, project_id: int, data: Dict[str, Any], version: str = "v1") -> ContextFileMeta:
         path = self.series_bible_path(project_id, version)
+        _write_json(path, data)
+        return ContextFileMeta(path=path, version=version, updated_at_ms=int(time.time() * 1000))
+
+    def get_project_outline(self, project_id: int, version: str = "v1") -> Optional[Dict[str, Any]]:
+        return _read_json(self.project_outline_path(project_id, version))
+
+    def put_project_outline(self, project_id: int, data: Dict[str, Any], version: str = "v1") -> ContextFileMeta:
+        path = self.project_outline_path(project_id, version)
         _write_json(path, data)
         return ContextFileMeta(path=path, version=version, updated_at_ms=int(time.time() * 1000))
 

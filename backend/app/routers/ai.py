@@ -14,6 +14,7 @@ from ..workflows.schemas import BeatSheetItem, QcReport, SeriesBible, ShotSpec, 
 from ..database import get_db
 from .. import models
 from sqlalchemy.orm import Session
+import time
 
 
 router = APIRouter(
@@ -821,6 +822,486 @@ def put_visual_dna(project_id: int, item_id: int, payload: ContextWriteRequest):
         version=meta.version,
         path=meta.path,
         updated_at_ms=meta.updated_at_ms,
+    )
+
+
+# ==========================
+# Project Outline（项目级大纲）
+# ==========================
+
+class ProjectOutlineReadResponse(BaseModel):
+    project_id: int
+    version: str
+    exists: bool
+    data: Optional[Dict[str, Any]] = None
+
+
+class ProjectOutlineWriteRequest(BaseModel):
+    data: Dict[str, Any]
+    version: str = "v1"
+
+
+class ProjectOutlineWriteResponse(BaseModel):
+    project_id: int
+    version: str
+    path: str
+    updated_at_ms: int
+
+
+@router.get("/context/project-outline", response_model=ProjectOutlineReadResponse)
+def get_project_outline(project_id: int, version: str = "v1"):
+    """获取项目级大纲"""
+    data = _context_store.get_project_outline(project_id=project_id, version=version)
+    return ProjectOutlineReadResponse(
+        project_id=project_id,
+        version=version,
+        exists=bool(data),
+        data=data,
+    )
+
+
+@router.put("/context/project-outline", response_model=ProjectOutlineWriteResponse)
+def put_project_outline(project_id: int, payload: ProjectOutlineWriteRequest):
+    """保存项目级大纲"""
+    import re
+    if not re.match(r'^v\d+$', payload.version):
+        raise HTTPException(status_code=400, detail=f"version 格式无效，应为 v1, v2, ... 格式，当前: {payload.version}")
+    if not isinstance(payload.data, dict):
+        raise HTTPException(status_code=400, detail="data 必须是 JSON object")
+    meta = _context_store.put_project_outline(project_id=project_id, data=payload.data, version=payload.version)
+    return ProjectOutlineWriteResponse(
+        project_id=project_id,
+        version=meta.version,
+        path=meta.path,
+        updated_at_ms=meta.updated_at_ms,
+    )
+
+
+class ProjectOutlineGenerateRequest(BaseModel):
+    project_id: int
+    input_text: str  # 故事灵感/概要
+    num_episodes: int = 12  # 预计集数
+
+
+class ProjectOutlineGenerateResponse(BaseModel):
+    project_outline: Dict[str, Any]
+
+
+@router.post("/project-outline-generate", response_model=ProjectOutlineGenerateResponse)
+async def project_outline_generate(req: ProjectOutlineGenerateRequest):
+    """
+    生成项目级大纲（整体故事概要 + 分集大纲）
+    """
+    settings = _get_llm_settings()
+    
+    system_prompt = """你是一位专业的漫剧编剧和故事架构师。
+你的任务是根据用户提供的故事灵感，生成一份完整的项目级大纲。
+
+输出必须是严格的 JSON 对象，包含以下字段：
+{
+  "title": "作品标题",
+  "logline": "一句话故事概要（50字以内）",
+  "genre": "类型（如：都市情感、古风悬疑、科幻冒险等）",
+  "target_audience": "目标受众",
+  "total_episodes": 预计总集数(整数),
+  "synopsis": "整体故事概要（200-500字）",
+  "main_characters": [
+    {"name": "角色名", "role": "主角/配角/反派", "description": "角色简介"}
+  ],
+  "story_arc": "整体故事弧线描述",
+  "episode_outlines": [
+    {"episode": 1, "title": "分集标题", "synopsis": "本集概要（50-100字）", "key_events": ["关键事件1", "关键事件2"]}
+  ],
+  "themes": ["主题1", "主题2"],
+  "visual_style": "视觉风格描述"
+}
+
+注意：
+1. episode_outlines 数组的长度应与 total_episodes 一致
+2. 确保故事有清晰的开端、发展、高潮、结局
+3. 各集之间要有连贯性和递进关系
+4. 不要输出 JSON 以外的任何内容"""
+
+    user_prompt = f"""故事灵感/概要：
+{req.input_text}
+
+预计集数：{req.num_episodes} 集
+
+请生成完整的项目级大纲。"""
+
+    content = await _chat_client.chat(
+        settings=settings,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+    )
+
+    # 解析 JSON
+    parsed = extract_json_any(content, expected_hint="JSON object with project outline")
+    if parsed is None or not isinstance(parsed, dict):
+        raise HTTPException(status_code=502, detail=f"AI 返回无法解析为 JSON: {content[:500]}")
+
+    # 保存到 context
+    _context_store.put_project_outline(project_id=req.project_id, data=parsed, version="v1")
+
+    return ProjectOutlineGenerateResponse(project_outline=parsed)
+
+
+class ProjectOutlineOptimizeRequest(BaseModel):
+    project_id: int
+    current_outline: str  # 当前大纲 JSON 字符串
+    optimization_instructions: str = ""  # 可选的优化指令
+
+
+class ProjectOutlineOptimizeResponse(BaseModel):
+    project_outline: Dict[str, Any]
+    changes_summary: str
+
+
+@router.post("/project-outline-optimize", response_model=ProjectOutlineOptimizeResponse)
+async def project_outline_optimize(req: ProjectOutlineOptimizeRequest):
+    """
+    优化项目级大纲
+    """
+    settings = _get_llm_settings()
+    
+    system_prompt = """你是一位资深的漫剧故事编辑和优化专家。
+你的任务是优化用户提供的项目级大纲，使其更加精炼、连贯、引人入胜。
+
+输出必须是严格的 JSON 对象，包含以下字段：
+{
+  "project_outline": {完整的优化后大纲，格式与原大纲相同},
+  "changes_summary": "优化说明（列出主要修改点，100字以内）"
+}
+
+优化原则：
+1. 保持原有的核心故事和角色设定
+2. 增强情节的戏剧张力和情感深度
+3. 确保各集之间的节奏和递进合理
+4. 优化人物弧线的发展
+5. 如有用户指令，优先按用户要求优化
+
+不要输出 JSON 以外的任何内容。"""
+
+    user_prompt = f"""当前项目大纲：
+{req.current_outline}
+
+优化指令：
+{req.optimization_instructions or "请根据专业判断进行全面优化"}
+
+请输出优化后的大纲。"""
+
+    content = await _chat_client.chat(
+        settings=settings,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+    )
+
+    # 解析 JSON
+    parsed = extract_json_any(content, expected_hint="JSON object with project_outline and changes_summary")
+    if parsed is None or not isinstance(parsed, dict):
+        raise HTTPException(status_code=502, detail=f"AI 返回无法解析为 JSON: {content[:500]}")
+
+    project_outline = parsed.get("project_outline") or parsed
+    changes_summary = parsed.get("changes_summary", "优化完成")
+
+    # 保存到 context
+    _context_store.put_project_outline(project_id=req.project_id, data=project_outline, version="v1")
+
+    return ProjectOutlineOptimizeResponse(
+        project_outline=project_outline,
+        changes_summary=changes_summary,
+    )
+
+
+# ==========================
+# Chat Orchestrator（意图识别 + 多步编排）
+# ==========================
+
+class ChatActRequest(BaseModel):
+    project_id: int
+    episode_id: Optional[int] = None
+    # 当前 UI Tab（用于偏置意图识别）
+    current_action_key: Optional[str] = None  # outline_generate/outline_optimize/generate_script/script_optimize/...
+    message: str
+    ui_context: Optional[Dict[str, Any]] = None
+    debug: bool = False
+
+
+class ChatPlanStep(BaseModel):
+    action_key: str
+    # 如果留空，后端会根据上下文自动填充
+    input_text: Optional[str] = None
+    why: Optional[str] = None
+
+
+class ChatPlan(BaseModel):
+    intent_summary: str
+    steps: List[ChatPlanStep]
+    final_action_key: str
+
+
+class ChatStepTrace(BaseModel):
+    step_index: int
+    action_key: str
+    input_text: str
+    output_text_preview: str
+    ms: int
+
+
+class ChatMemoryTraceItem(BaseModel):
+    key: str
+    # 仅 debug 模式回传
+    text: Optional[str] = None
+
+
+class ChatActResponse(BaseModel):
+    assistant_message: str
+    created_run: Optional[Dict[str, Any]] = None
+    # debug only
+    plan: Optional[Dict[str, Any]] = None
+    steps_trace: Optional[List[Dict[str, Any]]] = None
+    planner_prompt: Optional[str] = None
+    memory_trace: Optional[List[Dict[str, Any]]] = None
+    planner_raw: Optional[str] = None
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _trim_preview(text: str, limit: int = 300) -> str:
+    t = (text or "").strip()
+    return t[:limit] + ("..." if len(t) > limit else "")
+
+
+@router.post("/chat/act", response_model=ChatActResponse)
+async def chat_act(req: ChatActRequest, db: Session = Depends(get_db)):
+    """
+    对话驱动编排：
+    1) 通过 LLM 生成 JSON 计划（steps）
+    2) 顺序执行 steps（复用现有原子能力：大纲/剧本生成与优化）
+    3) 仅将最终结果写入 AiActionRun（source=chat），并返回 debug trace（可选）
+    """
+    raw = _read_settings_raw()
+    settings = _mask_settings(raw)
+    if not settings.has_api_key:
+        raise HTTPException(status_code=400, detail="AI API Key 未配置")
+
+    message = (req.message or "").strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="message 不能为空")
+
+    # -------- Memory (for planner / debug) --------
+    memory_trace: List[Dict[str, Any]] = []
+    memory_context_text = ""
+    if req.project_id:
+        try:
+            from ..services.memory_retriever import get_memory_retriever
+            from ..services.memory_indexer import MemoryIndexer
+
+            indexer = MemoryIndexer()
+            indexer.index_series_bible(project_id=req.project_id, version="v1")
+            retriever = get_memory_retriever()
+            retrieval_results = retriever.retrieve_for_task(
+                project_id=req.project_id,
+                task_description=f"用户意图: {message[:200]}",
+            )
+            memory_context_text = _build_memory_context(retrieval_results)
+            if req.debug:
+                # 仅 debug 回传格式化文本（避免常规返回过长）
+                for k in ["L2_static", "L1", "L2_dynamic", "negative_constraints"]:
+                    try:
+                        memory_trace.append({"key": k, "text": (retriever.format_for_prompt(retrieval_results) or {}).get(k)})
+                    except Exception:
+                        memory_trace.append({"key": k, "text": None})
+        except Exception as e:
+            # 不阻断主流程
+            print(f"[AI][chat_act] Memory retrieval failed: {e}")
+
+    # -------- Planner Prompt --------
+    ui_ctx = req.ui_context or {}
+    current_action_key = (req.current_action_key or "").strip()
+    master_script_preview = _trim_preview(str(ui_ctx.get("master_script") or ""), 1200)
+    selected_input_preview = _trim_preview(str(ui_ctx.get("current_input") or ""), 800)
+
+    planner_system = f"""你是一个“写作编排器（planner）”，负责把用户的自然语言意图拆解为可执行的动作序列。
+
+你必须输出严格的 JSON（不要输出其它文字），结构如下：
+{{
+  "intent_summary": "一句话总结用户想要什么（中文）",
+  "steps": [
+    {{
+      "action_key": "outline_generate|outline_optimize|generate_script|script_optimize",
+      "input_text": "可选；如留空，由系统根据上下文填充",
+      "why": "可选；这一步的目的"
+    }}
+  ],
+  "final_action_key": "同上，表示最终要写入版本记录的 action"
+}}
+
+可用动作说明：
+- outline_generate：从输入材料生成本集大纲（JSON）
+- outline_optimize：在已有大纲基础上按意图优化大纲（JSON）
+- generate_script：从大纲/材料生成剧本（文本）
+- script_optimize：在已有剧本基础上按意图优化剧本（文本）
+
+硬约束：
+1) 仅允许使用上述 action_key
+2) steps 最多 4 步，尽量少步完成
+3) 如果用户意图涉及多阶段（例如：先生成大纲再生成剧本），请拆成多步
+4) final_action_key 必须等于 steps 最后一步的 action_key
+5) 如果上下文不足（例如没有可优化的文本），第一步应选择生成类动作
+"""
+
+    planner_user = f"""用户输入：
+{message}
+
+当前 UI tab（偏置参考，可为空）：
+{current_action_key or "(none)"}
+
+当前 Master Script（预览，可能为空）：
+{master_script_preview or "(empty)"}
+
+当前工作台输入（预览，可能为空）：
+{selected_input_preview or "(empty)"}
+"""
+
+    if memory_context_text:
+        planner_user += f"\n\n记忆上下文（必须遵守，可能为空）：\n{memory_context_text}"
+
+    # -------- Call planner LLM --------
+    planner_started = _now_ms()
+    planner_raw = await _chat_client.chat(
+        settings=LlmChatSettings(
+            base_url=settings.base_url,
+            api_key=raw.get("api_key") or "",
+            model=settings.model,
+            temperature=min(float(settings.temperature or 0.2), 0.3),
+            max_tokens=max(int(settings.max_tokens or 0), 2048),
+            timeout_seconds=settings.timeout_seconds,
+        ),
+        messages=[
+            {"role": "system", "content": planner_system},
+            {"role": "user", "content": planner_user},
+        ],
+    )
+    _ = planner_started  # reserved for future timing
+
+    plan_parsed = extract_json_any(planner_raw or "")
+    if not isinstance(plan_parsed, dict):
+        raise HTTPException(status_code=502, detail=f"Planner 输出无法解析为 JSON: {(planner_raw or '')[:500]}")
+
+    # 轻量校验与修正
+    steps = plan_parsed.get("steps") or []
+    if not isinstance(steps, list) or len(steps) == 0:
+        raise HTTPException(status_code=502, detail=f"Planner steps 为空: {plan_parsed}")
+    if len(steps) > 4:
+        steps = steps[:4]
+    allowed = {"outline_generate", "outline_optimize", "generate_script", "script_optimize"}
+    for s in steps:
+        if not isinstance(s, dict) or s.get("action_key") not in allowed:
+            raise HTTPException(status_code=502, detail=f"Planner steps 包含非法 action_key: {s}")
+    final_action_key = steps[-1].get("action_key")
+    plan_parsed["final_action_key"] = final_action_key
+
+    # -------- Execute steps --------
+    artifacts: Dict[str, Any] = {}
+    steps_trace: List[Dict[str, Any]] = []
+    for idx, s in enumerate(steps):
+        ak = str(s.get("action_key"))
+        in_text = (s.get("input_text") or "").strip()
+
+        # 自动填充 input_text（基于已有产物/上下文）
+        if not in_text:
+            if ak in ("outline_optimize",) and isinstance(artifacts.get("outline"), str) and artifacts.get("outline").strip():
+                in_text = artifacts["outline"]
+            elif ak in ("script_optimize",) and isinstance(artifacts.get("script"), str) and artifacts.get("script").strip():
+                in_text = artifacts["script"]
+            elif ak in ("generate_script",) and isinstance(artifacts.get("outline"), str) and artifacts.get("outline").strip():
+                in_text = artifacts["outline"]
+            else:
+                # fallback：优先用工作台输入，其次 master script，其次用户 message
+                in_text = selected_input_preview or master_script_preview or message
+
+        # 对 optimize 类动作，把用户意图附加进去（避免“只润色不按意图”）
+        if ak in ("outline_optimize", "script_optimize"):
+            in_text = f"{in_text}\n\n[用户意图]\n{message}"
+
+        t0 = _now_ms()
+        out_text = ""
+        if ak == "outline_generate":
+            resp = await outline_generate(OutlineGenerateRequest(text=in_text, project_id=req.project_id))
+            out_text = (resp.text or "").strip()
+            artifacts["outline"] = out_text
+        elif ak == "outline_optimize":
+            resp = await outline_optimize(OutlineOptimizeRequest(text=in_text, project_id=req.project_id))
+            out_text = (resp.text or "").strip()
+            artifacts["outline"] = out_text
+        elif ak == "generate_script":
+            resp = await generate_script(ScriptGenerateRequest(text=in_text, project_id=req.project_id))
+            out_text = (resp.text or "").strip()
+            artifacts["script"] = out_text
+        elif ak == "script_optimize":
+            resp = await script_optimize(ScriptOptimizeRequest(text=in_text, project_id=req.project_id))
+            out_text = (resp.text or "").strip()
+            artifacts["script"] = out_text
+        else:
+            raise HTTPException(status_code=400, detail=f"Unsupported action_key: {ak}")
+
+        dt = _now_ms() - t0
+        steps_trace.append(
+            {
+                "step_index": idx,
+                "action_key": ak,
+                "input_text": in_text if req.debug else _trim_preview(in_text, 300),
+                "output_text_preview": _trim_preview(out_text, 500),
+                "ms": int(dt),
+            }
+        )
+
+    # -------- Persist final result (only) --------
+    created_run = None
+    # 前端已移除 outline_optimize 栏目；若最终结果为 outline_optimize，落盘到 outline_generate 以便用户可见
+    persist_action_key = final_action_key
+    if persist_action_key == "outline_optimize":
+        persist_action_key = "outline_generate"
+
+    if req.episode_id and final_action_key in allowed:
+        final_output = str(artifacts.get("script") if final_action_key in ("generate_script", "script_optimize") else artifacts.get("outline") or "")
+        # input_text 记录：用用户 message（更符合“对话驱动”的审计）
+        db_obj = models.AiActionRun(
+            project_id=int(req.project_id),
+            target_type="episode",
+            target_id=int(req.episode_id),
+            action_key=str(persist_action_key),
+            input_text=message,
+            output_text=final_output,
+            meta_data={
+                "source": "chat",
+                "intent": plan_parsed.get("intent_summary"),
+                "planner_final_action_key": final_action_key,
+                "plan": plan_parsed if req.debug else None,
+            },
+        )
+        db.add(db_obj)
+        db.commit()
+        db.refresh(db_obj)
+        created_run = {"id": db_obj.id, "action_key": db_obj.action_key, "created_at": str(db_obj.created_at)}
+
+    assistant_msg = f"已完成：{plan_parsed.get('intent_summary') or '执行完成'}（最终动作：{final_action_key}）"
+
+    return ChatActResponse(
+        assistant_message=assistant_msg,
+        created_run=created_run,
+        plan=plan_parsed if req.debug else None,
+        steps_trace=steps_trace if req.debug else None,
+        planner_prompt=(planner_system + "\n\n---\n\n" + planner_user) if req.debug else None,
+        memory_trace=memory_trace if req.debug else None,
+        planner_raw=(planner_raw or "") if req.debug else None,
     )
 
 

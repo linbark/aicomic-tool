@@ -6,6 +6,7 @@ from .. import models, schemas
 from ..database import get_db
 import os
 from ..models import Character, Asset, Project
+from ..services.app_paths import project_root_dir, data_dir
 
 router = APIRouter(
     prefix="/projects",
@@ -93,8 +94,9 @@ def delete_project(project_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Project not found")
     
     project_name = db_project.name
-    base_data_dir = os.environ.get("AICOMIC_DATA_DIR") or os.path.join(os.getcwd(), "data")
+    base_data_dir = data_dir()
     project_dir = os.path.join(base_data_dir, project_name)
+    app_project_dir = project_root_dir(project_id)
     
     # 删除项目文件夹（如果存在）
     if os.path.exists(project_dir):
@@ -104,12 +106,66 @@ def delete_project(project_id: int, db: Session = Depends(get_db)):
             print(f"Deleted project directory: {project_dir}")
         except Exception as e:
             print(f"Error deleting project directory {project_dir}: {e}")
+
+    # 删除 app_data_dir/projects/{project_id}（context / runs 等）
+    if os.path.exists(app_project_dir):
+        import shutil
+        try:
+            shutil.rmtree(app_project_dir)
+            print(f"Deleted app project directory: {app_project_dir}")
+        except Exception as e:
+            print(f"Error deleting app project directory {app_project_dir}: {e}")
     
-    # 删除数据库记录（级联删除会自动处理关联数据）
-    db.delete(db_project)
-    db.commit()
+    # 删除数据库记录（显式清理所有 project_id 关联数据，避免 SQLite 未启用外键级联导致残留）
+    try:
+        pid = int(project_id)
+
+        # 子查询：episodes / scenes / shots ids
+        ep_ids_q = db.query(models.Episode.id).filter(models.Episode.project_id == pid)
+        sc_ids_q = db.query(models.Scene.id).filter(models.Scene.episode_id.in_(ep_ids_q))
+        shot_ids_q = db.query(models.Shot.id).filter(models.Shot.scene_id.in_(sc_ids_q))
+
+        # Asset: 通过 character 或 shot 关联到项目
+        char_ids_q = db.query(models.Character.id).filter(models.Character.project_id == pid)
+        deleted_assets = (
+            db.query(models.Asset)
+            .filter((models.Asset.character_id.in_(char_ids_q)) | (models.Asset.shot_id.in_(shot_ids_q)))
+            .delete(synchronize_session=False)
+        )
+        deleted_shots = db.query(models.Shot).filter(models.Shot.id.in_(shot_ids_q)).delete(synchronize_session=False)
+        deleted_scenes = db.query(models.Scene).filter(models.Scene.id.in_(sc_ids_q)).delete(synchronize_session=False)
+        deleted_episodes = db.query(models.Episode).filter(models.Episode.id.in_(ep_ids_q)).delete(synchronize_session=False)
+
+        deleted_characters = db.query(models.Character).filter(models.Character.project_id == pid).delete(synchronize_session=False)
+
+        # Events + nodes
+        evt_ids_q = db.query(models.Event.id).filter(models.Event.project_id == pid)
+        deleted_event_nodes = db.query(models.EventNode).filter(models.EventNode.event_id.in_(evt_ids_q)).delete(synchronize_session=False)
+        deleted_events = db.query(models.Event).filter(models.Event.project_id == pid).delete(synchronize_session=False)
+
+        # AI runs（按钮历史）
+        deleted_ai_runs = db.query(models.AiActionRun).filter(models.AiActionRun.project_id == pid).delete(synchronize_session=False)
+
+        # 最后删 project
+        db.delete(db_project)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to delete project fully: {e}")
     
-    return {"message": f"Project '{project_name}' and all associated data deleted successfully"}
+    return {
+        "message": f"Project '{project_name}' and all associated data deleted successfully",
+        "deleted_counts": {
+            "assets": int(deleted_assets or 0),
+            "shots": int(deleted_shots or 0),
+            "scenes": int(deleted_scenes or 0),
+            "episodes": int(deleted_episodes or 0),
+            "characters": int(deleted_characters or 0),
+            "event_nodes": int(deleted_event_nodes or 0),
+            "events": int(deleted_events or 0),
+            "ai_action_runs": int(deleted_ai_runs or 0),
+        },
+    }
 
 # =======================
 # 2. 资产条目管理接口（对外不再暴露“人设/角色”概念）

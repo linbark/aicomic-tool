@@ -30,6 +30,41 @@ body {
   min-height: 100vh;
 }
 
+/* ==========================
+   Scrollbar styling (dark UI)
+   - Applies to textarea and any element with .aicomic-scroll
+   ========================== */
+
+textarea,
+.aicomic-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.22) rgba(0, 0, 0, 0.12);
+}
+
+textarea::-webkit-scrollbar,
+.aicomic-scroll::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+textarea::-webkit-scrollbar-track,
+.aicomic-scroll::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.12);
+  border-radius: 999px;
+}
+
+textarea::-webkit-scrollbar-thumb,
+.aicomic-scroll::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+  border: 2px solid rgba(0, 0, 0, 0.12);
+}
+
+textarea::-webkit-scrollbar-thumb:hover,
+.aicomic-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.28);
+}
+
 h1 {
   font-size: 3.2em;
   line-height: 1.1;

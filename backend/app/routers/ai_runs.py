@@ -80,3 +80,13 @@ def create_ai_run(payload: AiActionRunCreate, db: Session = Depends(get_db)):
     return db_obj
 
 
+@router.delete("/runs/{run_id}")
+def delete_ai_run(run_id: int, db: Session = Depends(get_db)):
+    """删除指定的 AI run 记录"""
+    db_obj = db.query(models.AiActionRun).filter(models.AiActionRun.id == run_id).first()
+    if not db_obj:
+        raise HTTPException(status_code=404, detail="Run not found")
+    db.delete(db_obj)
+    db.commit()
+    return {"ok": True, "deleted_id": run_id}
+

@@ -3,10 +3,11 @@ import re
 from typing import Any
 
 
-def extract_json_any(text: str) -> Any:
+def extract_json_any(text: str, expected_hint: str | None = None) -> Any:
     """
     从 LLM 返回中提取 JSON（容错）：去 code fence、截取首个 [...] 或 {...}。
     与旧实现保持一致，供 workflows / 原子接口复用。
+    expected_hint: 仅用于兼容旧调用方，不参与解析逻辑。
     """
     if text is None:
         raise ValueError("empty response")

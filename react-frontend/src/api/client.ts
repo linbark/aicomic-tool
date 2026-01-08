@@ -174,8 +174,28 @@ export const api = {
     return apiClient.get<AiActionRunRead[]>(`/ai/runs?${qs.toString()}`)
   },
   createAiRun: (data: AiActionRunCreate) => apiClient.post<AiActionRunRead>(`/ai/runs`, data),
+  deleteAiRun: (runId: number) => apiClient.delete<{ ok: boolean; deleted_id: number }>(`/ai/runs/${runId}`),
 
-  // Context 管理（Series Bible / Visual DNA）
+  // Chat Orchestrator（意图识别 + 多步编排）
+  aiChatAct: (data: {
+    project_id: number
+    episode_id?: number
+    current_action_key?: string
+    message: string
+    ui_context?: Record<string, unknown>
+    debug?: boolean
+  }) =>
+    apiClient.post<{
+      assistant_message: string
+      created_run?: { id: number; action_key: string; created_at: string }
+      plan?: any
+      steps_trace?: any[]
+      planner_prompt?: string
+      memory_trace?: any[]
+      planner_raw?: string
+    }>(`/ai/chat/act`, data),
+
+  // Context 管理（Series Bible / Visual DNA / Project Outline）
   getSeriesBible: (projectId: number, version: string = 'v1') => {
     const qs = new URLSearchParams()
     qs.set('project_id', String(projectId))
@@ -187,6 +207,21 @@ export const api = {
     qs.set('project_id', String(projectId))
     return apiClient.put(`/ai/context/series-bible?${qs.toString()}`, data)
   },
+  getProjectOutline: (projectId: number, version: string = 'v1') => {
+    const qs = new URLSearchParams()
+    qs.set('project_id', String(projectId))
+    qs.set('version', version)
+    return apiClient.get(`/ai/context/project-outline?${qs.toString()}`)
+  },
+  putProjectOutline: (projectId: number, data: { data: Record<string, unknown>; version?: string }) => {
+    const qs = new URLSearchParams()
+    qs.set('project_id', String(projectId))
+    return apiClient.put(`/ai/context/project-outline?${qs.toString()}`, data)
+  },
+  aiProjectOutlineGenerate: (data: { project_id: number; input_text: string; num_episodes?: number }) =>
+    apiClient.post<{ project_outline: Record<string, unknown> }>(`/ai/project-outline-generate`, data),
+  aiProjectOutlineOptimize: (data: { project_id: number; current_outline: string; optimization_instructions?: string }) =>
+    apiClient.post<{ project_outline: Record<string, unknown>; changes_summary: string }>(`/ai/project-outline-optimize`, data),
   getVisualDna: (projectId: number, itemId: number, version: string = 'v1') => {
     const qs = new URLSearchParams()
     qs.set('project_id', String(projectId))

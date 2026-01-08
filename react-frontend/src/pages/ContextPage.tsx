@@ -6,6 +6,17 @@ import { useProjectSelection } from '../state/useProjectSelection'
 export function ContextPage() {
   const { projects, projectId, setProjectId } = useProjectSelection()
 
+  // Project Outline 状态
+  const [outlineInput, setOutlineInput] = useState('')
+  const [outlineJson, setOutlineJson] = useState('')
+  const [outlineError, setOutlineError] = useState<string | null>(null)
+  const [loadingOutline, setLoadingOutline] = useState(false)
+  const [savingOutline, setSavingOutline] = useState(false)
+  const [generatingOutline, setGeneratingOutline] = useState(false)
+  const [optimizingOutline, setOptimizingOutline] = useState(false)
+  const [numEpisodes, setNumEpisodes] = useState(12)
+  const [optimizeInstructions, setOptimizeInstructions] = useState('')
+
   const [seriesBibleJson, setSeriesBibleJson] = useState('')
   const [seriesBibleError, setSeriesBibleError] = useState<string | null>(null)
   const [savingSeriesBible, setSavingSeriesBible] = useState(false)
@@ -18,6 +29,96 @@ export function ContextPage() {
   const [visualDnaError, setVisualDnaError] = useState<string | null>(null)
   const [savingVisualDna, setSavingVisualDna] = useState(false)
   const [loadingVisualDna, setLoadingVisualDna] = useState(false)
+
+  // Project Outline 操作
+  async function loadProjectOutline() {
+    if (!projectId) return
+    setLoadingOutline(true)
+    setOutlineError(null)
+    try {
+      const res = await api.getProjectOutline(projectId, 'v1')
+      const data = res.data
+      if (data?.exists && data.data) {
+        setOutlineJson(JSON.stringify(data.data, null, 2))
+      } else {
+        setOutlineJson('')
+      }
+    } catch (e: any) {
+      setOutlineError(e?.response?.data?.detail || e?.message || '加载失败')
+    } finally {
+      setLoadingOutline(false)
+    }
+  }
+
+  async function saveProjectOutline() {
+    if (!projectId) return
+    let parsed: Record<string, unknown>
+    try {
+      parsed = JSON.parse(outlineJson)
+    } catch (e) {
+      setOutlineError('JSON 格式无效')
+      return
+    }
+    setSavingOutline(true)
+    setOutlineError(null)
+    try {
+      await api.putProjectOutline(projectId, { data: parsed, version: 'v1' })
+      setOutlineError(null)
+    } catch (e: any) {
+      setOutlineError(e?.response?.data?.detail || e?.message || '保存失败')
+    } finally {
+      setSavingOutline(false)
+    }
+  }
+
+  async function generateProjectOutline() {
+    if (!projectId || !outlineInput.trim()) {
+      setOutlineError('请输入故事灵感/概要')
+      return
+    }
+    setGeneratingOutline(true)
+    setOutlineError(null)
+    try {
+      const res = await api.aiProjectOutlineGenerate({
+        project_id: projectId,
+        input_text: outlineInput,
+        num_episodes: numEpisodes,
+      })
+      if (res.data?.project_outline) {
+        setOutlineJson(JSON.stringify(res.data.project_outline, null, 2))
+      }
+    } catch (e: any) {
+      setOutlineError(e?.response?.data?.detail || e?.message || '生成失败')
+    } finally {
+      setGeneratingOutline(false)
+    }
+  }
+
+  async function optimizeProjectOutline() {
+    if (!projectId || !outlineJson.trim()) {
+      setOutlineError('请先生成或加载大纲')
+      return
+    }
+    setOptimizingOutline(true)
+    setOutlineError(null)
+    try {
+      const res = await api.aiProjectOutlineOptimize({
+        project_id: projectId,
+        current_outline: outlineJson,
+        optimization_instructions: optimizeInstructions,
+      })
+      if (res.data?.project_outline) {
+        setOutlineJson(JSON.stringify(res.data.project_outline, null, 2))
+        if (res.data.changes_summary) {
+          alert(`优化完成：${res.data.changes_summary}`)
+        }
+      }
+    } catch (e: any) {
+      setOutlineError(e?.response?.data?.detail || e?.message || '优化失败')
+    } finally {
+      setOptimizingOutline(false)
+    }
+  }
 
   async function loadSeriesBible() {
     if (!projectId) return
@@ -116,6 +217,7 @@ export function ContextPage() {
   }
 
   useEffect(() => {
+    loadProjectOutline().catch(() => {})
     loadSeriesBible().catch(() => {})
   }, [projectId])
 
@@ -157,6 +259,86 @@ export function ContextPage() {
       </div>
 
       <div style={styles.body}>
+        {/* Project Outline - 项目级大纲 */}
+        <section style={styles.section}>
+          <div style={styles.sectionHeader}>
+            <div>
+              <h3 style={{ margin: 0, fontSize: 16 }}>📋 项目大纲</h3>
+              <div style={{ fontSize: 11, opacity: 0.7 }}>整体故事概要 + 分集大纲（AI 生成/优化）</div>
+            </div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <button style={styles.btn} onClick={() => loadProjectOutline().catch(() => {})} disabled={loadingOutline || !projectId}>
+                {loadingOutline ? '加载中…' : '重新加载'}
+              </button>
+              <button style={styles.btnPrimary} onClick={() => saveProjectOutline().catch(() => {})} disabled={savingOutline || !projectId || !outlineJson}>
+                {savingOutline ? '保存中…' : '保存'}
+              </button>
+            </div>
+          </div>
+          {outlineError ? <div style={styles.error}>{outlineError}</div> : null}
+          
+          {/* 生成区域 */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 12, marginBottom: 12 }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <textarea
+                value={outlineInput}
+                onChange={(e) => setOutlineInput(e.target.value)}
+                style={{ ...styles.jsonEditor, height: 100, resize: 'vertical' }}
+                placeholder="输入故事灵感/概要...（如：一个在山匪寨中长大的少女，发现自己是侯府遗孤...）"
+                disabled={!projectId}
+              />
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <span style={{ fontSize: 12, opacity: 0.7 }}>预计集数：</span>
+                <input
+                  type="number"
+                  value={numEpisodes}
+                  onChange={(e) => setNumEpisodes(Math.max(1, parseInt(e.target.value) || 12))}
+                  style={{ ...styles.select, width: 60, textAlign: 'center' }}
+                  min={1}
+                  max={100}
+                />
+                <button
+                  style={{ ...styles.btnPrimary, flex: 1 }}
+                  onClick={() => generateProjectOutline().catch(() => {})}
+                  disabled={generatingOutline || !projectId || !outlineInput.trim()}
+                >
+                  {generatingOutline ? '生成中…' : '🤖 AI 生成大纲'}
+                </button>
+              </div>
+            </div>
+            
+            {/* 优化区域 */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, minWidth: 200 }}>
+              <textarea
+                value={optimizeInstructions}
+                onChange={(e) => setOptimizeInstructions(e.target.value)}
+                style={{ ...styles.jsonEditor, height: 100, resize: 'vertical', fontSize: 11 }}
+                placeholder="优化指令（可选）：如「增加悬念」「强化女主成长线」..."
+                disabled={!projectId}
+              />
+              <button
+                style={styles.btn}
+                onClick={() => optimizeProjectOutline().catch(() => {})}
+                disabled={optimizingOutline || !projectId || !outlineJson.trim()}
+              >
+                {optimizingOutline ? '优化中…' : '✨ AI 优化大纲'}
+              </button>
+            </div>
+          </div>
+          
+          {/* 大纲结果 */}
+          <textarea
+            value={outlineJson}
+            onChange={(e) => {
+              setOutlineJson(e.target.value)
+              setOutlineError(null)
+            }}
+            style={{ ...styles.jsonEditor, height: 300 }}
+            placeholder="项目大纲 JSON（点击「AI 生成大纲」或手动编辑）..."
+            disabled={!projectId}
+          />
+        </section>
+
         {/* Series Bible */}
         <section style={styles.section}>
           <div style={styles.sectionHeader}>
