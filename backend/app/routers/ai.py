@@ -460,21 +460,9 @@ def delete_prompt(key: str):
 # 记忆系统辅助函数
 def _build_memory_context(retrieval_results: Dict[str, Any]) -> str:
     """将检索结果格式化为可注入 prompt 的上下文"""
-    from ..services.memory_retriever import MemoryRetriever
-    retriever = MemoryRetriever()
-    formatted = retriever.format_for_prompt(retrieval_results)
-    
-    parts = []
-    if "L2_static" in formatted and formatted["L2_static"]:
-        parts.append(f"## 世界观与角色设定\n{formatted['L2_static']}")
-    if "L1" in formatted and formatted["L1"]:
-        parts.append(f"## 已有剧情\n{formatted['L1']}")
-    if "L2_dynamic" in formatted and formatted["L2_dynamic"]:
-        parts.append(f"## 剧情进展\n{formatted['L2_dynamic']}")
-    if "negative_constraints" in formatted and formatted["negative_constraints"]:
-        parts.append(f"## 约束条件（必须遵守）\n{formatted['negative_constraints']}")
-    
-    return "\n\n".join(parts) if parts else ""
+    from ..services.context_assembly import assemble_memory_context
+    sections = assemble_memory_context(retrieval_results)
+    return sections.to_markdown()
 
 
 class OutlineGenerateRequest(BaseModel):

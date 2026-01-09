@@ -9,7 +9,7 @@ import json
 import os
 import sqlite3
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -23,6 +23,9 @@ from ..workflows.memory_schemas import (
     MemoryRetrievalResult,
     MemoryType,
     StateChange,
+    StoryTime,
+    TimeBlock,
+    TimeConstraint,
 )
 
 
@@ -75,11 +78,31 @@ class MemoryStore:
                 payload_json TEXT,
                 source_ref TEXT,
                 time_index TEXT,
+                status TEXT,
+                confidence REAL,
+                source_kind TEXT,
+                evidence_ids_json TEXT,
+                story_order TEXT,
+                story_time_json TEXT,
                 hash TEXT,
                 created_at_ms INTEGER,
                 updated_at_ms INTEGER
             )
             """
+        )
+
+        # 轻量迁移：为老库补列（避免 SELECT * 下标错位）
+        self._ensure_columns(
+            cursor,
+            "memory_records",
+            [
+                ("status", "TEXT"),
+                ("confidence", "REAL"),
+                ("source_kind", "TEXT"),
+                ("evidence_ids_json", "TEXT"),
+                ("story_order", "TEXT"),
+                ("story_time_json", "TEXT"),
+            ],
         )
 
         # Episodic 记忆表（状态变更）
@@ -100,6 +123,235 @@ class MemoryStore:
             """
         )
 
+        # Canonical：证据库（Evidence Store）
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS canonical_evidences (
+                evidence_id TEXT PRIMARY KEY,
+                project_id INTEGER NOT NULL,
+                episode_id INTEGER,
+                scene_id INTEGER,
+                span_json TEXT,
+                quote TEXT NOT NULL,
+                speaker TEXT,
+                tags_json TEXT,
+                created_at_ms INTEGER
+            )
+            """
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_canonical_evidences_project ON canonical_evidences(project_id)"
+        )
+
+        # Canonical：实体主干（Entity）
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS canonical_entities (
+                entity_id TEXT PRIMARY KEY,
+                project_id INTEGER NOT NULL,
+                entity_type TEXT NOT NULL,
+                canonical_name TEXT NOT NULL,
+                aliases_json TEXT,
+                status TEXT,
+                confidence REAL,
+                source_kind TEXT,
+                created_from_evidence_id TEXT,
+                created_at_ms INTEGER,
+                updated_at_ms INTEGER
+            )
+            """
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_canonical_entities_project ON canonical_entities(project_id)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_canonical_entities_name ON canonical_entities(project_id, canonical_name)"
+        )
+
+        # Canonical：事件主轴（Event）
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS canonical_events (
+                event_id TEXT PRIMARY KEY,
+                project_id INTEGER NOT NULL,
+                story_order TEXT NOT NULL,
+                story_time_key TEXT,
+                story_time_json TEXT,
+                episode_id INTEGER,
+                scene_id INTEGER,
+                event_type TEXT,
+                summary TEXT NOT NULL,
+                participants_json TEXT,
+                evidence_ids_json TEXT,
+                status TEXT,
+                confidence REAL,
+                source_kind TEXT,
+                created_at_ms INTEGER,
+                updated_at_ms INTEGER
+            )
+            """
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_canonical_events_project ON canonical_events(project_id)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_canonical_events_story_order ON canonical_events(project_id, story_order)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_canonical_events_story_time ON canonical_events(project_id, story_time_key)"
+        )
+
+        # Canonical：时间约束（Time Constraints）
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS canonical_time_constraints (
+                constraint_id TEXT PRIMARY KEY,
+                project_id INTEGER NOT NULL,
+                relation TEXT NOT NULL,
+                from_event_id TEXT,
+                to_event_id TEXT,
+                anchor_id TEXT,
+                interval_json TEXT,
+                evidence_ids_json TEXT,
+                status TEXT,
+                confidence REAL,
+                source_kind TEXT,
+                created_at_ms INTEGER,
+                updated_at_ms INTEGER
+            )
+            """
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_canonical_time_constraints_project ON canonical_time_constraints(project_id)"
+        )
+
+        # Canonical：时间块（TimeBlock，用于回忆/插叙段）
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS canonical_time_blocks (
+                block_id TEXT PRIMARY KEY,
+                project_id INTEGER NOT NULL,
+                name TEXT,
+                parent_block_id TEXT,
+                anchor_id TEXT,
+                constraints_json TEXT,
+                event_ids_json TEXT,
+                status TEXT,
+                confidence REAL,
+                source_kind TEXT,
+                created_at_ms INTEGER,
+                updated_at_ms INTEGER
+            )
+            """
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_canonical_time_blocks_project ON canonical_time_blocks(project_id)"
+        )
+
+        # Canonical：版本切片（Snapshot）
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS canonical_snapshots (
+                snapshot_id TEXT PRIMARY KEY,
+                project_id INTEGER NOT NULL,
+                entity_id TEXT NOT NULL,
+                valid_from_story_time_key TEXT,
+                valid_to_story_time_key TEXT,
+                valid_from_story_order TEXT,
+                valid_to_story_order TEXT,
+                fields_json TEXT NOT NULL,
+                why TEXT,
+                evidence_ids_json TEXT,
+                status TEXT,
+                confidence REAL,
+                source_kind TEXT,
+                created_at_ms INTEGER,
+                updated_at_ms INTEGER
+            )
+            """
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_canonical_snapshots_project ON canonical_snapshots(project_id)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_canonical_snapshots_entity ON canonical_snapshots(project_id, entity_id)"
+        )
+
+        # Canonical：状态变更（StateChange）
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS canonical_state_changes (
+                state_change_id TEXT PRIMARY KEY,
+                project_id INTEGER NOT NULL,
+                event_id TEXT NOT NULL,
+                target_entity_id TEXT,
+                patch_json TEXT NOT NULL,
+                before_snapshot_id TEXT,
+                after_snapshot_id TEXT,
+                evidence_ids_json TEXT,
+                status TEXT,
+                confidence REAL,
+                source_kind TEXT,
+                created_at_ms INTEGER,
+                updated_at_ms INTEGER
+            )
+            """
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_canonical_state_changes_project ON canonical_state_changes(project_id)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_canonical_state_changes_event ON canonical_state_changes(project_id, event_id)"
+        )
+
+        # Canonical：变更集（ChangeSet）与冲突（Conflict）
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS canonical_changesets (
+                changeset_id TEXT PRIMARY KEY,
+                project_id INTEGER NOT NULL,
+                episode_id INTEGER,
+                payload_json TEXT NOT NULL,
+                review_status TEXT NOT NULL,
+                review_log_json TEXT,
+                created_at_ms INTEGER,
+                updated_at_ms INTEGER
+            )
+            """
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_canonical_changesets_project ON canonical_changesets(project_id)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_canonical_changesets_status ON canonical_changesets(project_id, review_status)"
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS canonical_conflicts (
+                conflict_id TEXT PRIMARY KEY,
+                project_id INTEGER NOT NULL,
+                changeset_id TEXT,
+                conflict_type TEXT NOT NULL,
+                entity_id TEXT,
+                old_claim_json TEXT,
+                new_claim_json TEXT,
+                suggested_actions_json TEXT,
+                status TEXT NOT NULL,
+                resolved_by TEXT,
+                resolution_note TEXT,
+                created_at_ms INTEGER,
+                updated_at_ms INTEGER
+            )
+            """
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_canonical_conflicts_project ON canonical_conflicts(project_id)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_canonical_conflicts_status ON canonical_conflicts(project_id, status)"
+        )
+
         # 索引
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_project_namespace ON memory_records(project_id, namespace)"
@@ -110,6 +362,20 @@ class MemoryStore:
 
         conn.commit()
         conn.close()
+
+    @staticmethod
+    def _ensure_columns(
+        cursor: sqlite3.Cursor,
+        table_name: str,
+        columns: Sequence[Tuple[str, str]],
+    ) -> None:
+        """为老库补齐缺失列（SQLite 轻量迁移）"""
+        cursor.execute(f"PRAGMA table_info({table_name})")
+        existing = {row[1] for row in cursor.fetchall()}  # (cid, name, type, notnull, dflt_value, pk)
+        for col_name, col_type in columns:
+            if col_name in existing:
+                continue
+            cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {col_name} {col_type}")
 
     def write(
         self,
@@ -148,11 +414,23 @@ class MemoryStore:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
 
+        story_time_json = None
+        if record.story_time is not None:
+            if isinstance(record.story_time, StoryTime):
+                story_time_json = json.dumps(record.story_time.model_dump(), ensure_ascii=False)
+            else:
+                # 兼容：允许 dict
+                story_time_json = json.dumps(record.story_time, ensure_ascii=False)
+
         cursor.execute(
             """
             INSERT OR REPLACE INTO memory_records
-            (id, project_id, namespace, type, entity, content, payload_json, source_ref, time_index, hash, created_at_ms, updated_at_ms)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (id, project_id, namespace, type, entity, content, payload_json, source_ref, time_index,
+             status, confidence, source_kind, evidence_ids_json, story_order, story_time_json,
+             hash, created_at_ms, updated_at_ms)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?)
             """,
             (
                 record.id,
@@ -164,6 +442,12 @@ class MemoryStore:
                 json.dumps(record.payload_json) if record.payload_json else None,
                 record.source_ref,
                 record.time_index,
+                getattr(record.status, "value", record.status),
+                float(record.confidence) if record.confidence is not None else None,
+                getattr(record.source_kind, "value", record.source_kind),
+                json.dumps(record.evidence_ids, ensure_ascii=False) if record.evidence_ids else None,
+                record.story_order,
+                story_time_json,
                 record.hash,
                 record.created_at_ms,
                 now_ms,
@@ -403,13 +687,609 @@ class MemoryStore:
 
         return conflicts
 
+    # =========================
+    # Canonical: 时间约束与时间块
+    # =========================
+    def upsert_time_constraint(self, constraint: TimeConstraint) -> str:
+        """
+        写入/更新时间约束（partial order）
+        - 同时写入一条向量化的 Canonical 记忆，便于检索与审计
+        """
+        now_ms = int(time.time() * 1000)
+
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT OR REPLACE INTO canonical_time_constraints
+            (constraint_id, project_id, relation, from_event_id, to_event_id, anchor_id, interval_json,
+             evidence_ids_json, status, confidence, source_kind, created_at_ms, updated_at_ms)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                constraint.id,
+                constraint.project_id,
+                constraint.relation.value,
+                constraint.from_event_id,
+                constraint.to_event_id,
+                constraint.anchor_id,
+                json.dumps(constraint.interval, ensure_ascii=False) if constraint.interval else None,
+                json.dumps(constraint.evidence_ids, ensure_ascii=False) if constraint.evidence_ids else None,
+                constraint.status.value,
+                float(constraint.confidence),
+                constraint.source_kind.value,
+                now_ms,
+                now_ms,
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        # 向量化索引（可选，但默认打开以支持语义召回）
+        readable = f"时间约束({constraint.relation.value}): {constraint.from_event_id or ''} -> {constraint.to_event_id or ''}"
+        mem = MemoryRecord(
+            id=constraint.id,
+            project_id=constraint.project_id,
+            namespace=MemoryNamespace.CANONICAL,
+            type=MemoryType.TIME_CONSTRAINT,
+            entity=None,
+            content=readable.strip(),
+            payload_json=constraint.model_dump(),
+            source_ref="canonical_time_constraints",
+            status=constraint.status,
+            confidence=constraint.confidence,
+            source_kind=constraint.source_kind,
+            evidence_ids=constraint.evidence_ids,
+        )
+        self.write(mem, skip_duplicate=False)
+        return constraint.id
+
+    def list_time_constraints(
+        self,
+        project_id: int,
+        status: Optional[str] = None,
+        limit: int = 200,
+    ) -> List[Dict[str, Any]]:
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        if status:
+            cursor.execute(
+                """
+                SELECT constraint_id, relation, from_event_id, to_event_id, anchor_id, interval_json,
+                       evidence_ids_json, status, confidence, source_kind, created_at_ms, updated_at_ms
+                FROM canonical_time_constraints
+                WHERE project_id = ? AND status = ?
+                ORDER BY updated_at_ms DESC
+                LIMIT ?
+                """,
+                (project_id, status, int(limit)),
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT constraint_id, relation, from_event_id, to_event_id, anchor_id, interval_json,
+                       evidence_ids_json, status, confidence, source_kind, created_at_ms, updated_at_ms
+                FROM canonical_time_constraints
+                WHERE project_id = ?
+                ORDER BY updated_at_ms DESC
+                LIMIT ?
+                """,
+                (project_id, int(limit)),
+            )
+        rows = cursor.fetchall()
+        conn.close()
+
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            out.append(
+                {
+                    "id": r[0],
+                    "relation": r[1],
+                    "from_event_id": r[2],
+                    "to_event_id": r[3],
+                    "anchor_id": r[4],
+                    "interval": json.loads(r[5]) if r[5] else None,
+                    "evidence_ids": json.loads(r[6]) if r[6] else [],
+                    "status": r[7],
+                    "confidence": r[8],
+                    "source_kind": r[9],
+                    "created_at_ms": r[10],
+                    "updated_at_ms": r[11],
+                }
+            )
+        return out
+
+    def upsert_time_block(self, block: TimeBlock) -> str:
+        """
+        写入/更新时间块（回忆段/插叙段容器）
+        - 同时写入一条向量化 Canonical 记忆，便于检索与审计
+        """
+        now_ms = int(time.time() * 1000)
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT OR REPLACE INTO canonical_time_blocks
+            (block_id, project_id, name, parent_block_id, anchor_id, constraints_json, event_ids_json,
+             status, confidence, source_kind, created_at_ms, updated_at_ms)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                block.id,
+                block.project_id,
+                block.name,
+                block.parent_block_id,
+                block.anchor_id,
+                json.dumps(block.constraint_ids, ensure_ascii=False) if block.constraint_ids else None,
+                json.dumps(block.event_ids, ensure_ascii=False) if block.event_ids else None,
+                block.status.value,
+                float(block.confidence),
+                block.source_kind.value,
+                now_ms,
+                now_ms,
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        readable = f"时间块: {block.name or block.id} (events={len(block.event_ids)})"
+        mem = MemoryRecord(
+            id=block.id,
+            project_id=block.project_id,
+            namespace=MemoryNamespace.CANONICAL,
+            type=MemoryType.TIME_BLOCK,
+            entity=None,
+            content=readable,
+            payload_json=block.model_dump(),
+            source_ref="canonical_time_blocks",
+            status=block.status,
+            confidence=block.confidence,
+            source_kind=block.source_kind,
+        )
+        self.write(mem, skip_duplicate=False)
+        return block.id
+
+    def list_time_blocks(
+        self,
+        project_id: int,
+        status: Optional[str] = None,
+        limit: int = 200,
+    ) -> List[Dict[str, Any]]:
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        if status:
+            cursor.execute(
+                """
+                SELECT block_id, name, parent_block_id, anchor_id, constraints_json, event_ids_json,
+                       status, confidence, source_kind, created_at_ms, updated_at_ms
+                FROM canonical_time_blocks
+                WHERE project_id = ? AND status = ?
+                ORDER BY updated_at_ms DESC
+                LIMIT ?
+                """,
+                (project_id, status, int(limit)),
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT block_id, name, parent_block_id, anchor_id, constraints_json, event_ids_json,
+                       status, confidence, source_kind, created_at_ms, updated_at_ms
+                FROM canonical_time_blocks
+                WHERE project_id = ?
+                ORDER BY updated_at_ms DESC
+                LIMIT ?
+                """,
+                (project_id, int(limit)),
+            )
+        rows = cursor.fetchall()
+        conn.close()
+
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            out.append(
+                {
+                    "id": r[0],
+                    "name": r[1],
+                    "parent_block_id": r[2],
+                    "anchor_id": r[3],
+                    "constraint_ids": json.loads(r[4]) if r[4] else [],
+                    "event_ids": json.loads(r[5]) if r[5] else [],
+                    "status": r[6],
+                    "confidence": r[7],
+                    "source_kind": r[8],
+                    "created_at_ms": r[9],
+                    "updated_at_ms": r[10],
+                }
+            )
+        return out
+
+    # =========================
+    # Canonical: 变更集与冲突（审阅台）
+    # =========================
+    def create_changeset(
+        self,
+        project_id: int,
+        payload: Dict[str, Any],
+        episode_id: Optional[int] = None,
+        review_status: str = "pending_review",
+    ) -> str:
+        """
+        创建一个 ChangeSet（提案/提交单）。
+        payload 建议包含：proposed_* / conflicts / notes 等；由上层流水线生产。
+        """
+        from uuid import uuid4
+
+        changeset_id = uuid4().hex
+        now_ms = int(time.time() * 1000)
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO canonical_changesets
+            (changeset_id, project_id, episode_id, payload_json, review_status, review_log_json, created_at_ms, updated_at_ms)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                changeset_id,
+                project_id,
+                episode_id,
+                json.dumps(payload or {}, ensure_ascii=False),
+                review_status,
+                json.dumps([], ensure_ascii=False),
+                now_ms,
+                now_ms,
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        # 同步写入向量库：便于回溯审计（不依赖语义检索也行，但统一存档）
+        mem = MemoryRecord(
+            id=changeset_id,
+            project_id=project_id,
+            namespace=MemoryNamespace.CANONICAL,
+            type=MemoryType.CHANGESET,
+            entity=None,
+            content=f"ChangeSet({review_status}): episode_id={episode_id or ''}",
+            payload_json={"changeset_id": changeset_id, "episode_id": episode_id, "payload": payload},
+            source_ref="canonical_changesets",
+        )
+        self.write(mem, skip_duplicate=False)
+
+        return changeset_id
+
+    def list_changesets(
+        self,
+        project_id: int,
+        review_status: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        if review_status:
+            cursor.execute(
+                """
+                SELECT changeset_id, episode_id, review_status, created_at_ms, updated_at_ms
+                FROM canonical_changesets
+                WHERE project_id = ? AND review_status = ?
+                ORDER BY updated_at_ms DESC
+                LIMIT ?
+                """,
+                (project_id, review_status, int(limit)),
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT changeset_id, episode_id, review_status, created_at_ms, updated_at_ms
+                FROM canonical_changesets
+                WHERE project_id = ?
+                ORDER BY updated_at_ms DESC
+                LIMIT ?
+                """,
+                (project_id, int(limit)),
+            )
+        rows = cursor.fetchall()
+        conn.close()
+        return [
+            {
+                "changeset_id": r[0],
+                "episode_id": r[1],
+                "review_status": r[2],
+                "created_at_ms": r[3],
+                "updated_at_ms": r[4],
+            }
+            for r in rows
+        ]
+
+    def get_changeset(self, changeset_id: str) -> Optional[Dict[str, Any]]:
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT changeset_id, project_id, episode_id, payload_json, review_status, review_log_json, created_at_ms, updated_at_ms
+            FROM canonical_changesets
+            WHERE changeset_id = ?
+            LIMIT 1
+            """,
+            (changeset_id,),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return None
+        return {
+            "changeset_id": row[0],
+            "project_id": row[1],
+            "episode_id": row[2],
+            "payload": json.loads(row[3]) if row[3] else {},
+            "review_status": row[4],
+            "review_log": json.loads(row[5]) if row[5] else [],
+            "created_at_ms": row[6],
+            "updated_at_ms": row[7],
+        }
+
+    def _append_changeset_review_log(
+        self,
+        changeset_id: str,
+        entry: Dict[str, Any],
+    ) -> None:
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT review_log_json FROM canonical_changesets WHERE changeset_id = ? LIMIT 1",
+            (changeset_id,),
+        )
+        row = cursor.fetchone()
+        logs = json.loads(row[0]) if row and row[0] else []
+        logs.append(entry)
+        now_ms = int(time.time() * 1000)
+        cursor.execute(
+            """
+            UPDATE canonical_changesets
+            SET review_log_json = ?, updated_at_ms = ?
+            WHERE changeset_id = ?
+            """,
+            (json.dumps(logs, ensure_ascii=False), now_ms, changeset_id),
+        )
+        conn.commit()
+        conn.close()
+
+    def apply_changeset(
+        self,
+        changeset_id: str,
+        reviewer: str = "human",
+        note: Optional[str] = None,
+    ) -> None:
+        """
+        审阅台“批准并提交”：
+        - 将 changeset 标记为 approved
+        - 尝试应用 payload 中可识别的提案（目前覆盖 time_constraints/time_blocks）
+        - 追加审计日志
+        """
+        cs = self.get_changeset(changeset_id)
+        if not cs:
+            raise ValueError("changeset not found")
+
+        payload = cs.get("payload") or {}
+        # 目前最小实现：时间约束与时间块（支持倒叙/插叙/未定区块）
+        for tc in payload.get("time_constraints", []) or []:
+            try:
+                self.upsert_time_constraint(TimeConstraint(**tc))
+            except Exception:
+                # 上层可通过 conflict 追踪失败原因；这里不中断整单
+                continue
+
+        for tb in payload.get("time_blocks", []) or []:
+            try:
+                self.upsert_time_block(TimeBlock(**tb))
+            except Exception:
+                continue
+
+        # 更新状态
+        now_ms = int(time.time() * 1000)
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE canonical_changesets SET review_status = ?, updated_at_ms = ? WHERE changeset_id = ?",
+            ("approved", now_ms, changeset_id),
+        )
+        conn.commit()
+        conn.close()
+
+        self._append_changeset_review_log(
+            changeset_id,
+            {
+                "at_ms": now_ms,
+                "action": "approved",
+                "reviewer": reviewer,
+                "note": note,
+            },
+        )
+
+    def reject_changeset(
+        self,
+        changeset_id: str,
+        reviewer: str = "human",
+        note: Optional[str] = None,
+    ) -> None:
+        now_ms = int(time.time() * 1000)
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE canonical_changesets SET review_status = ?, updated_at_ms = ? WHERE changeset_id = ?",
+            ("rejected", now_ms, changeset_id),
+        )
+        conn.commit()
+        conn.close()
+        self._append_changeset_review_log(
+            changeset_id,
+            {
+                "at_ms": now_ms,
+                "action": "rejected",
+                "reviewer": reviewer,
+                "note": note,
+            },
+        )
+
+    def create_conflict(
+        self,
+        project_id: int,
+        conflict_type: str,
+        changeset_id: Optional[str] = None,
+        entity_id: Optional[str] = None,
+        old_claim: Optional[Dict[str, Any]] = None,
+        new_claim: Optional[Dict[str, Any]] = None,
+        suggested_actions: Optional[List[Dict[str, Any]]] = None,
+        status: str = "open",
+    ) -> str:
+        from uuid import uuid4
+
+        conflict_id = uuid4().hex
+        now_ms = int(time.time() * 1000)
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO canonical_conflicts
+            (conflict_id, project_id, changeset_id, conflict_type, entity_id,
+             old_claim_json, new_claim_json, suggested_actions_json,
+             status, resolved_by, resolution_note, created_at_ms, updated_at_ms)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                conflict_id,
+                project_id,
+                changeset_id,
+                conflict_type,
+                entity_id,
+                json.dumps(old_claim, ensure_ascii=False) if old_claim else None,
+                json.dumps(new_claim, ensure_ascii=False) if new_claim else None,
+                json.dumps(suggested_actions, ensure_ascii=False) if suggested_actions else None,
+                status,
+                None,
+                None,
+                now_ms,
+                now_ms,
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        mem = MemoryRecord(
+            id=conflict_id,
+            project_id=project_id,
+            namespace=MemoryNamespace.CANONICAL,
+            type=MemoryType.CONFLICT,
+            entity=entity_id,
+            content=f"Conflict({conflict_type}): {entity_id or ''}",
+            payload_json={
+                "conflict_id": conflict_id,
+                "changeset_id": changeset_id,
+                "conflict_type": conflict_type,
+                "entity_id": entity_id,
+                "old_claim": old_claim,
+                "new_claim": new_claim,
+                "suggested_actions": suggested_actions,
+                "status": status,
+            },
+            source_ref="canonical_conflicts",
+        )
+        self.write(mem, skip_duplicate=False)
+
+        return conflict_id
+
+    def list_conflicts(
+        self,
+        project_id: int,
+        status: Optional[str] = "open",
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        if status:
+            cursor.execute(
+                """
+                SELECT conflict_id, changeset_id, conflict_type, entity_id,
+                       old_claim_json, new_claim_json, suggested_actions_json,
+                       status, resolved_by, resolution_note, created_at_ms, updated_at_ms
+                FROM canonical_conflicts
+                WHERE project_id = ? AND status = ?
+                ORDER BY updated_at_ms DESC
+                LIMIT ?
+                """,
+                (project_id, status, int(limit)),
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT conflict_id, changeset_id, conflict_type, entity_id,
+                       old_claim_json, new_claim_json, suggested_actions_json,
+                       status, resolved_by, resolution_note, created_at_ms, updated_at_ms
+                FROM canonical_conflicts
+                WHERE project_id = ?
+                ORDER BY updated_at_ms DESC
+                LIMIT ?
+                """,
+                (project_id, int(limit)),
+            )
+        rows = cursor.fetchall()
+        conn.close()
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            out.append(
+                {
+                    "conflict_id": r[0],
+                    "changeset_id": r[1],
+                    "conflict_type": r[2],
+                    "entity_id": r[3],
+                    "old_claim": json.loads(r[4]) if r[4] else None,
+                    "new_claim": json.loads(r[5]) if r[5] else None,
+                    "suggested_actions": json.loads(r[6]) if r[6] else [],
+                    "status": r[7],
+                    "resolved_by": r[8],
+                    "resolution_note": r[9],
+                    "created_at_ms": r[10],
+                    "updated_at_ms": r[11],
+                }
+            )
+        return out
+
+    def resolve_conflict(
+        self,
+        conflict_id: str,
+        resolved_by: str = "human",
+        resolution_note: Optional[str] = None,
+        status: str = "resolved",
+    ) -> None:
+        now_ms = int(time.time() * 1000)
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE canonical_conflicts
+            SET status = ?, resolved_by = ?, resolution_note = ?, updated_at_ms = ?
+            WHERE conflict_id = ?
+            """,
+            (status, resolved_by, resolution_note, now_ms, conflict_id),
+        )
+        conn.commit()
+        conn.close()
+
     def _find_by_hash(self, project_id: int, hash_value: str) -> Optional[MemoryRecord]:
         """根据 hash 查找记录（用于去重）"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
 
         cursor.execute(
-            "SELECT * FROM memory_records WHERE project_id = ? AND hash = ? LIMIT 1",
+            """
+            SELECT
+              id, project_id, namespace, type, entity, content, payload_json, source_ref, time_index,
+              status, confidence, source_kind, evidence_ids_json, story_order, story_time_json,
+              hash, created_at_ms
+            FROM memory_records
+            WHERE project_id = ? AND hash = ?
+            LIMIT 1
+            """,
             (project_id, hash_value),
         )
 
@@ -423,6 +1303,22 @@ class MemoryStore:
 
     def _row_to_record(self, row: tuple) -> MemoryRecord:
         """将数据库行转换为 MemoryRecord"""
+        # 列顺序必须与 _find_by_hash 中 SELECT 保持一致
+        story_time = None
+        story_time_json = row[14]
+        if story_time_json:
+            try:
+                story_time = StoryTime(**json.loads(story_time_json))
+            except Exception:
+                story_time = None
+
+        evidence_ids: List[str] = []
+        if row[12]:
+            try:
+                evidence_ids = json.loads(row[12]) or []
+            except Exception:
+                evidence_ids = []
+
         return MemoryRecord(
             id=row[0],
             project_id=row[1],
@@ -433,8 +1329,14 @@ class MemoryStore:
             payload_json=json.loads(row[6]) if row[6] else None,
             source_ref=row[7],
             time_index=row[8],
-            hash=row[9],
-            created_at_ms=row[10],
+            status=row[9] or "confirmed",
+            confidence=row[10] if row[10] is not None else 1.0,
+            source_kind=row[11] or "system",
+            evidence_ids=evidence_ids,
+            story_order=row[13],
+            story_time=story_time,
+            hash=row[15],
+            created_at_ms=row[16],
         )
 
     def _apply_mmr(

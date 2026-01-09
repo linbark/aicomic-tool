@@ -705,3 +705,5 @@
 {"location": "projects.py:54", "message": "create_project success", "data": {"id": 2, "name": "\u91cd\u751f\u540e\uff0c\u6211\u7684\u8001\u677f\u7adf\u7136\u8fd8\u6562pua"}, "timestamp": 1767452288948, "sessionId": "debug-session", "runId": "run1", "hypothesisId": "D"}
 {"location": "projects.py:48", "message": "create_project called", "data": {"name": "DebugProj", "description": "wf debug"}, "timestamp": 1767623792121, "sessionId": "debug-session", "runId": "run1", "hypothesisId": "D"}
 {"location": "projects.py:54", "message": "create_project success", "data": {"id": 2, "name": "DebugProj"}, "timestamp": 1767623792137, "sessionId": "debug-session", "runId": "run1", "hypothesisId": "D"}
+{"location": "projects.py:48", "message": "create_project called", "data": {"name": "\u86ca\u771f\u4eba", "description": null}, "timestamp": 1767879107019, "sessionId": "debug-session", "runId": "run1", "hypothesisId": "D"}
+{"location": "projects.py:54", "message": "create_project success", "data": {"id": 2, "name": "\u86ca\u771f\u4eba"}, "timestamp": 1767879107035, "sessionId": "debug-session", "runId": "run1", "hypothesisId": "D"}

@@ -3,7 +3,7 @@ import os
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from .routers import storyboard, assets, projects, events, ai, ai_runs
+from .routers import storyboard, assets, projects, events, ai, ai_runs, memory
 from .database import engine, Base
 from sqlalchemy import text
 
@@ -118,6 +118,7 @@ app.include_router(projects.router)
 app.include_router(events.router)
 app.include_router(ai.router)
 app.include_router(ai_runs.router)
+app.include_router(memory.router)
 
 @app.get("/")
 def read_root():

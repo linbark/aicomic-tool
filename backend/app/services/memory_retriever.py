@@ -11,6 +11,7 @@ from ..workflows.memory_schemas import (
     MemoryQuery,
     MemoryRetrievalResult,
     MemoryType,
+    TruthStatus,
 )
 
 
@@ -129,6 +130,7 @@ class MemoryRetriever:
                 query_text=static_query_text,
                 namespace=MemoryNamespace.STATIC_BIBLE,
                 entity=entity,
+                status=TruthStatus.CONFIRMED,
                 top_k=top_k_per_layer.get("L2_static", 5) if top_k_per_layer else 5,
             )
             results["L2_static"] = self.memory_store.retrieve(static_query, use_mmr=True)
@@ -148,6 +150,7 @@ class MemoryRetriever:
         negative_query = MemoryQuery(
             project_id=project_id,
             namespace=MemoryNamespace.WORLD_RULES_NEGATIVE,
+            status=TruthStatus.CONFIRMED,
             top_k=20,  # 负向约束通常不多，取更多以确保覆盖
         )
         results["negative_constraints"] = self.memory_store.retrieve(negative_query, use_mmr=False)
