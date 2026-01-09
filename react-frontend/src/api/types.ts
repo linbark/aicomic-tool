@@ -1,4 +1,5 @@
 export type ID = number
+export type ProjectID = string
 
 export interface AiSettingsRead {
   has_api_key: boolean
@@ -62,7 +63,7 @@ export interface WorkflowScriptOptions {
 }
 
 export interface WorkflowScriptRequest {
-  project_id: ID
+  project_id: ProjectID
   input_text: string
   options?: WorkflowScriptOptions
 }
@@ -84,7 +85,7 @@ export interface WorkflowStoryboardOptions {
 }
 
 export interface WorkflowStoryboardRequest {
-  project_id: ID
+  project_id: ProjectID
   scene_text: string
   options?: WorkflowStoryboardOptions
 }
@@ -95,14 +96,14 @@ export interface WorkflowStoryboardResponse {
 }
 
 export interface ApplyScriptWorkflowRequest {
-  project_id: ID
+  project_id: ProjectID
   episode_id: ID
   run_id: string
   overwrite_scenes?: boolean
 }
 
 export interface ApplyStoryboardWorkflowRequest {
-  project_id: ID
+  project_id: ProjectID
   scene_id: ID
   run_id: string
   overwrite_shots?: boolean
@@ -110,7 +111,7 @@ export interface ApplyStoryboardWorkflowRequest {
 
 export interface AiActionRunRead {
   id: ID
-  project_id: ID
+  project_id: ProjectID
   target_type: 'episode'
   target_id: ID
   action_key: string
@@ -121,7 +122,7 @@ export interface AiActionRunRead {
 }
 
 export interface AiActionRunCreate {
-  project_id: ID
+  project_id: ProjectID
   target_type?: 'episode'
   target_id: ID
   action_key: string
@@ -207,7 +208,7 @@ export interface EpisodeRead {
 }
 
 export interface ProjectBase {
-  id: ID
+  id: ProjectID
   name: string
   description?: string | null
 }
@@ -263,7 +264,7 @@ export interface AssetItemRead {
 }
 
 export interface VisualDnaIngestRequest {
-  project_id: ID
+  project_id: ProjectID
   item_id: ID
   asset_file_path: string
   version?: string

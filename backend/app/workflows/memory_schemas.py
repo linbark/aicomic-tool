@@ -139,12 +139,56 @@ class EvidenceRecordPayload(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     evidence_id: str = Field(default_factory=lambda: uuid4().hex)
+    project_id: int = Field(..., description="项目 ID（Evidence-first：所有证据必须能归属到项目）")
     episode_id: Optional[int] = None
     scene_id: Optional[int] = None
     span: Optional[EvidenceSpan] = None
     quote: str
     speaker: Optional[str] = None
     tags: List[str] = Field(default_factory=list)
+
+
+class CanonicalEntityPayload(BaseModel):
+    """
+    Canonical 实体主干（Entity）最小合同。
+    - entity_id 作为稳定 ID（建议由 EntityResolver 生成/维护）
+    - aliases 可选，用于别名归一
+    """
+    model_config = ConfigDict(extra="allow")
+
+    entity_id: str
+    project_id: int
+    entity_type: str
+    canonical_name: str
+    aliases: List[str] = Field(default_factory=list)
+    status: TruthStatus = TruthStatus.CONFIRMED
+    confidence: float = 1.0
+    source_kind: SourceKind = SourceKind.EXTRACTED
+    created_from_evidence_id: Optional[str] = None
+
+
+class CanonicalSnapshotPayload(BaseModel):
+    """
+    Canonical 版本切片（Snapshot）最小合同（自由 fields JSON，顶层命名空间推荐固定）。
+    约定：
+    - snapshot_id 视为版本 ID（version_id），并作为引用键（before/after_snapshot_id）
+    - fields 顶层推荐：visual/personality/goals/relations/items/injuries（自由 JSON）
+    """
+    model_config = ConfigDict(extra="allow")
+
+    snapshot_id: str
+    project_id: int
+    entity_id: str
+    valid_from_story_time_key: Optional[str] = None
+    valid_to_story_time_key: Optional[str] = None
+    valid_from_story_order: Optional[str] = None
+    valid_to_story_order: Optional[str] = None
+    fields: Dict[str, Any] = Field(default_factory=dict)
+    why: Optional[str] = None
+    evidence_ids: List[str] = Field(default_factory=list)
+    status: TruthStatus = TruthStatus.CONFIRMED
+    confidence: float = 1.0
+    source_kind: SourceKind = SourceKind.EXTRACTED
 
 
 class MemoryRecord(BaseModel):

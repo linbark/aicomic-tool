@@ -3,7 +3,7 @@ import api from '../api/client'
 import { useProjectSelection } from '../state/useProjectSelection'
 
 type RunMeta = {
-  project_id: number
+  project_id: string
   run_id: string
   created_at_ms: number
   workflow?: string
@@ -171,6 +171,7 @@ export function RunInspectorPage() {
                 <button
                   style={{ ...styles.tab, ...(!selectedStage ? styles.tabActive : null) }}
                   onClick={() => setSelectedStage(null)}
+                  disabled={loadingStages}
                 >
                   Run 详情
                 </button>
@@ -179,10 +180,12 @@ export function RunInspectorPage() {
                     key={stage}
                     style={{ ...styles.tab, ...(selectedStage === stage ? styles.tabActive : null) }}
                     onClick={() => setSelectedStage(stage)}
+                    disabled={loadingStages}
                   >
                     {stage}
                   </button>
                 ))}
+                {loadingStages ? <div style={{ marginLeft: 10, fontSize: 11, opacity: 0.7 }}>Stages 加载中…</div> : null}
               </div>
 
               <div style={styles.panel}>

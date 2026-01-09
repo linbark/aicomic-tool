@@ -92,12 +92,12 @@ export const api = {
   // 项目
   getProjects: () => apiClient.get<ProjectBase[]>('/projects/'),
   createProject: (data: ProjectCreate) => apiClient.post<ProjectBase>('/projects/', data),
-  updateProject: (projectId: number, data: ProjectUpdate) => apiClient.patch<ProjectBase>(`/projects/${projectId}`, data),
-  deleteProject: (projectId: number) => apiClient.delete(`/projects/${projectId}`),
+  updateProject: (projectId: string, data: ProjectUpdate) => apiClient.patch<ProjectBase>(`/projects/${projectId}`, data),
+  deleteProject: (projectId: string) => apiClient.delete(`/projects/${projectId}`),
 
   // 剧本 (Episode/Scene/Shot)
-  getScript: (projectId: number) => apiClient.get<EpisodeRead[]>(`/storyboard/project/${projectId}`),
-  createEpisode: (projectId: number, data: unknown) => apiClient.post(`/storyboard/project/${projectId}/episode`, data),
+  getScript: (projectId: string) => apiClient.get<EpisodeRead[]>(`/storyboard/project/${projectId}`),
+  createEpisode: (projectId: string, data: unknown) => apiClient.post(`/storyboard/project/${projectId}/episode`, data),
   updateEpisode: (episodeId: number, data: unknown) => apiClient.patch(`/storyboard/episode/${episodeId}`, data),
   createScene: (episodeId: number, data: unknown) => apiClient.post(`/storyboard/episode/${episodeId}/scene`, data),
   createShot: (sceneId: number, data: unknown) => apiClient.post(`/storyboard/scene/${sceneId}/shot`, data),
@@ -127,22 +127,22 @@ export const api = {
     }),
 
   // 事件
-  getEvents: (projectId: number) => apiClient.get<EventRead[]>(`/events/project/${projectId}`),
-  createEvent: (projectId: number, data: EventCreate) => apiClient.post<EventRead>(`/events/project/${projectId}`, data),
+  getEvents: (projectId: string) => apiClient.get<EventRead[]>(`/events/project/${projectId}`),
+  createEvent: (projectId: string, data: EventCreate) => apiClient.post<EventRead>(`/events/project/${projectId}`, data),
   updateEvent: (eventId: number, data: EventUpdate) => apiClient.patch<EventRead>(`/events/${eventId}`, data),
   deleteEvent: (eventId: number) => apiClient.delete(`/events/${eventId}`),
   upsertEventNode: (eventId: number, data: { target_type: 'scene' | 'episode' | 'shot'; target_id: number; description: string }) =>
     apiClient.post(`/events/nodes/${eventId}`, data),
 
   // 人设/资产条目（项目级）
-  getAssetItems: (projectId: number, category?: string) => {
+  getAssetItems: (projectId: string, category?: string) => {
     const qs = category ? `?category=${encodeURIComponent(category)}` : ''
     return apiClient.get<AssetItemRead[]>(`/projects/${projectId}/asset-items${qs}`)
   },
-  createAssetItem: (projectId: number, data: unknown) => apiClient.post(`/projects/${projectId}/asset-items`, data),
+  createAssetItem: (projectId: string, data: unknown) => apiClient.post(`/projects/${projectId}/asset-items`, data),
   updateAssetItem: (itemId: number, data: unknown) => apiClient.patch(`/projects/asset-items/${itemId}`, data),
   deleteAssetItem: (itemId: number) => apiClient.delete(`/projects/asset-items/${itemId}`),
-  getCharacters: (projectId: number) => apiClient.get(`/projects/${projectId}/characters`),
+  getCharacters: (projectId: string) => apiClient.get(`/projects/${projectId}/characters`),
 
   // AI
   getAiSettings: () => apiClient.get<AiSettingsRead>(`/ai/settings`),
@@ -165,7 +165,7 @@ export const api = {
   deletePromptTemplate: (key: string) => apiClient.delete(`/ai/prompts/${encodeURIComponent(key)}`),
 
   // AI Runs（按钮输出历史）
-  getAiRuns: (params: { project_id: number; episode_id?: number; action_key?: string; limit?: number }) => {
+  getAiRuns: (params: { project_id: string; episode_id?: number; action_key?: string; limit?: number }) => {
     const qs = new URLSearchParams()
     qs.set('project_id', String(params.project_id))
     if (typeof params.episode_id === 'number') qs.set('episode_id', String(params.episode_id))
@@ -178,7 +178,7 @@ export const api = {
 
   // Chat Orchestrator（意图识别 + 多步编排）
   aiChatAct: (data: {
-    project_id: number
+    project_id: string
     episode_id?: number
     current_action_key?: string
     message: string
@@ -188,48 +188,61 @@ export const api = {
     apiClient.post<{
       assistant_message: string
       created_run?: { id: number; action_key: string; created_at: string }
+      cards?: any[]
       plan?: any
       steps_trace?: any[]
       planner_prompt?: string
       memory_trace?: any[]
       planner_raw?: string
     }>(`/ai/chat/act`, data),
+  aiChatActAsync: (data: {
+    project_id: string
+    episode_id?: number
+    current_action_key?: string
+    message: string
+    ui_context?: Record<string, unknown>
+    debug?: boolean
+  }) =>
+    apiClient.post<{
+      run_id: string
+      status: string
+    }>(`/ai/chat/act_async`, data),
 
   // Context 管理（Series Bible / Visual DNA / Project Outline）
-  getSeriesBible: (projectId: number, version: string = 'v1') => {
+  getSeriesBible: (projectId: string, version: string = 'v1') => {
     const qs = new URLSearchParams()
     qs.set('project_id', String(projectId))
     qs.set('version', version)
     return apiClient.get(`/ai/context/series-bible?${qs.toString()}`)
   },
-  putSeriesBible: (projectId: number, data: { data: Record<string, unknown>; version?: string }) => {
+  putSeriesBible: (projectId: string, data: { data: Record<string, unknown>; version?: string }) => {
     const qs = new URLSearchParams()
     qs.set('project_id', String(projectId))
     return apiClient.put(`/ai/context/series-bible?${qs.toString()}`, data)
   },
-  getProjectOutline: (projectId: number, version: string = 'v1') => {
+  getProjectOutline: (projectId: string, version: string = 'v1') => {
     const qs = new URLSearchParams()
     qs.set('project_id', String(projectId))
     qs.set('version', version)
     return apiClient.get(`/ai/context/project-outline?${qs.toString()}`)
   },
-  putProjectOutline: (projectId: number, data: { data: Record<string, unknown>; version?: string }) => {
+  putProjectOutline: (projectId: string, data: { data: Record<string, unknown>; version?: string }) => {
     const qs = new URLSearchParams()
     qs.set('project_id', String(projectId))
     return apiClient.put(`/ai/context/project-outline?${qs.toString()}`, data)
   },
-  aiProjectOutlineGenerate: (data: { project_id: number; input_text: string; num_episodes?: number }) =>
+  aiProjectOutlineGenerate: (data: { project_id: string; input_text: string; num_episodes?: number }) =>
     apiClient.post<{ project_outline: Record<string, unknown> }>(`/ai/project-outline-generate`, data),
-  aiProjectOutlineOptimize: (data: { project_id: number; current_outline: string; optimization_instructions?: string }) =>
+  aiProjectOutlineOptimize: (data: { project_id: string; current_outline: string; optimization_instructions?: string }) =>
     apiClient.post<{ project_outline: Record<string, unknown>; changes_summary: string }>(`/ai/project-outline-optimize`, data),
-  getVisualDna: (projectId: number, itemId: number, version: string = 'v1') => {
+  getVisualDna: (projectId: string, itemId: number, version: string = 'v1') => {
     const qs = new URLSearchParams()
     qs.set('project_id', String(projectId))
     qs.set('item_id', String(itemId))
     qs.set('version', version)
     return apiClient.get(`/ai/context/visual-dna?${qs.toString()}`)
   },
-  putVisualDna: (projectId: number, itemId: number, data: { data: Record<string, unknown>; version?: string }) => {
+  putVisualDna: (projectId: string, itemId: number, data: { data: Record<string, unknown>; version?: string }) => {
     const qs = new URLSearchParams()
     qs.set('project_id', String(projectId))
     qs.set('item_id', String(itemId))
@@ -237,14 +250,56 @@ export const api = {
   },
 
   // Run 快照审计
-  listRunFiles: (projectId: number) => apiClient.get(`/ai/runs-files?project_id=${projectId}`),
-  getRunFile: (projectId: number, runId: string) => apiClient.get(`/ai/runs-files/${encodeURIComponent(runId)}?project_id=${projectId}`),
-  listRunStages: (projectId: number, runId: string) => apiClient.get(`/ai/runs-files/${encodeURIComponent(runId)}/stages?project_id=${projectId}`),
-  getRunStage: (projectId: number, runId: string, stageName: string) =>
-    apiClient.get(`/ai/runs-files/${encodeURIComponent(runId)}/stages/${encodeURIComponent(stageName)}?project_id=${projectId}`),
+  listRunFiles: (projectId: string) => apiClient.get(`/ai/runs-files?project_id=${encodeURIComponent(projectId)}`),
+  getRunFile: (projectId: string, runId: string) =>
+    apiClient.get(`/ai/runs-files/${encodeURIComponent(runId)}?project_id=${encodeURIComponent(projectId)}`),
+  listRunStages: (projectId: string, runId: string) =>
+    apiClient.get(`/ai/runs-files/${encodeURIComponent(runId)}/stages?project_id=${encodeURIComponent(projectId)}`),
+  getRunStage: (projectId: string, runId: string, stageName: string) =>
+    apiClient.get(
+      `/ai/runs-files/${encodeURIComponent(runId)}/stages/${encodeURIComponent(stageName)}?project_id=${encodeURIComponent(projectId)}`
+    ),
 
   // Visual DNA 摄取
   ingestVisualDna: (data: VisualDnaIngestRequest) => apiClient.post<VisualDnaIngestResponse>(`/ai/visual-dna/ingest`, data),
+
+  // ==========================
+  // Memory (记忆工程) - Canonical / Evidence-first / ReviewConsole
+  // ==========================
+  memoryIngestEvidence: (data: {
+    project_id: string
+    episode_id?: number
+    scene_id?: number
+    text: string
+    max_quote_chars?: number
+    tags?: string[]
+  }) =>
+    apiClient.post<{ evidence_ids: string[]; count: number }>(`/memory/evidence/ingest`, data),
+  memoryCreateChangeSetFromPayload: (data: {
+    project_id: string
+    episode_id?: number
+    payload: Record<string, unknown>
+    default_materialize_static_bible?: boolean
+  }) => apiClient.post<{ changeset_id: string }>(`/memory/changeset/from-payload`, data),
+  memoryApproveChangeSet: (changesetId: string, data?: { reviewer?: string; note?: string | null }) =>
+    apiClient.post(`/memory/changeset/${encodeURIComponent(changesetId)}/approve`, data || {}),
+  memoryRejectChangeSet: (changesetId: string, data?: { reviewer?: string; note?: string | null }) =>
+    apiClient.post(`/memory/changeset/${encodeURIComponent(changesetId)}/reject`, data || {}),
+  memoryExtractChangeSet: (data: {
+    project_id: string
+    episode_id?: number
+    evidence_ids?: string[]
+    text?: string | null
+    ingest_max_quote_chars?: number
+    ingest_tags?: string[]
+    story_order_base?: string | null
+    create_changeset?: boolean
+  }) =>
+    apiClient.post<{
+      changeset_id?: string | null
+      payload: Record<string, unknown>
+      evidence_ids: string[]
+    }>(`/memory/extract/changeset`, data),
 
   // 资产文件删除（Asset 表）
   deleteProjectAsset: (assetId: number) => apiClient.delete(`/projects/assets/${assetId}`),

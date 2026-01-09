@@ -6,13 +6,13 @@ const LS_KEY = 'aicomic.projectId'
 
 export function useProjectSelection() {
   const [projects, setProjects] = useState<ProjectBase[]>([])
-  const [projectId, setProjectIdState] = useState<number | null>(() => {
+  const [projectId, setProjectIdState] = useState<string | null>(() => {
     const raw = typeof window !== 'undefined' ? window.localStorage.getItem(LS_KEY) : null
-    const v = raw ? Number(raw) : NaN
-    return Number.isFinite(v) ? v : null
+    const v = (raw || '').trim()
+    return v ? v : null
   })
 
-  function setProjectId(next: number | null) {
+  function setProjectId(next: string | null) {
     setProjectIdState(next)
     if (typeof window === 'undefined') return
     if (next == null) window.localStorage.removeItem(LS_KEY)

@@ -1,3 +1,5 @@
+import uuid
+
 from sqlalchemy import Column, Integer, String, Text, ForeignKey, DateTime, Boolean, JSON, Enum
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -9,6 +11,8 @@ from .database import Base
 class Project(Base):
     __tablename__ = "projects"
     id = Column(Integer, primary_key=True, index=True)
+    # 对外暴露的稳定 ID：UUID（hex 字符串），避免暴露递增整数
+    uuid = Column(String, unique=True, index=True, nullable=True, default=lambda: uuid.uuid4().hex)
     name = Column(String, index=True)
     description = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())

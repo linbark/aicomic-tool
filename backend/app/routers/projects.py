@@ -7,6 +7,7 @@ from ..database import get_db
 import os
 from ..models import Character, Asset, Project
 from ..services.app_paths import project_root_dir, data_dir
+from ..services.project_lookup import resolve_project, resolve_project_pk, ensure_project_uuid
 
 router = APIRouter(
     prefix="/projects",
@@ -43,7 +44,17 @@ class CharacterUpdate(BaseModel):
 
 @router.get("/", response_model=List[schemas.ProjectBase])
 def get_projects(db: Session = Depends(get_db)):
-    return db.query(models.Project).all()
+    rows = db.query(models.Project).all()
+    dirty = False
+    out = []
+    for p in rows:
+        if not (getattr(p, "uuid", None) or "").strip():
+            p.uuid = __import__("uuid").uuid4().hex
+            dirty = True
+        out.append({"id": str(p.uuid), "name": p.name, "description": p.description})
+    if dirty:
+        db.commit()
+    return out
 
 @router.post("/", response_model=schemas.ProjectBase)
 def create_project(project: ProjectCreate, db: Session = Depends(get_db)):
@@ -58,11 +69,12 @@ def create_project(project: ProjectCreate, db: Session = Depends(get_db)):
         db.add(db_project)
         db.commit()
         db.refresh(db_project)
+        ensure_project_uuid(db, db_project)
         try:
             with open(log_path, 'a') as f:
                 f.write(json.dumps({"location":"projects.py:54","message":"create_project success","data":{"id":db_project.id,"name":db_project.name},"timestamp":int(__import__('time').time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"D"})+"\n")
         except: pass
-        return db_project
+        return {"id": str(db_project.uuid), "name": db_project.name, "description": db_project.description}
     except Exception as e:
         try:
             with open(log_path, 'a') as f:
@@ -72,10 +84,8 @@ def create_project(project: ProjectCreate, db: Session = Depends(get_db)):
 
 # 【新增】修改项目 (重命名)
 @router.patch("/{project_id}", response_model=schemas.ProjectBase)
-def update_project(project_id: int, project_update: ProjectUpdate, db: Session = Depends(get_db)):
-    db_project = db.query(models.Project).filter(models.Project.id == project_id).first()
-    if not db_project:
-        raise HTTPException(status_code=404, detail="Project not found")
+def update_project(project_id: str, project_update: ProjectUpdate, db: Session = Depends(get_db)):
+    db_project = resolve_project(db, project_id)
     
     if project_update.name is not None:
         db_project.name = project_update.name
@@ -84,19 +94,19 @@ def update_project(project_id: int, project_update: ProjectUpdate, db: Session =
     
     db.commit()
     db.refresh(db_project)
-    return db_project
+    ensure_project_uuid(db, db_project)
+    return {"id": str(db_project.uuid), "name": db_project.name, "description": db_project.description}
 
 # 【新增】删除项目
 @router.delete("/{project_id}")
-def delete_project(project_id: int, db: Session = Depends(get_db)):
-    db_project = db.query(models.Project).filter(models.Project.id == project_id).first()
-    if not db_project:
-        raise HTTPException(status_code=404, detail="Project not found")
+def delete_project(project_id: str, db: Session = Depends(get_db)):
+    db_project = resolve_project(db, project_id)
     
     project_name = db_project.name
     base_data_dir = data_dir()
     project_dir = os.path.join(base_data_dir, project_name)
-    app_project_dir = project_root_dir(project_id)
+    pid = int(db_project.id)
+    app_project_dir = project_root_dir(pid)
     
     # 删除项目文件夹（如果存在）
     if os.path.exists(project_dir):
@@ -118,8 +128,6 @@ def delete_project(project_id: int, db: Session = Depends(get_db)):
     
     # 删除数据库记录（显式清理所有 project_id 关联数据，避免 SQLite 未启用外键级联导致残留）
     try:
-        pid = int(project_id)
-
         # 子查询：episodes / scenes / shots ids
         ep_ids_q = db.query(models.Episode.id).filter(models.Episode.project_id == pid)
         sc_ids_q = db.query(models.Scene.id).filter(models.Scene.episode_id.in_(ep_ids_q))
@@ -173,21 +181,23 @@ def delete_project(project_id: int, db: Session = Depends(get_db)):
 
 @router.get("/{project_id}/asset-items", response_model=List[schemas.AssetItemRead])
 def get_project_asset_items(
-    project_id: int,
+    project_id: str,
     category: Optional[str] = Query(default=None),
     db: Session = Depends(get_db),
 ):
+    pid = resolve_project_pk(db, project_id)
     q = db.query(models.Character).options(joinedload(models.Character.assets)).filter(
-        models.Character.project_id == project_id
+        models.Character.project_id == pid
     )
     if category:
         q = q.filter(models.Character.category == category)
     return q.all()
 
 @router.post("/{project_id}/asset-items", response_model=schemas.AssetItemRead)
-def create_asset_item(project_id: int, item: CharacterCreate, db: Session = Depends(get_db)):
+def create_asset_item(project_id: str, item: CharacterCreate, db: Session = Depends(get_db)):
+    pid = resolve_project_pk(db, project_id)
     exists = db.query(models.Character).filter(
-        models.Character.project_id == project_id,
+        models.Character.project_id == pid,
         models.Character.name == item.name
     ).first()
     
@@ -195,7 +205,7 @@ def create_asset_item(project_id: int, item: CharacterCreate, db: Session = Depe
         raise HTTPException(status_code=400, detail="该项目下已存在同名角色")
 
     new_char = models.Character(
-        project_id=project_id,
+        project_id=pid,
         name=item.name,
         description=item.description,
         base_prompt=item.base_prompt,
@@ -285,11 +295,11 @@ def delete_asset_item(item_id: int, db: Session = Depends(get_db)):
 # 兼容旧接口（前端已切到 /asset-items；此处仅避免旧客户端断掉）
 # -----------------------
 @router.get("/{project_id}/characters", response_model=List[schemas.AssetItemRead])
-def get_project_characters(project_id: int, db: Session = Depends(get_db)):
+def get_project_characters(project_id: str, db: Session = Depends(get_db)):
     return get_project_asset_items(project_id=project_id, category=None, db=db)
 
 @router.post("/{project_id}/characters", response_model=schemas.AssetItemRead)
-def create_character(project_id: int, char: CharacterCreate, db: Session = Depends(get_db)):
+def create_character(project_id: str, char: CharacterCreate, db: Session = Depends(get_db)):
     return create_asset_item(project_id=project_id, item=char, db=db)
 
 @router.patch("/characters/{char_id}", response_model=schemas.AssetItemRead)

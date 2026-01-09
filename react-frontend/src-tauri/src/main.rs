@@ -8,6 +8,26 @@ use std::time::{Duration, Instant};
 
 use tauri::{Manager, Window};
 
+fn backend_startup_timeout() -> Duration {
+  // 默认给足时间（首次启动会 import 大模型/向量库等，可能明显慢于 10s）
+  // 可通过环境变量覆盖：AICOMIC_BACKEND_STARTUP_TIMEOUT_SECS=60
+  const DEFAULT_SECS: u64 = 60;
+  match std::env::var("AICOMIC_BACKEND_STARTUP_TIMEOUT_SECS") {
+    Ok(v) => match v.trim().parse::<u64>() {
+      Ok(secs) if secs > 0 => Duration::from_secs(secs),
+      _ => {
+        eprintln!(
+          "[Tauri] Invalid AICOMIC_BACKEND_STARTUP_TIMEOUT_SECS='{}', using default {}s",
+          v.trim(),
+          DEFAULT_SECS
+        );
+        Duration::from_secs(DEFAULT_SECS)
+      }
+    },
+    Err(_) => Duration::from_secs(DEFAULT_SECS),
+  }
+}
+
 fn python_can_import(python: &str, backend_root: &Path, pythonpath: &str) -> bool {
   let mut cmd = Command::new(python);
   cmd.current_dir(backend_root);
@@ -222,8 +242,9 @@ fn main() {
       let port_for_inject = port;
       thread::spawn(move || {
         eprintln!("[Tauri] Waiting for backend on port {}...", port_for_inject);
-        // 等待后端启动
-        if wait_port_open(port_for_inject, Duration::from_secs(10)) {
+        let timeout = backend_startup_timeout();
+        // 等待后端启动（端口可连通）
+        if wait_port_open(port_for_inject, timeout) {
           eprintln!("[Tauri] Backend ready on port {}", port_for_inject);
           // 尝试多次注入，因为窗口可能还没准备好
           for i in 0..20 {
@@ -238,8 +259,12 @@ fn main() {
             thread::sleep(Duration::from_millis(200));
           }
         } else {
-          eprintln!("[Tauri] ERROR: Backend failed to start within timeout on port {}", port_for_inject);
-          eprintln!("[Tauri] Please check if Python and uvicorn are installed correctly");
+          eprintln!(
+            "[Tauri] ERROR: Backend failed to start within timeout ({:?}) on port {}",
+            timeout, port_for_inject
+          );
+          eprintln!("[Tauri] Tip: first boot can be slow; you can set AICOMIC_BACKEND_STARTUP_TIMEOUT_SECS=120");
+          eprintln!("[Tauri] Please check backend stderr logs for the real reason");
         }
       });
 

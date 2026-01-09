@@ -4,6 +4,7 @@ from typing import List
 from .. import models, schemas
 from ..database import get_db
 from typing import Dict, Any
+from ..services.project_lookup import resolve_project_pk
 
 router = APIRouter(
     prefix="/events",
@@ -12,16 +13,18 @@ router = APIRouter(
 
 # 获取项目的所有事件
 @router.get("/project/{project_id}", response_model=List[schemas.EventRead])
-def get_project_events(project_id: int, db: Session = Depends(get_db)):
+def get_project_events(project_id: str, db: Session = Depends(get_db)):
+    pid = resolve_project_pk(db, project_id)
     from sqlalchemy.orm import joinedload
     return db.query(models.Event)\
               .options(joinedload(models.Event.nodes))\
-              .filter(models.Event.project_id == project_id).all()
+              .filter(models.Event.project_id == pid).all()
 
 # 创建事件
 @router.post("/project/{project_id}", response_model=schemas.EventRead)
-def create_event(project_id: int, event: schemas.EventCreate, db: Session = Depends(get_db)):
-    db_event = models.Event(**event.dict(), project_id=project_id)
+def create_event(project_id: str, event: schemas.EventCreate, db: Session = Depends(get_db)):
+    pid = resolve_project_pk(db, project_id)
+    db_event = models.Event(**event.dict(), project_id=pid)
     db.add(db_event)
     db.commit()
     db.refresh(db_event)
@@ -92,13 +95,14 @@ def delete_event(event_id: int, db: Session = Depends(get_db)):
     return {"message": "Event deleted"}
 
 @router.get("/matrix/{project_id}")
-def get_event_matrix(project_id: int, db: Session = Depends(get_db)):
+def get_event_matrix(project_id: str, db: Session = Depends(get_db)):
     """
     聚合查询：返回该项目下所有事件、以及所有事件关联的节点
     前端拿到后，自己在内存里组装矩阵
     """
+    pid = resolve_project_pk(db, project_id)
     # 1. 获取所有事件
-    events = db.query(models.Event).filter(models.Event.project_id == project_id).all()
+    events = db.query(models.Event).filter(models.Event.project_id == pid).all()
     
     # 2. 获取所有节点 (通过 join 优化性能)
     # 逻辑：找出属于这些 events 的所有 nodes

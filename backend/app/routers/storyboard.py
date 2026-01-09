@@ -11,6 +11,7 @@ from sqlalchemy.orm import joinedload
 # 引入我们定义好的数据库模型和Pydantic模型
 from .. import models, schemas
 from ..database import get_db # 假设你有一个 get_db 依赖项
+from ..services.project_lookup import resolve_project_pk
 
 router = APIRouter(
     prefix="/storyboard",  # 👈 修改这里：从 "/script" 改为 "/storyboard"
@@ -21,19 +22,21 @@ VIDEO_DIR = "user_projects/videos"
 
 # 1. 获取项目的剧本结构
 @router.get("/project/{project_id}", response_model=List[schemas.EpisodeRead])
-def get_full_script(project_id: int, db: Session = Depends(get_db)):
+def get_full_script(project_id: str, db: Session = Depends(get_db)):
+    pid = resolve_project_pk(db, project_id)
     episodes = db.query(models.Episode)\
                  .options(
                      joinedload(models.Episode.scenes).joinedload(models.Scene.shots).joinedload(models.Shot.assets)
                  )\
-                 .filter(models.Episode.project_id == project_id)\
+                 .filter(models.Episode.project_id == pid)\
                  .order_by(models.Episode.order).all()
     return episodes
 
 # 2. 创建集
 @router.post("/project/{project_id}/episode", response_model=schemas.EpisodeRead)
-def create_episode(project_id: int, episode: schemas.EpisodeCreate, db: Session = Depends(get_db)):
-    db_ep = models.Episode(**episode.dict(), project_id=project_id)
+def create_episode(project_id: str, episode: schemas.EpisodeCreate, db: Session = Depends(get_db)):
+    pid = resolve_project_pk(db, project_id)
+    db_ep = models.Episode(**episode.dict(), project_id=pid)
     db.add(db_ep)
     db.commit()
     db.refresh(db_ep)

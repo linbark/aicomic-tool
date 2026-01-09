@@ -17,15 +17,20 @@ from .app_paths import app_data_dir
 from .embedding_provider import EmbeddingProvider
 from .vector_store import VectorStore, get_vector_store
 from ..workflows.memory_schemas import (
+    CanonicalEntityPayload,
+    CanonicalSnapshotPayload,
     MemoryNamespace,
     MemoryQuery,
     MemoryRecord,
     MemoryRetrievalResult,
     MemoryType,
+    EvidenceRecordPayload,
     StateChange,
     StoryTime,
     TimeBlock,
     TimeConstraint,
+    TruthStatus,
+    SourceKind,
 )
 
 
@@ -362,6 +367,405 @@ class MemoryStore:
 
         conn.commit()
         conn.close()
+
+    # =========================
+    # Canonical: Evidence / Entity / Snapshot（结构化真值库）
+    # =========================
+    def upsert_evidence(self, evidence: EvidenceRecordPayload) -> str:
+        """
+        写入/更新 Evidence（原文证据切片）。
+        - 写入 canonical_evidences
+        - 同步写入一条 CANONICAL MemoryRecord 便于语义检索与审计
+        """
+        now_ms = int(time.time() * 1000)
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT OR REPLACE INTO canonical_evidences
+            (evidence_id, project_id, episode_id, scene_id, span_json, quote, speaker, tags_json, created_at_ms)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                evidence.evidence_id,
+                int(evidence.project_id),
+                evidence.episode_id,
+                evidence.scene_id,
+                json.dumps(evidence.span.model_dump(), ensure_ascii=False) if evidence.span else None,
+                evidence.quote,
+                evidence.speaker,
+                json.dumps(evidence.tags, ensure_ascii=False) if evidence.tags else None,
+                now_ms,
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        # 写入向量/主表：以 quote 为 content（短一点，避免噪声）
+        quote = (evidence.quote or "").strip()
+        preview = quote if len(quote) <= 200 else quote[:200] + "…"
+        tag_txt = ",".join([t for t in (evidence.tags or []) if str(t).strip()][:6])
+        readable = f"证据: {preview}"
+        if tag_txt:
+            readable += f" [tags:{tag_txt}]"
+        mem = MemoryRecord(
+            id=evidence.evidence_id,
+            project_id=int(evidence.project_id),
+            namespace=MemoryNamespace.CANONICAL,
+            type=MemoryType.EVIDENCE,
+            entity=evidence.speaker or None,
+            content=readable.strip(),
+            payload_json=evidence.model_dump(),
+            source_ref="canonical_evidences",
+            status=TruthStatus.CONFIRMED,  # 证据本身默认可信（是否采纳由上层条目 status 决定）
+            confidence=1.0,
+            source_kind=SourceKind.EXTRACTED,
+            evidence_ids=[evidence.evidence_id],
+            story_order=None,
+        )
+        self.write(mem, skip_duplicate=False)
+        return evidence.evidence_id
+
+    def upsert_entity(self, entity: CanonicalEntityPayload) -> str:
+        """
+        写入/更新 Entity（实体主干）。
+        - 写入 canonical_entities
+        - 同步写入一条 CANONICAL MemoryRecord 便于语义检索与审计
+        """
+        now_ms = int(time.time() * 1000)
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT OR REPLACE INTO canonical_entities
+            (entity_id, project_id, entity_type, canonical_name, aliases_json, status, confidence, source_kind,
+             created_from_evidence_id, created_at_ms, updated_at_ms)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                entity.entity_id,
+                entity.project_id,
+                entity.entity_type,
+                entity.canonical_name,
+                json.dumps(entity.aliases, ensure_ascii=False) if entity.aliases else None,
+                entity.status.value,
+                float(entity.confidence),
+                entity.source_kind.value,
+                entity.created_from_evidence_id,
+                now_ms,
+                now_ms,
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        aliases = ", ".join([a for a in (entity.aliases or []) if str(a).strip()][:8])
+        readable = f"实体({entity.entity_type}): {entity.canonical_name}"
+        if aliases:
+            readable += f"；别名: {aliases}"
+        mem = MemoryRecord(
+            id=entity.entity_id,
+            project_id=entity.project_id,
+            namespace=MemoryNamespace.CANONICAL,
+            type=MemoryType.ENTITY,
+            entity=entity.canonical_name,
+            content=readable.strip(),
+            payload_json=entity.model_dump(),
+            source_ref="canonical_entities",
+            status=entity.status,
+            confidence=entity.confidence,
+            source_kind=entity.source_kind,
+            evidence_ids=[entity.created_from_evidence_id] if entity.created_from_evidence_id else [],
+        )
+        self.write(mem, skip_duplicate=False)
+        return entity.entity_id
+
+    def _get_entity_row(self, project_id: int, entity_id: str) -> Optional[Dict[str, Any]]:
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT entity_id, entity_type, canonical_name, aliases_json, status, confidence, source_kind
+            FROM canonical_entities
+            WHERE project_id = ? AND entity_id = ?
+            LIMIT 1
+            """,
+            (int(project_id), str(entity_id)),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return None
+        return {
+            "entity_id": row[0],
+            "entity_type": row[1],
+            "canonical_name": row[2],
+            "aliases": json.loads(row[3]) if row[3] else [],
+            "status": row[4],
+            "confidence": row[5],
+            "source_kind": row[6],
+        }
+
+    def find_entities_by_name(
+        self,
+        *,
+        project_id: int,
+        canonical_name: str,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """按 canonical_name 查询实体（用于归一/冲突提示）。"""
+        name = (canonical_name or "").strip()
+        if not name:
+            return []
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT entity_id, entity_type, canonical_name, aliases_json, status, confidence, source_kind, created_from_evidence_id
+            FROM canonical_entities
+            WHERE project_id = ? AND canonical_name = ?
+            ORDER BY updated_at_ms DESC
+            LIMIT ?
+            """,
+            (int(project_id), name, int(limit)),
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            out.append(
+                {
+                    "entity_id": r[0],
+                    "entity_type": r[1],
+                    "canonical_name": r[2],
+                    "aliases": json.loads(r[3]) if r[3] else [],
+                    "status": r[4],
+                    "confidence": r[5],
+                    "source_kind": r[6],
+                    "created_from_evidence_id": r[7],
+                }
+            )
+        return out
+
+    def find_entities_by_alias(
+        self,
+        *,
+        project_id: int,
+        alias: str,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """
+        按 alias 查询实体（SQLite JSON 字符串的最小实现：LIKE 匹配）。
+        注意：这是 v0 版本，后续可升级为单独 alias 表或 SQLite JSON1 查询。
+        """
+        a = (alias or "").strip()
+        if not a:
+            return []
+        # 朴素 JSON 子串： "alias"
+        needle = f"\"{a}\""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT entity_id, entity_type, canonical_name, aliases_json, status, confidence, source_kind, created_from_evidence_id
+            FROM canonical_entities
+            WHERE project_id = ? AND aliases_json IS NOT NULL AND aliases_json LIKE ?
+            ORDER BY updated_at_ms DESC
+            LIMIT ?
+            """,
+            (int(project_id), f"%{needle}%", int(limit)),
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            out.append(
+                {
+                    "entity_id": r[0],
+                    "entity_type": r[1],
+                    "canonical_name": r[2],
+                    "aliases": json.loads(r[3]) if r[3] else [],
+                    "status": r[4],
+                    "confidence": r[5],
+                    "source_kind": r[6],
+                    "created_from_evidence_id": r[7],
+                }
+            )
+        return out
+
+    def list_evidences_by_ids(
+        self,
+        *,
+        project_id: int,
+        evidence_ids: List[str],
+    ) -> List[Dict[str, Any]]:
+        """批量读取 evidence（用于抽取器输入）。"""
+        ids = [str(x).strip() for x in (evidence_ids or []) if str(x).strip()]
+        if not ids:
+            return []
+        # SQLite IN 参数数量有限，但这里一般不会太大；先做最小实现
+        placeholders = ",".join(["?"] * len(ids))
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""
+            SELECT evidence_id, episode_id, scene_id, span_json, quote, speaker, tags_json, created_at_ms
+            FROM canonical_evidences
+            WHERE project_id = ? AND evidence_id IN ({placeholders})
+            """,
+            (int(project_id), *ids),
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            out.append(
+                {
+                    "evidence_id": r[0],
+                    "episode_id": r[1],
+                    "scene_id": r[2],
+                    "span": json.loads(r[3]) if r[3] else None,
+                    "quote": r[4],
+                    "speaker": r[5],
+                    "tags": json.loads(r[6]) if r[6] else [],
+                    "created_at_ms": r[7],
+                }
+            )
+        # 保持输入顺序（便于 story_order_base 派生）
+        order = {eid: i for i, eid in enumerate(ids)}
+        out.sort(key=lambda x: order.get(str(x.get("evidence_id")), 10**9))
+        return out
+
+    @staticmethod
+    def _summarize_snapshot_fields(fields: Dict[str, Any]) -> str:
+        """
+        将自由 fields（顶层命名空间固定）压缩成短文本，适合做 embedding content。
+        """
+        if not isinstance(fields, dict) or not fields:
+            return ""
+
+        def _kv(obj: Any, limit_items: int = 6) -> str:
+            if isinstance(obj, dict):
+                parts = []
+                for k in list(obj.keys())[:limit_items]:
+                    v = obj.get(k)
+                    if v is None:
+                        continue
+                    s = str(v)
+                    if len(s) > 60:
+                        s = s[:60] + "…"
+                    parts.append(f"{k}={s}")
+                return "；".join(parts)
+            if isinstance(obj, list):
+                parts = []
+                for x in obj[:limit_items]:
+                    if isinstance(x, dict):
+                        # relations/items/injuries 常见结构
+                        to_ = x.get("to") or x.get("target") or x.get("name") or ""
+                        ty = x.get("type") or x.get("kind") or ""
+                        s = ",".join([p for p in [str(ty).strip(), str(to_).strip()] if p])
+                        parts.append(s or str(x)[:80])
+                    else:
+                        parts.append(str(x)[:80])
+                return "；".join([p for p in parts if p])
+            s = str(obj)
+            return s if len(s) <= 120 else s[:120] + "…"
+
+        order = ["visual", "personality", "goals", "relations", "items", "injuries"]
+        chunks: List[str] = []
+        for k in order:
+            if k not in fields:
+                continue
+            txt = _kv(fields.get(k))
+            if txt:
+                chunks.append(f"{k}:{txt}")
+        # fallback：有其它键也带一点
+        if not chunks:
+            for k in list(fields.keys())[:6]:
+                txt = _kv(fields.get(k))
+                if txt:
+                    chunks.append(f"{k}:{txt}")
+        out = " | ".join(chunks).strip()
+        return out if len(out) <= 480 else out[:480] + "…"
+
+    def upsert_snapshot(self, snapshot: CanonicalSnapshotPayload) -> str:
+        """
+        写入/更新 Snapshot（版本切片）。
+        - 写入 canonical_snapshots
+        - 同步写入 CANONICAL MemoryRecord（id = snapshot_id）
+        注意：snapshot_id 视为 version_id（引用键）。
+        """
+        now_ms = int(time.time() * 1000)
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT OR REPLACE INTO canonical_snapshots
+            (snapshot_id, project_id, entity_id,
+             valid_from_story_time_key, valid_to_story_time_key,
+             valid_from_story_order, valid_to_story_order,
+             fields_json, why, evidence_ids_json, status, confidence, source_kind,
+             created_at_ms, updated_at_ms)
+            VALUES (?, ?, ?,
+                    ?, ?,
+                    ?, ?,
+                    ?, ?, ?, ?, ?, ?,
+                    ?, ?)
+            """,
+            (
+                snapshot.snapshot_id,
+                snapshot.project_id,
+                snapshot.entity_id,
+                snapshot.valid_from_story_time_key,
+                snapshot.valid_to_story_time_key,
+                snapshot.valid_from_story_order,
+                snapshot.valid_to_story_order,
+                json.dumps(snapshot.fields or {}, ensure_ascii=False),
+                snapshot.why,
+                json.dumps(snapshot.evidence_ids, ensure_ascii=False) if snapshot.evidence_ids else None,
+                snapshot.status.value,
+                float(snapshot.confidence),
+                snapshot.source_kind.value,
+                now_ms,
+                now_ms,
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        entity_row = self._get_entity_row(project_id=snapshot.project_id, entity_id=snapshot.entity_id)
+        entity_name = (entity_row or {}).get("canonical_name") or snapshot.entity_id
+        summary = self._summarize_snapshot_fields(snapshot.fields or {})
+        vf = snapshot.valid_from_story_order or snapshot.valid_from_story_time_key or ""
+        vt = snapshot.valid_to_story_order or snapshot.valid_to_story_time_key or ""
+        window = f"{vf or '?'}~{vt or 'now'}"
+        readable = f"切片({entity_name})[{window}]: {summary}".strip()
+        mem = MemoryRecord(
+            id=snapshot.snapshot_id,
+            project_id=snapshot.project_id,
+            namespace=MemoryNamespace.CANONICAL,
+            type=MemoryType.SNAPSHOT,
+            entity=entity_name,
+            content=readable,
+            payload_json={
+                "snapshot_id": snapshot.snapshot_id,
+                "entity_id": snapshot.entity_id,
+                "fields": snapshot.fields,
+                "why": snapshot.why,
+                "valid_from_story_order": snapshot.valid_from_story_order,
+                "valid_to_story_order": snapshot.valid_to_story_order,
+                "valid_from_story_time_key": snapshot.valid_from_story_time_key,
+                "valid_to_story_time_key": snapshot.valid_to_story_time_key,
+            },
+            source_ref="canonical_snapshots",
+            status=snapshot.status,
+            confidence=snapshot.confidence,
+            source_kind=snapshot.source_kind,
+            evidence_ids=snapshot.evidence_ids,
+            story_order=snapshot.valid_from_story_order,
+        )
+        self.write(mem, skip_duplicate=False)
+        return snapshot.snapshot_id
 
     @staticmethod
     def _ensure_columns(
@@ -1071,7 +1475,45 @@ class MemoryStore:
             raise ValueError("changeset not found")
 
         payload = cs.get("payload") or {}
-        # 目前最小实现：时间约束与时间块（支持倒叙/插叙/未定区块）
+
+        # materialize：把 confirmed 的“当前 profile”写回旧分层（STATIC_BIBLE/DYNAMIC_PLOT/EPISODIC），
+        # 以兼容现有生成链路（MemoryRetriever 主要从 STATIC_BIBLE 取 L3）。
+        materialize = payload.get("materialize") if isinstance(payload, dict) else None
+        if not isinstance(materialize, dict):
+            # 默认：启用 static_bible 写回（否则 canonical 不会进入生成上下文）
+            materialize = {"write_static_bible": True}
+
+        # 1) Evidence / Entity / Snapshot（结构化真值落库）
+        for ev in payload.get("evidences", []) or []:
+            try:
+                self.upsert_evidence(EvidenceRecordPayload(**(ev or {})))
+            except Exception:
+                continue
+
+        for ent in payload.get("entities", []) or []:
+            try:
+                self.upsert_entity(CanonicalEntityPayload(**(ent or {})))
+            except Exception:
+                continue
+
+        latest_snapshot_by_entity: Dict[str, CanonicalSnapshotPayload] = {}
+        for sn in payload.get("snapshots", []) or []:
+            try:
+                snap = CanonicalSnapshotPayload(**(sn or {}))
+                self.upsert_snapshot(snap)
+                # 用于 materialize：每个 entity 只保留最新 profile（覆盖写）
+                prev = latest_snapshot_by_entity.get(snap.entity_id)
+                if prev is None:
+                    latest_snapshot_by_entity[snap.entity_id] = snap
+                else:
+                    # 选择“更新”的：优先 valid_from_story_order 更大，其次 created_at（此处没有，退化为保持后者）
+                    a = (snap.valid_from_story_order or "") < (prev.valid_from_story_order or "")
+                    if not a:
+                        latest_snapshot_by_entity[snap.entity_id] = snap
+            except Exception:
+                continue
+
+        # 2) 时间约束与时间块（支持倒叙/插叙/未定区块）
         for tc in payload.get("time_constraints", []) or []:
             try:
                 self.upsert_time_constraint(TimeConstraint(**tc))
@@ -1084,6 +1526,47 @@ class MemoryStore:
                 self.upsert_time_block(TimeBlock(**tb))
             except Exception:
                 continue
+
+        # 3) materialize：写回 STATIC_BIBLE（每实体一个 current profile，覆盖写）
+        if bool(materialize.get("write_static_bible")) and latest_snapshot_by_entity:
+            for entity_id, snap in latest_snapshot_by_entity.items():
+                try:
+                    if snap.status != TruthStatus.CONFIRMED:
+                        continue
+                    entity_row = self._get_entity_row(project_id=snap.project_id, entity_id=entity_id) or {}
+                    entity_name = entity_row.get("canonical_name") or entity_id
+                    summary = self._summarize_snapshot_fields(snap.fields or {})
+                    # 覆盖写：每实体一个固定 id，保证激进切片不会把 L3 撑爆
+                    profile_id = f"profile::{entity_id}"
+                    content = f"【{entity_name}】当前设定: {summary}".strip()
+                    rec = MemoryRecord(
+                        id=profile_id,
+                        project_id=snap.project_id,
+                        namespace=MemoryNamespace.STATIC_BIBLE,
+                        type=MemoryType.SNAPSHOT,
+                        entity=entity_name,
+                        content=content,
+                        payload_json={
+                            "entity_id": entity_id,
+                            "entity_name": entity_name,
+                            "current_snapshot_id": snap.snapshot_id,
+                            "fields": snap.fields,
+                            "why": snap.why,
+                            "valid_from_story_order": snap.valid_from_story_order,
+                            "valid_to_story_order": snap.valid_to_story_order,
+                            "valid_from_story_time_key": snap.valid_from_story_time_key,
+                            "valid_to_story_time_key": snap.valid_to_story_time_key,
+                        },
+                        source_ref=f"changeset:{changeset_id}:materialize_static_bible",
+                        status=snap.status,
+                        confidence=snap.confidence,
+                        source_kind=snap.source_kind,
+                        evidence_ids=snap.evidence_ids,
+                        story_order=snap.valid_from_story_order,
+                    )
+                    self.write(rec, skip_duplicate=False)
+                except Exception:
+                    continue
 
         # 更新状态
         now_ms = int(time.time() * 1000)

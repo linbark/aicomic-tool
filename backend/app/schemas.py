@@ -143,7 +143,8 @@ class EventUpdate(BaseModel):
 
 # === 项目 ===
 class ProjectBase(BaseModel):
-    id: int
+    # 对外暴露的项目 ID：UUID（hex 字符串）
+    id: str
     name: str
     description: Optional[str] = None
     class Config: from_attributes = True

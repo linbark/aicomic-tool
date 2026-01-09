@@ -5,10 +5,13 @@
 from __future__ import annotations
 
 import hashlib
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 import numpy as np
-from sentence_transformers import SentenceTransformer
+
+if TYPE_CHECKING:  # pragma: no cover
+    # 仅用于类型提示；运行时延迟导入以加速后端启动（sentence_transformers/torch import 很慢）
+    from sentence_transformers import SentenceTransformer  # type: ignore
 
 
 class EmbeddingProvider:
@@ -33,12 +36,13 @@ class EmbeddingProvider:
         """
         self.model_name = model_name
         self.device = device
-        self._model: Optional[SentenceTransformer] = None
+        self._model: Optional["SentenceTransformer"] = None
         self._cache_folder = cache_folder
 
-    def _get_model(self) -> SentenceTransformer:
-        """懒加载模型"""
+    def _get_model(self) -> "SentenceTransformer":
+        """懒加载模型（并延迟导入 sentence_transformers 以加速服务启动）"""
         if self._model is None:
+            from sentence_transformers import SentenceTransformer  # type: ignore
             self._model = SentenceTransformer(
                 self.model_name,
                 device=self.device,

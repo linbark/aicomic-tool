@@ -1,5 +1,9 @@
 # backend/app/main.py
 import os
+import signal
+import sys
+import faulthandler
+import uuid
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,6 +12,30 @@ from .database import engine, Base
 from sqlalchemy import text
 
 Base.metadata.create_all(bind=engine)
+
+def ensure_projects_uuid_column():
+    """
+    轻量 SQLite 迁移（无 Alembic）：
+    - 若 projects 表缺少 uuid 列，则补齐
+    - 为历史项目回填 uuid（hex 字符串）
+    """
+    try:
+        with engine.begin() as conn:
+            cols = conn.execute(text("PRAGMA table_info(projects)")).fetchall()
+            col_names = {row[1] for row in cols}  # (cid, name, type, notnull, dflt_value, pk)
+            if "uuid" not in col_names:
+                conn.execute(text("ALTER TABLE projects ADD COLUMN uuid TEXT"))
+            # 为 uuid 建索引/唯一约束（SQLite 通过唯一索引实现）
+            conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ux_projects_uuid ON projects (uuid)"))
+            # 回填历史数据
+            rows = conn.execute(text("SELECT id FROM projects WHERE uuid IS NULL OR uuid = ''")).fetchall()
+            for (pid,) in rows:
+                conn.execute(
+                    text("UPDATE projects SET uuid = :u WHERE id = :id"),
+                    {"u": uuid.uuid4().hex, "id": int(pid)},
+                )
+    except Exception as e:
+        print(f"[Migration][Warning] ensure_projects_uuid_column failed: {e}")
 
 def ensure_characters_category_column():
     """
@@ -97,8 +125,44 @@ CREATE TABLE IF NOT EXISTS ai_action_runs (
 ensure_characters_category_column()
 ensure_episode_scene_description_columns()
 ensure_ai_action_runs_table()
+ensure_projects_uuid_column()
 
 app = FastAPI(title="AI Comic Studio")
+
+# ==========================
+# Debug: Ctrl-C dump stacks
+# ==========================
+try:
+    faulthandler.enable(all_threads=True)
+except Exception:
+    pass
+
+_old_sigint = None
+try:
+    _old_sigint = signal.getsignal(signal.SIGINT)
+except Exception:
+    _old_sigint = None
+
+def _sigint_dump_stacks(signum, frame):  # type: ignore
+    try:
+        print("\n[Debug] SIGINT received, dumping all thread stacks...\n", file=sys.stderr, flush=True)
+        faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
+    except Exception as e:
+        try:
+            print(f"[Debug] dump_traceback failed: {e}", file=sys.stderr, flush=True)
+        except Exception:
+            pass
+    # chain to old handler if exists; otherwise let default KeyboardInterrupt happen
+    try:
+        if callable(_old_sigint):
+            _old_sigint(signum, frame)  # type: ignore
+    except Exception:
+        pass
+
+try:
+    signal.signal(signal.SIGINT, _sigint_dump_stacks)
+except Exception:
+    pass
 
 app.add_middleware(
     CORSMiddleware,

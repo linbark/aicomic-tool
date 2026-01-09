@@ -1,7 +1,7 @@
 import json
 from typing import Optional, Any, Dict, List, Literal
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Depends
 from pydantic import BaseModel, Field
 
 from ..services.app_paths import ai_settings_path
@@ -11,10 +11,12 @@ from ..services.context_store import ContextStore, new_run_id
 from ..services.prompt_composer import PromptModules, compose_system_prompt_xml
 from ..services import prompt_registry
 from ..workflows.schemas import BeatSheetItem, QcReport, SeriesBible, ShotSpec, PromptPair
-from ..database import get_db
+from ..database import get_db, SessionLocal
 from .. import models
 from sqlalchemy.orm import Session
+from ..services.project_lookup import resolve_project, resolve_project_pk
 import time
+import asyncio
 
 
 router = APIRouter(
@@ -81,6 +83,24 @@ def _mask_settings(raw: Dict[str, Any]) -> "AiSettingsRead":
         temperature=float(raw.get("temperature") or 0.2),
         max_tokens=int(raw.get("max_tokens") or 8192),
         timeout_seconds=float(raw.get("timeout_seconds") or 120.0),
+    )
+
+
+def _get_llm_settings() -> LlmChatSettings:
+    """
+    兼容旧代码：返回可直接喂给 `_chat_client.chat()` 的 LlmChatSettings。
+    """
+    raw = _read_settings_raw()
+    masked = _mask_settings(raw)
+    if not masked.has_api_key:
+        raise HTTPException(status_code=400, detail="AI API Key 未配置")
+    return LlmChatSettings(
+        base_url=str(masked.base_url),
+        api_key=str(raw.get("api_key") or ""),
+        model=str(masked.model),
+        temperature=float(masked.temperature),
+        max_tokens=int(masked.max_tokens),
+        timeout_seconds=float(masked.timeout_seconds),
     )
 
 _chat_client = DeepSeekChatClient()
@@ -736,7 +756,7 @@ class ContextWriteRequest(BaseModel):
 
 
 class ContextReadResponse(BaseModel):
-    project_id: int
+    project_id: str
     kind: Literal["series_bible", "visual_dna"]
     version: str
     exists: bool
@@ -744,7 +764,7 @@ class ContextReadResponse(BaseModel):
 
 
 class ContextWriteResponse(BaseModel):
-    project_id: int
+    project_id: str
     kind: Literal["series_bible", "visual_dna"]
     version: str
     path: str
@@ -752,10 +772,11 @@ class ContextWriteResponse(BaseModel):
 
 
 @router.get("/context/series-bible", response_model=ContextReadResponse)
-def get_series_bible(project_id: int, version: str = "v1"):
-    data = _context_store.get_series_bible(project_id=project_id, version=version)
+def get_series_bible(project_id: str, version: str = "v1", db: Session = Depends(get_db)):
+    pid = resolve_project_pk(db, project_id)
+    data = _context_store.get_series_bible(project_id=pid, version=version)
     return ContextReadResponse(
-        project_id=project_id,
+        project_id=str(project_id),
         kind="series_bible",
         version=version,
         exists=bool(data),
@@ -764,7 +785,7 @@ def get_series_bible(project_id: int, version: str = "v1"):
 
 
 @router.put("/context/series-bible", response_model=ContextWriteResponse)
-def put_series_bible(project_id: int, payload: ContextWriteRequest):
+def put_series_bible(project_id: str, payload: ContextWriteRequest, db: Session = Depends(get_db)):
     # 校验 version 格式（允许 v1, v2, ...）
     import re
     if not re.match(r'^v\d+$', payload.version):
@@ -772,9 +793,10 @@ def put_series_bible(project_id: int, payload: ContextWriteRequest):
     # 校验 data 必须是 dict
     if not isinstance(payload.data, dict):
         raise HTTPException(status_code=400, detail="data 必须是 JSON object")
-    meta = _context_store.put_series_bible(project_id=project_id, data=payload.data, version=payload.version)
+    pid = resolve_project_pk(db, project_id)
+    meta = _context_store.put_series_bible(project_id=pid, data=payload.data, version=payload.version)
     return ContextWriteResponse(
-        project_id=project_id,
+        project_id=str(project_id),
         kind="series_bible",
         version=meta.version,
         path=meta.path,
@@ -783,10 +805,11 @@ def put_series_bible(project_id: int, payload: ContextWriteRequest):
 
 
 @router.get("/context/visual-dna", response_model=ContextReadResponse)
-def get_visual_dna(project_id: int, item_id: int, version: str = "v1"):
-    data = _context_store.get_visual_dna(project_id=project_id, item_id=item_id, version=version)
+def get_visual_dna(project_id: str, item_id: int, version: str = "v1", db: Session = Depends(get_db)):
+    pid = resolve_project_pk(db, project_id)
+    data = _context_store.get_visual_dna(project_id=pid, item_id=item_id, version=version)
     return ContextReadResponse(
-        project_id=project_id,
+        project_id=str(project_id),
         kind="visual_dna",
         version=version,
         exists=bool(data),
@@ -795,7 +818,7 @@ def get_visual_dna(project_id: int, item_id: int, version: str = "v1"):
 
 
 @router.put("/context/visual-dna", response_model=ContextWriteResponse)
-def put_visual_dna(project_id: int, item_id: int, payload: ContextWriteRequest):
+def put_visual_dna(project_id: str, item_id: int, payload: ContextWriteRequest, db: Session = Depends(get_db)):
     # 校验 version 格式（允许 v1, v2, ...）
     import re
     if not re.match(r'^v\d+$', payload.version):
@@ -803,9 +826,10 @@ def put_visual_dna(project_id: int, item_id: int, payload: ContextWriteRequest):
     # 校验 data 必须是 dict
     if not isinstance(payload.data, dict):
         raise HTTPException(status_code=400, detail="data 必须是 JSON object")
-    meta = _context_store.put_visual_dna(project_id=project_id, item_id=item_id, data=payload.data, version=payload.version)
+    pid = resolve_project_pk(db, project_id)
+    meta = _context_store.put_visual_dna(project_id=pid, item_id=item_id, data=payload.data, version=payload.version)
     return ContextWriteResponse(
-        project_id=project_id,
+        project_id=str(project_id),
         kind="visual_dna",
         version=meta.version,
         path=meta.path,
@@ -818,7 +842,7 @@ def put_visual_dna(project_id: int, item_id: int, payload: ContextWriteRequest):
 # ==========================
 
 class ProjectOutlineReadResponse(BaseModel):
-    project_id: int
+    project_id: str
     version: str
     exists: bool
     data: Optional[Dict[str, Any]] = None
@@ -830,18 +854,19 @@ class ProjectOutlineWriteRequest(BaseModel):
 
 
 class ProjectOutlineWriteResponse(BaseModel):
-    project_id: int
+    project_id: str
     version: str
     path: str
     updated_at_ms: int
 
 
 @router.get("/context/project-outline", response_model=ProjectOutlineReadResponse)
-def get_project_outline(project_id: int, version: str = "v1"):
+def get_project_outline(project_id: str, version: str = "v1", db: Session = Depends(get_db)):
     """获取项目级大纲"""
-    data = _context_store.get_project_outline(project_id=project_id, version=version)
+    pid = resolve_project_pk(db, project_id)
+    data = _context_store.get_project_outline(project_id=pid, version=version)
     return ProjectOutlineReadResponse(
-        project_id=project_id,
+        project_id=str(project_id),
         version=version,
         exists=bool(data),
         data=data,
@@ -849,16 +874,17 @@ def get_project_outline(project_id: int, version: str = "v1"):
 
 
 @router.put("/context/project-outline", response_model=ProjectOutlineWriteResponse)
-def put_project_outline(project_id: int, payload: ProjectOutlineWriteRequest):
+def put_project_outline(project_id: str, payload: ProjectOutlineWriteRequest, db: Session = Depends(get_db)):
     """保存项目级大纲"""
     import re
     if not re.match(r'^v\d+$', payload.version):
         raise HTTPException(status_code=400, detail=f"version 格式无效，应为 v1, v2, ... 格式，当前: {payload.version}")
     if not isinstance(payload.data, dict):
         raise HTTPException(status_code=400, detail="data 必须是 JSON object")
-    meta = _context_store.put_project_outline(project_id=project_id, data=payload.data, version=payload.version)
+    pid = resolve_project_pk(db, project_id)
+    meta = _context_store.put_project_outline(project_id=pid, data=payload.data, version=payload.version)
     return ProjectOutlineWriteResponse(
-        project_id=project_id,
+        project_id=str(project_id),
         version=meta.version,
         path=meta.path,
         updated_at_ms=meta.updated_at_ms,
@@ -866,7 +892,7 @@ def put_project_outline(project_id: int, payload: ProjectOutlineWriteRequest):
 
 
 class ProjectOutlineGenerateRequest(BaseModel):
-    project_id: int
+    project_id: str
     input_text: str  # 故事灵感/概要
     num_episodes: int = 12  # 预计集数
 
@@ -876,7 +902,7 @@ class ProjectOutlineGenerateResponse(BaseModel):
 
 
 @router.post("/project-outline-generate", response_model=ProjectOutlineGenerateResponse)
-async def project_outline_generate(req: ProjectOutlineGenerateRequest):
+async def project_outline_generate(req: ProjectOutlineGenerateRequest, db: Session = Depends(get_db)):
     """
     生成项目级大纲（整体故事概要 + 分集大纲）
     """
@@ -931,13 +957,14 @@ async def project_outline_generate(req: ProjectOutlineGenerateRequest):
         raise HTTPException(status_code=502, detail=f"AI 返回无法解析为 JSON: {content[:500]}")
 
     # 保存到 context
-    _context_store.put_project_outline(project_id=req.project_id, data=parsed, version="v1")
+    pid = resolve_project_pk(db, req.project_id)
+    _context_store.put_project_outline(project_id=pid, data=parsed, version="v1")
 
     return ProjectOutlineGenerateResponse(project_outline=parsed)
 
 
 class ProjectOutlineOptimizeRequest(BaseModel):
-    project_id: int
+    project_id: str
     current_outline: str  # 当前大纲 JSON 字符串
     optimization_instructions: str = ""  # 可选的优化指令
 
@@ -948,7 +975,7 @@ class ProjectOutlineOptimizeResponse(BaseModel):
 
 
 @router.post("/project-outline-optimize", response_model=ProjectOutlineOptimizeResponse)
-async def project_outline_optimize(req: ProjectOutlineOptimizeRequest):
+async def project_outline_optimize(req: ProjectOutlineOptimizeRequest, db: Session = Depends(get_db)):
     """
     优化项目级大纲
     """
@@ -997,7 +1024,8 @@ async def project_outline_optimize(req: ProjectOutlineOptimizeRequest):
     changes_summary = parsed.get("changes_summary", "优化完成")
 
     # 保存到 context
-    _context_store.put_project_outline(project_id=req.project_id, data=project_outline, version="v1")
+    pid = resolve_project_pk(db, req.project_id)
+    _context_store.put_project_outline(project_id=pid, data=project_outline, version="v1")
 
     return ProjectOutlineOptimizeResponse(
         project_outline=project_outline,
@@ -1010,7 +1038,7 @@ async def project_outline_optimize(req: ProjectOutlineOptimizeRequest):
 # ==========================
 
 class ChatActRequest(BaseModel):
-    project_id: int
+    project_id: str
     episode_id: Optional[int] = None
     # 当前 UI Tab（用于偏置意图识别）
     current_action_key: Optional[str] = None  # outline_generate/outline_optimize/generate_script/script_optimize/...
@@ -1030,6 +1058,10 @@ class ChatPlan(BaseModel):
     intent_summary: str
     steps: List[ChatPlanStep]
     final_action_key: str
+    # 可选：意图不明时让 planner 直接要求澄清
+    needs_clarification: Optional[bool] = None
+    clarifying_question: Optional[str] = None
+    clarifying_options: Optional[List[str]] = None
 
 
 class ChatStepTrace(BaseModel):
@@ -1049,6 +1081,8 @@ class ChatMemoryTraceItem(BaseModel):
 class ChatActResponse(BaseModel):
     assistant_message: str
     created_run: Optional[Dict[str, Any]] = None
+    # 非 debug：也可返回轻量卡片（用于前端 inline 审阅/确认）
+    cards: Optional[List[Dict[str, Any]]] = None
     # debug only
     plan: Optional[Dict[str, Any]] = None
     steps_trace: Optional[List[Dict[str, Any]]] = None
@@ -1066,14 +1100,26 @@ def _trim_preview(text: str, limit: int = 300) -> str:
     return t[:limit] + ("..." if len(t) > limit else "")
 
 
-@router.post("/chat/act", response_model=ChatActResponse)
-async def chat_act(req: ChatActRequest, db: Session = Depends(get_db)):
+class ChatActAsyncResponse(BaseModel):
+    run_id: str
+    status: str = "queued"  # queued|running|done|error
+
+
+async def _chat_act_core(
+    *,
+    req: "ChatActRequest",
+    db: Session,
+    emit_stages: bool = False,
+    run_id: Optional[str] = None,
+) -> "ChatActResponse":
     """
-    对话驱动编排：
-    1) 通过 LLM 生成 JSON 计划（steps）
-    2) 顺序执行 steps（复用现有原子能力：大纲/剧本生成与优化）
-    3) 仅将最终结果写入 AiActionRun（source=chat），并返回 debug trace（可选）
+    chat_act 核心逻辑：
+    - emit_stages=True 时，把 plan/step start/end/final 写入 runs-files stages，供前端轮询展示“执行步骤”
     """
+    project_id_pk = resolve_project_pk(db, req.project_id)
+    if emit_stages and run_id:
+        _context_store.snapshot_stage(project_id=project_id_pk, run_id=run_id, stage_name="chat.status", data={"status": "running", "at_ms": _now_ms()})
+
     raw = _read_settings_raw()
     settings = _mask_settings(raw)
     if not settings.has_api_key:
@@ -1082,6 +1128,40 @@ async def chat_act(req: ChatActRequest, db: Session = Depends(get_db)):
     message = (req.message or "").strip()
     if not message:
         raise HTTPException(status_code=400, detail="message 不能为空")
+
+    # -------- Intent clarification (rule-first) --------
+    def _looks_ambiguous(msg: str) -> bool:
+        m = (msg or "").strip()
+        if len(m) <= 6:
+            return True
+        verbs = ["生成", "提取", "优化", "改", "润色", "分镜", "拆", "入库", "保存", "整理", "总结", "加快", "减少"]
+        if not any(v in m for v in verbs):
+            return True
+        return False
+
+    if _looks_ambiguous(message):
+        resp = ChatActResponse(
+            assistant_message="我需要你明确一下目标：你希望我对本集做什么？（可多选）",
+            cards=[
+                {
+                    "type": "clarify_intent",
+                    "title": "请选择你的意图",
+                    "options": [
+                        {"label": "提取大纲/节拍表", "value": "outline"},
+                        {"label": "生成/续写剧本", "value": "script"},
+                        {"label": "优化节奏（减少对白/加快推进）", "value": "pace"},
+                        {"label": "拆分分镜（把某段场景拆成镜头）", "value": "storyboard"},
+                        {"label": "把设定/角色变化入库并提交我确认", "value": "memory_review"},
+                    ],
+                    "hint": "你也可以直接说：例如“先提取大纲，再按节奏要求优化，然后生成剧本，最后提交入库变更给我确认”。",
+                }
+            ],
+        )
+        if emit_stages and run_id:
+            _context_store.snapshot_stage(project_id=project_id_pk, run_id=run_id, stage_name="chat.final", data=resp.model_dump())
+            _context_store.snapshot_stage(project_id=project_id_pk, run_id=run_id, stage_name="chat.status", data={"status": "done", "at_ms": _now_ms()})
+            _context_store.snapshot_run(project_id=project_id_pk, run_id=run_id, request=req.model_dump(), response=resp.model_dump(), meta={"workflow": "chat_act"})
+        return resp
 
     # -------- Memory (for planner / debug) --------
     memory_trace: List[Dict[str, Any]] = []
@@ -1092,22 +1172,20 @@ async def chat_act(req: ChatActRequest, db: Session = Depends(get_db)):
             from ..services.memory_indexer import MemoryIndexer
 
             indexer = MemoryIndexer()
-            indexer.index_series_bible(project_id=req.project_id, version="v1")
+            indexer.index_series_bible(project_id=project_id_pk, version="v1")
             retriever = get_memory_retriever()
             retrieval_results = retriever.retrieve_for_task(
-                project_id=req.project_id,
+                project_id=project_id_pk,
                 task_description=f"用户意图: {message[:200]}",
             )
             memory_context_text = _build_memory_context(retrieval_results)
             if req.debug:
-                # 仅 debug 回传格式化文本（避免常规返回过长）
                 for k in ["L2_static", "L1", "L2_dynamic", "negative_constraints"]:
                     try:
                         memory_trace.append({"key": k, "text": (retriever.format_for_prompt(retrieval_results) or {}).get(k)})
                     except Exception:
                         memory_trace.append({"key": k, "text": None})
         except Exception as e:
-            # 不阻断主流程
             print(f"[AI][chat_act] Memory retrieval failed: {e}")
 
     # -------- Planner Prompt --------
@@ -1118,12 +1196,21 @@ async def chat_act(req: ChatActRequest, db: Session = Depends(get_db)):
 
     planner_system = f"""你是一个“写作编排器（planner）”，负责把用户的自然语言意图拆解为可执行的动作序列。
 
-你必须输出严格的 JSON（不要输出其它文字），结构如下：
+你必须输出严格的 JSON（不要输出其它文字）。
+
+当用户意图不明确/信息不足时：你应该输出“澄清请求”，不要输出 steps：
+{{
+  "needs_clarification": true,
+  "clarifying_question": "一句话追问（中文）",
+  "clarifying_options": ["选项1","选项2","选项3"]
+}}
+
+当你能规划执行时：输出“执行计划”，结构如下：
 {{
   "intent_summary": "一句话总结用户想要什么（中文）",
   "steps": [
     {{
-      "action_key": "outline_generate|outline_optimize|generate_script|script_optimize",
+      "action_key": "outline_generate|outline_optimize|generate_script|script_optimize|workflow_script|workflow_storyboard|memory_extract_changeset",
       "input_text": "可选；如留空，由系统根据上下文填充",
       "why": "可选；这一步的目的"
     }}
@@ -1136,6 +1223,9 @@ async def chat_act(req: ChatActRequest, db: Session = Depends(get_db)):
 - outline_optimize：在已有大纲基础上按意图优化大纲（JSON）
 - generate_script：从大纲/材料生成剧本（文本）
 - script_optimize：在已有剧本基础上按意图优化剧本（文本）
+- workflow_script：运行“workflow script”（series_bible + beat_sheet + script_fountain + qc_report）
+- workflow_storyboard：运行“workflow storyboard”（把场景文本拆成镜头列表）
+- memory_extract_changeset：从当前产物/文本中抽取 changeset.v0 并创建 ChangeSet（后端返回审阅卡片）
 
 硬约束：
 1) 仅允许使用上述 action_key
@@ -1157,12 +1247,9 @@ async def chat_act(req: ChatActRequest, db: Session = Depends(get_db)):
 当前工作台输入（预览，可能为空）：
 {selected_input_preview or "(empty)"}
 """
-
     if memory_context_text:
         planner_user += f"\n\n记忆上下文（必须遵守，可能为空）：\n{memory_context_text}"
 
-    # -------- Call planner LLM --------
-    planner_started = _now_ms()
     planner_raw = await _chat_client.chat(
         settings=LlmChatSettings(
             base_url=settings.base_url,
@@ -1177,33 +1264,86 @@ async def chat_act(req: ChatActRequest, db: Session = Depends(get_db)):
             {"role": "user", "content": planner_user},
         ],
     )
-    _ = planner_started  # reserved for future timing
-
     plan_parsed = extract_json_any(planner_raw or "")
     if not isinstance(plan_parsed, dict):
         raise HTTPException(status_code=502, detail=f"Planner 输出无法解析为 JSON: {(planner_raw or '')[:500]}")
 
-    # 轻量校验与修正
+    if bool(plan_parsed.get("needs_clarification")):
+        q = str(plan_parsed.get("clarifying_question") or "").strip() or "我需要你补充一下目标/范围：你希望我具体做什么？"
+        opts = plan_parsed.get("clarifying_options")
+        options = []
+        if isinstance(opts, list):
+            options = [{"label": str(x), "value": str(x)} for x in opts[:8] if str(x).strip()]
+        resp = ChatActResponse(
+            assistant_message=q,
+            cards=[
+                {
+                    "type": "clarify_intent",
+                    "title": "需要澄清",
+                    "options": options or None,
+                    "hint": "你也可以直接用一句话说明：例如“先提取大纲，再优化节奏，然后生成剧本，最后提交入库变更给我确认”。",
+                }
+            ],
+            plan=plan_parsed if req.debug else None,
+            planner_prompt=(planner_system + "\n\n---\n\n" + planner_user) if req.debug else None,
+            memory_trace=memory_trace if req.debug else None,
+            planner_raw=(planner_raw or "") if req.debug else None,
+        )
+        if emit_stages and run_id:
+            _context_store.snapshot_stage(project_id=project_id_pk, run_id=run_id, stage_name="chat.plan", data={"plan": plan_parsed})
+            _context_store.snapshot_stage(project_id=project_id_pk, run_id=run_id, stage_name="chat.final", data=resp.model_dump())
+            _context_store.snapshot_stage(project_id=project_id_pk, run_id=run_id, stage_name="chat.status", data={"status": "done", "at_ms": _now_ms()})
+            _context_store.snapshot_run(project_id=project_id_pk, run_id=run_id, request=req.model_dump(), response=resp.model_dump(), meta={"workflow": "chat_act"})
+        return resp
+
     steps = plan_parsed.get("steps") or []
     if not isinstance(steps, list) or len(steps) == 0:
         raise HTTPException(status_code=502, detail=f"Planner steps 为空: {plan_parsed}")
     if len(steps) > 4:
         steps = steps[:4]
-    allowed = {"outline_generate", "outline_optimize", "generate_script", "script_optimize"}
+    allowed = {
+        "outline_generate",
+        "outline_optimize",
+        "generate_script",
+        "script_optimize",
+        "workflow_script",
+        "workflow_storyboard",
+        "memory_extract_changeset",
+    }
     for s in steps:
         if not isinstance(s, dict) or s.get("action_key") not in allowed:
             raise HTTPException(status_code=502, detail=f"Planner steps 包含非法 action_key: {s}")
     final_action_key = steps[-1].get("action_key")
     plan_parsed["final_action_key"] = final_action_key
 
-    # -------- Execute steps --------
+    if emit_stages and run_id:
+        _context_store.snapshot_stage(
+            project_id=project_id_pk,
+            run_id=run_id,
+            stage_name="chat.plan",
+            data={"plan": {"intent_summary": plan_parsed.get("intent_summary"), "steps": steps, "final_action_key": final_action_key}},
+        )
+
     artifacts: Dict[str, Any] = {}
     steps_trace: List[Dict[str, Any]] = []
+    cards: List[Dict[str, Any]] = []
+
+    def _step_timeout_seconds(action_key: str) -> float:
+        base = float(getattr(settings, "timeout_seconds", 60.0) or 60.0)
+        base = max(base, 60.0)
+        ak = str(action_key or "")
+        if ak in ("workflow_script",):
+            return max(base * 4.0, 240.0)
+        if ak in ("workflow_storyboard", "memory_extract_changeset"):
+            return max(base * 2.0, 180.0)
+        # 普通单步（大纲/剧本）给一点 buffer，避免网络抖动造成“永远等不到”
+        return max(base + 30.0, 90.0)
+
     for idx, s in enumerate(steps):
         ak = str(s.get("action_key"))
         in_text = (s.get("input_text") or "").strip()
+        why = (s.get("why") or "").strip()
 
-        # 自动填充 input_text（基于已有产物/上下文）
         if not in_text:
             if ak in ("outline_optimize",) and isinstance(artifacts.get("outline"), str) and artifacts.get("outline").strip():
                 in_text = artifacts["outline"]
@@ -1212,33 +1352,198 @@ async def chat_act(req: ChatActRequest, db: Session = Depends(get_db)):
             elif ak in ("generate_script",) and isinstance(artifacts.get("outline"), str) and artifacts.get("outline").strip():
                 in_text = artifacts["outline"]
             else:
-                # fallback：优先用工作台输入，其次 master script，其次用户 message
                 in_text = selected_input_preview or master_script_preview or message
 
-        # 对 optimize 类动作，把用户意图附加进去（避免“只润色不按意图”）
         if ak in ("outline_optimize", "script_optimize"):
             in_text = f"{in_text}\n\n[用户意图]\n{message}"
 
+        if emit_stages and run_id:
+            _context_store.snapshot_stage(
+                project_id=project_id_pk,
+                run_id=run_id,
+                stage_name=f"chat.step.{idx}.start",
+                data={"step_index": idx, "action_key": ak, "why": why or None, "input_preview": _trim_preview(in_text, 400), "at_ms": _now_ms()},
+            )
+            # 额外写入当前 step 指针（用于前端兜底显示进度）
+            _context_store.snapshot_stage(
+                project_id=project_id_pk,
+                run_id=run_id,
+                stage_name="chat.status",
+                data={"status": "running", "at_ms": _now_ms(), "current_step_index": idx, "current_action_key": ak},
+            )
+
         t0 = _now_ms()
         out_text = ""
-        if ak == "outline_generate":
-            resp = await outline_generate(OutlineGenerateRequest(text=in_text, project_id=req.project_id))
-            out_text = (resp.text or "").strip()
-            artifacts["outline"] = out_text
-        elif ak == "outline_optimize":
-            resp = await outline_optimize(OutlineOptimizeRequest(text=in_text, project_id=req.project_id))
-            out_text = (resp.text or "").strip()
-            artifacts["outline"] = out_text
-        elif ak == "generate_script":
-            resp = await generate_script(ScriptGenerateRequest(text=in_text, project_id=req.project_id))
-            out_text = (resp.text or "").strip()
-            artifacts["script"] = out_text
-        elif ak == "script_optimize":
-            resp = await script_optimize(ScriptOptimizeRequest(text=in_text, project_id=req.project_id))
-            out_text = (resp.text or "").strip()
-            artifacts["script"] = out_text
-        else:
+
+        async def _do_step() -> str:
+            nonlocal out_text
+            if ak == "outline_generate":
+                resp = await outline_generate(OutlineGenerateRequest(text=in_text, project_id=project_id_pk))
+                out_text = (resp.text or "").strip()
+                artifacts["outline"] = out_text
+                return out_text
+            if ak == "outline_optimize":
+                resp = await outline_optimize(OutlineOptimizeRequest(text=in_text, project_id=project_id_pk))
+                out_text = (resp.text or "").strip()
+                artifacts["outline"] = out_text
+                return out_text
+            if ak == "generate_script":
+                resp = await generate_script(ScriptGenerateRequest(text=in_text, project_id=project_id_pk))
+                out_text = (resp.text or "").strip()
+                artifacts["script"] = out_text
+                return out_text
+            if ak == "script_optimize":
+                resp = await script_optimize(ScriptOptimizeRequest(text=in_text, project_id=project_id_pk))
+                out_text = (resp.text or "").strip()
+                artifacts["script"] = out_text
+                return out_text
+            if ak == "workflow_script":
+                wf_resp = await workflow_script(
+                    WorkflowScriptRequest(
+                        project_id=req.project_id,
+                        input_text=in_text,
+                        options=WorkflowScriptOptions(),
+                    )
+                )
+                artifacts["series_bible"] = wf_resp.series_bible
+                artifacts["beat_sheet"] = wf_resp.beat_sheet
+                artifacts["script_fountain"] = wf_resp.script_fountain
+                artifacts["qc_report"] = wf_resp.qc_report
+                out_text = (wf_resp.script_fountain or "").strip()
+                return out_text
+            if ak == "workflow_storyboard":
+                wf_resp = await workflow_storyboard(
+                    WorkflowStoryboardRequest(
+                        project_id=req.project_id,
+                        scene_text=in_text,
+                        options=WorkflowStoryboardOptions(),
+                    )
+                )
+                artifacts["shots"] = wf_resp.shots
+                out_text = json.dumps(wf_resp.shots, ensure_ascii=False, indent=2)
+                return out_text
+            if ak == "memory_extract_changeset":
+                from ..services.evidence_ingestor import chunk_text_to_evidences
+                from ..services.changeset_extractor import extract_changeset_v0_with_llm_with_trace
+                from ..services.entity_resolver import resolve_changeset_entities_with_trace
+                from ..services.memory_store import get_memory_store
+
+                store = get_memory_store()
+                base_text = ""
+                if artifacts.get("script_fountain"):
+                    base_text += f"### script_fountain\n{artifacts.get('script_fountain')}\n\n"
+                if artifacts.get("beat_sheet"):
+                    try:
+                        base_text += "### beat_sheet\n" + json.dumps(artifacts.get("beat_sheet"), ensure_ascii=False, indent=2) + "\n\n"
+                    except Exception:
+                        pass
+                if artifacts.get("series_bible"):
+                    try:
+                        base_text += "### series_bible\n" + json.dumps(artifacts.get("series_bible"), ensure_ascii=False, indent=2) + "\n\n"
+                    except Exception:
+                        pass
+                if not base_text:
+                    base_text = master_script_preview or message
+
+                evidences = chunk_text_to_evidences(
+                    project_id=project_id_pk,
+                    episode_id=int(req.episode_id) if req.episode_id else None,
+                    text=base_text,
+                    max_quote_chars=600,
+                    tags=["chat_act"],
+                )
+                evidence_ids: List[str] = []
+                for ev in evidences:
+                    try:
+                        evidence_ids.append(store.upsert_evidence(ev))
+                    except Exception:
+                        continue
+
+                payload, extractor_trace = await extract_changeset_v0_with_llm_with_trace(
+                    llm_settings=LlmChatSettings(
+                        base_url=settings.base_url,
+                        api_key=raw.get("api_key") or "",
+                        model=settings.model,
+                        temperature=min(float(settings.temperature or 0.2), 0.3),
+                        max_tokens=max(int(settings.max_tokens or 0), 4096),
+                        timeout_seconds=settings.timeout_seconds,
+                    ),
+                    project_id=project_id_pk,
+                    episode_id=int(req.episode_id) if req.episode_id else None,
+                    story_order_base=f"CH{str(req.episode_id or 1).zfill(2)}",
+                    evidences=[e.model_dump() for e in evidences],
+                )
+                payload, resolver_trace = resolve_changeset_entities_with_trace(store=store, project_id=project_id_pk, payload=payload)
+                changeset_id = store.create_changeset(project_id=project_id_pk, payload=payload, episode_id=int(req.episode_id) if req.episode_id else None)
+                try:
+                    store.append_changeset_review_entry(changeset_id=changeset_id, entry={"at_ms": _now_ms(), "action": "extractor_trace", "data": extractor_trace})
+                except Exception:
+                    pass
+                try:
+                    store.append_changeset_review_entry(changeset_id=changeset_id, entry={"at_ms": _now_ms(), "action": "resolver_trace", "data": resolver_trace})
+                except Exception:
+                    pass
+
+                def _count_by_type(items: Any) -> Dict[str, int]:
+                    out: Dict[str, int] = {}
+                    if not isinstance(items, list):
+                        return out
+                    for it in items:
+                        if not isinstance(it, dict):
+                            continue
+                        t = str(it.get("entity_type") or it.get("type") or "unknown")
+                        out[t] = out.get(t, 0) + 1
+                    return out
+
+                ent_counts = _count_by_type(payload.get("entities") or [])
+                conflicts_n = len(payload.get("conflicts") or []) if isinstance(payload.get("conflicts"), list) else 0
+                summary_lines = [
+                    f"- 实体：{sum(ent_counts.values())}（" + ", ".join([f"{k}:{v}" for k, v in ent_counts.items()]) + "）" if ent_counts else "- 实体：0",
+                    f"- 角色切片 snapshots：{len(payload.get('snapshots') or [])}",
+                    f"- 事件 events：{len(payload.get('events') or [])}",
+                    f"- 状态变更 state_changes：{len(payload.get('state_changes') or [])}",
+                    f"- 冲突 conflicts：{conflicts_n}",
+                ]
+                cards.append(
+                    {
+                        "type": "review_changeset",
+                        "changeset_id": changeset_id,
+                        "title": "需要确认：更新设定/事件（ChangeSet）",
+                        "summary": "\n".join(summary_lines),
+                        "actions": [
+                            {"action": "approve_changeset", "label": "确认提交", "changeset_id": changeset_id},
+                            {"action": "reject_changeset", "label": "驳回", "changeset_id": changeset_id},
+                        ],
+                    }
+                )
+                out_text = f"已生成待审阅变更单：{changeset_id}（evidence={len(evidence_ids)}）"
+                return out_text
             raise HTTPException(status_code=400, detail=f"Unsupported action_key: {ak}")
+
+        try:
+            out_text = await asyncio.wait_for(_do_step(), timeout=_step_timeout_seconds(ak))
+        except Exception as e:
+            if emit_stages and run_id:
+                err_text = f"{type(e).__name__}: {e}"
+                _context_store.snapshot_stage(
+                    project_id=project_id_pk,
+                    run_id=run_id,
+                    stage_name=f"chat.step.{idx}.error",
+                    data={"step_index": idx, "action_key": ak, "error": err_text, "at_ms": _now_ms()},
+                )
+                _context_store.snapshot_stage(
+                    project_id=project_id_pk,
+                    run_id=run_id,
+                    stage_name="chat.error",
+                    data={"error": err_text, "step_index": idx, "action_key": ak, "at_ms": _now_ms()},
+                )
+                _context_store.snapshot_stage(
+                    project_id=project_id_pk,
+                    run_id=run_id,
+                    stage_name="chat.status",
+                    data={"status": "error", "at_ms": _now_ms(), "current_step_index": idx, "current_action_key": ak},
+                )
+            raise
 
         dt = _now_ms() - t0
         steps_trace.append(
@@ -1251,18 +1556,33 @@ async def chat_act(req: ChatActRequest, db: Session = Depends(get_db)):
             }
         )
 
-    # -------- Persist final result (only) --------
-    created_run = None
-    # 前端已移除 outline_optimize 栏目；若最终结果为 outline_optimize，落盘到 outline_generate 以便用户可见
-    persist_action_key = final_action_key
-    if persist_action_key == "outline_optimize":
-        persist_action_key = "outline_generate"
+        if emit_stages and run_id:
+            _context_store.snapshot_stage(
+                project_id=project_id_pk,
+                run_id=run_id,
+                stage_name=f"chat.step.{idx}.end",
+                data={"step_index": idx, "action_key": ak, "ms": int(dt), "output_preview": _trim_preview(out_text, 800), "at_ms": _now_ms()},
+            )
 
-    if req.episode_id and final_action_key in allowed:
-        final_output = str(artifacts.get("script") if final_action_key in ("generate_script", "script_optimize") else artifacts.get("outline") or "")
-        # input_text 记录：用用户 message（更符合“对话驱动”的审计）
+    created_run = None
+    persistable = {"outline_generate", "generate_script", "script_optimize", "workflow_script", "workflow_storyboard"}
+    if req.episode_id and final_action_key in persistable:
+        if final_action_key in ("generate_script", "script_optimize"):
+            final_output = str(artifacts.get("script") or "")
+        elif final_action_key == "workflow_script":
+            final_output = str(artifacts.get("script_fountain") or "")
+        elif final_action_key == "workflow_storyboard":
+            try:
+                final_output = json.dumps(artifacts.get("shots") or [], ensure_ascii=False, indent=2)
+            except Exception:
+                final_output = str(artifacts.get("shots") or "")
+        else:
+            final_output = str(artifacts.get("outline") or "")
+        persist_action_key = final_action_key
+        if persist_action_key == "outline_optimize":
+            persist_action_key = "outline_generate"
         db_obj = models.AiActionRun(
-            project_id=int(req.project_id),
+            project_id=project_id_pk,
             target_type="episode",
             target_id=int(req.episode_id),
             action_key=str(persist_action_key),
@@ -1281,16 +1601,75 @@ async def chat_act(req: ChatActRequest, db: Session = Depends(get_db)):
         created_run = {"id": db_obj.id, "action_key": db_obj.action_key, "created_at": str(db_obj.created_at)}
 
     assistant_msg = f"已完成：{plan_parsed.get('intent_summary') or '执行完成'}（最终动作：{final_action_key}）"
-
-    return ChatActResponse(
+    resp = ChatActResponse(
         assistant_message=assistant_msg,
         created_run=created_run,
+        cards=cards or None,
         plan=plan_parsed if req.debug else None,
         steps_trace=steps_trace if req.debug else None,
         planner_prompt=(planner_system + "\n\n---\n\n" + planner_user) if req.debug else None,
         memory_trace=memory_trace if req.debug else None,
         planner_raw=(planner_raw or "") if req.debug else None,
     )
+
+    if emit_stages and run_id:
+        _context_store.snapshot_stage(project_id=project_id_pk, run_id=run_id, stage_name="chat.final", data=resp.model_dump())
+        _context_store.snapshot_stage(project_id=project_id_pk, run_id=run_id, stage_name="chat.status", data={"status": "done", "at_ms": _now_ms()})
+        _context_store.snapshot_run(project_id=project_id_pk, run_id=run_id, request=req.model_dump(), response=resp.model_dump(), meta={"workflow": "chat_act"})
+    return resp
+
+@router.post("/chat/act", response_model=ChatActResponse)
+async def chat_act(req: ChatActRequest, db: Session = Depends(get_db)):
+    """
+    对话驱动编排：
+    1) 通过 LLM 生成 JSON 计划（steps）
+    2) 顺序执行 steps（复用现有原子能力：大纲/剧本生成与优化）
+    3) 仅将最终结果写入 AiActionRun（source=chat），并返回 debug trace（可选）
+    """
+    return await _chat_act_core(req=req, db=db, emit_stages=False, run_id=None)
+
+
+@router.post("/chat/act_async", response_model=ChatActAsyncResponse)
+def chat_act_async(req: ChatActRequest, bg: BackgroundTasks):
+    """
+    异步版：返回 run_id；执行过程写入 runs-files stages，供前端轮询展示执行步骤。
+    """
+    run_id = new_run_id()
+    _db = SessionLocal()
+    try:
+        project_id_pk = resolve_project_pk(_db, req.project_id)
+    finally:
+        try:
+            _db.close()
+        except Exception:
+            pass
+    _context_store.snapshot_stage(project_id=project_id_pk, run_id=run_id, stage_name="chat.status", data={"status": "queued", "at_ms": _now_ms()})
+    payload = req.model_dump()
+
+    def _runner():
+        db = SessionLocal()
+        try:
+            import anyio
+
+            async def _go():
+                try:
+                    await _chat_act_core(req=ChatActRequest(**payload), db=db, emit_stages=True, run_id=run_id)
+                except Exception as e:
+                    _context_store.snapshot_stage(project_id=project_id_pk, run_id=run_id, stage_name="chat.error", data={"error": str(e), "at_ms": _now_ms()})
+                    _context_store.snapshot_stage(project_id=project_id_pk, run_id=run_id, stage_name="chat.status", data={"status": "error", "at_ms": _now_ms()})
+
+            anyio.run(_go)
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+    # IMPORTANT: 不使用 BackgroundTasks（其执行在同一 worker 线程，可能阻塞事件循环，导致轮询接口也卡死）。
+    # 这里用 daemon thread 真正后台执行，确保 /ai/runs-files 等轻量查询不会被长耗时 LLM 调用阻塞。
+    import threading
+    threading.Thread(target=_runner, daemon=True).start()
+    return ChatActAsyncResponse(run_id=run_id, status="queued")
 
 
 # ==========================
@@ -1304,7 +1683,7 @@ class WorkflowScriptOptions(BaseModel):
 
 
 class WorkflowScriptRequest(BaseModel):
-    project_id: int
+    project_id: str
     input_text: str
     options: WorkflowScriptOptions = Field(default_factory=WorkflowScriptOptions)
 
@@ -1319,7 +1698,7 @@ class WorkflowScriptResponse(BaseModel):
 
 
 @router.post("/workflows/script", response_model=WorkflowScriptResponse)
-async def workflow_script(req: WorkflowScriptRequest):
+async def workflow_script(req: WorkflowScriptRequest, db: Session = Depends(get_db)):
     raw = _read_settings_raw()
     settings = _mask_settings(raw)
     if not settings.has_api_key:
@@ -1330,7 +1709,7 @@ async def workflow_script(req: WorkflowScriptRequest):
         raise HTTPException(status_code=400, detail="input_text 不能为空")
 
     run_id = new_run_id()
-    project_id = int(req.project_id)
+    project_id = resolve_project_pk(db, req.project_id)
     # workflow 输出通常更长，给一个最低 max_tokens，避免中途截断
     effective_max_tokens = max(int(settings.max_tokens or 0), 4096)
 
@@ -1705,7 +2084,7 @@ class WorkflowStoryboardOptions(BaseModel):
 
 
 class WorkflowStoryboardRequest(BaseModel):
-    project_id: int
+    project_id: str
     scene_text: str
     options: WorkflowStoryboardOptions = Field(default_factory=WorkflowStoryboardOptions)
 
@@ -1716,7 +2095,7 @@ class WorkflowStoryboardResponse(BaseModel):
 
 
 @router.post("/workflows/storyboard", response_model=WorkflowStoryboardResponse)
-async def workflow_storyboard(req: WorkflowStoryboardRequest):
+async def workflow_storyboard(req: WorkflowStoryboardRequest, db: Session = Depends(get_db)):
     raw = _read_settings_raw()
     settings = _mask_settings(raw)
     if not settings.has_api_key:
@@ -1727,7 +2106,7 @@ async def workflow_storyboard(req: WorkflowStoryboardRequest):
         raise HTTPException(status_code=400, detail="scene_text 不能为空")
 
     run_id = new_run_id()
-    project_id = int(req.project_id)
+    project_id = resolve_project_pk(db, req.project_id)
     series_bible = _context_store.get_series_bible(project_id=project_id, version="v1") or {}
 
     visual_dna_list: List[Dict[str, Any]] = []
@@ -2070,7 +2449,7 @@ async def workflow_storyboard(req: WorkflowStoryboardRequest):
 # ==========================
 
 class ApplyScriptWorkflowRequest(BaseModel):
-    project_id: int
+    project_id: str
     episode_id: int
     run_id: str
     overwrite_scenes: bool = False
@@ -2083,7 +2462,7 @@ def apply_workflow_script(payload: ApplyScriptWorkflowRequest, db: Session = Dep
     - Episode.description = script_fountain
     - 可选：derived.scenes -> Episode.scenes（按 sequence_number 重建）
     """
-    project_id = int(payload.project_id)
+    project_id = resolve_project_pk(db, payload.project_id)
     ep_id = int(payload.episode_id)
     run_id = (payload.run_id or "").strip()
     if not run_id:
@@ -2127,7 +2506,7 @@ def apply_workflow_script(payload: ApplyScriptWorkflowRequest, db: Session = Dep
 
 
 class ApplyStoryboardWorkflowRequest(BaseModel):
-    project_id: int
+    project_id: str
     scene_id: int
     run_id: str
     overwrite_shots: bool = True
@@ -2139,7 +2518,7 @@ def apply_workflow_storyboard(payload: ApplyStoryboardWorkflowRequest, db: Sessi
     从 run 快照中读取 workflow_storyboard 的 shots，并写回 DB：
     - Scene.shots: action_text/dialogue/prompt/negative_prompt/title/sequence_number
     """
-    project_id = int(payload.project_id)
+    project_id = resolve_project_pk(db, payload.project_id)
     scene_id = int(payload.scene_id)
     run_id = (payload.run_id or "").strip()
     if not run_id:
@@ -2203,43 +2582,47 @@ def apply_workflow_storyboard(payload: ApplyStoryboardWorkflowRequest, db: Sessi
 # ==========================
 
 @router.get("/runs-files")
-def list_runs_files(project_id: int):
+def list_runs_files(project_id: str, db: Session = Depends(get_db)):
     """
     列出项目的所有 run 快照（仅返回 meta 信息）。
     """
-    runs = _context_store.list_runs(project_id=project_id)
-    return {"project_id": project_id, "runs": runs}
+    pid = resolve_project_pk(db, project_id)
+    runs = _context_store.list_runs(project_id=pid)
+    return {"project_id": str(project_id), "runs": runs}
 
 
 @router.get("/runs-files/{run_id}")
-def get_run_file(project_id: int, run_id: str):
+def get_run_file(project_id: str, run_id: str, db: Session = Depends(get_db)):
     """
     读取指定 run 的完整信息（request + response + meta）。
     """
-    run_data = _context_store.read_run(project_id=project_id, run_id=run_id)
+    pid = resolve_project_pk(db, project_id)
+    run_data = _context_store.read_run(project_id=pid, run_id=run_id)
     if not run_data:
         raise HTTPException(status_code=404, detail="Run not found")
-    return {"project_id": project_id, "run_id": run_id, **run_data}
+    return {"project_id": str(project_id), "run_id": run_id, **run_data}
 
 
 @router.get("/runs-files/{run_id}/stages")
-def list_run_stages(project_id: int, run_id: str):
+def list_run_stages(project_id: str, run_id: str, db: Session = Depends(get_db)):
     """
     列出该 run 的所有 stage 名称。
     """
-    stages = _context_store.list_stages(project_id=project_id, run_id=run_id)
-    return {"project_id": project_id, "run_id": run_id, "stages": stages}
+    pid = resolve_project_pk(db, project_id)
+    stages = _context_store.list_stages(project_id=pid, run_id=run_id)
+    return {"project_id": str(project_id), "run_id": run_id, "stages": stages}
 
 
 @router.get("/runs-files/{run_id}/stages/{stage_name}")
-def get_run_stage(project_id: int, run_id: str, stage_name: str):
+def get_run_stage(project_id: str, run_id: str, stage_name: str, db: Session = Depends(get_db)):
     """
     读取指定 stage 的内容。
     """
-    stage_data = _context_store.read_stage(project_id=project_id, run_id=run_id, stage_name=stage_name)
+    pid = resolve_project_pk(db, project_id)
+    stage_data = _context_store.read_stage(project_id=pid, run_id=run_id, stage_name=stage_name)
     if stage_data is None:
         raise HTTPException(status_code=404, detail="Stage not found")
-    return {"project_id": project_id, "run_id": run_id, "stage_name": stage_name, "data": stage_data}
+    return {"project_id": str(project_id), "run_id": run_id, "stage_name": stage_name, "data": stage_data}
 
 
 # ==========================
@@ -2247,7 +2630,7 @@ def get_run_stage(project_id: int, run_id: str, stage_name: str):
 # ==========================
 
 class VisualDnaIngestRequest(BaseModel):
-    project_id: int
+    project_id: str
     item_id: int
     asset_file_path: str
     version: str = "v1"
@@ -2260,7 +2643,7 @@ class VisualDnaIngestResponse(BaseModel):
 
 
 @router.post("/visual-dna/ingest", response_model=VisualDnaIngestResponse)
-async def ingest_visual_dna(req: VisualDnaIngestRequest):
+async def ingest_visual_dna(req: VisualDnaIngestRequest, db: Session = Depends(get_db)):
     """
     从图片文件路径摄取 Visual DNA JSON。
     注意：当前 LLM 接口为纯 chat，不支持 vision。此 API 先读取文件元数据/路径信息，
@@ -2271,7 +2654,7 @@ async def ingest_visual_dna(req: VisualDnaIngestRequest):
     if not settings.has_api_key:
         raise HTTPException(status_code=400, detail="AI API Key 未配置")
 
-    project_id = int(req.project_id)
+    project_id = resolve_project_pk(db, req.project_id)
     item_id = int(req.item_id)
     file_path = (req.asset_file_path or "").strip()
     if not file_path:

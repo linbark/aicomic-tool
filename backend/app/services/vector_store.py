@@ -257,14 +257,15 @@ class VectorStore:
 
             filter_condition = models.Filter(must=must_conditions) if must_conditions else None
 
-            # 执行搜索
-            search_results = self.client.search(
+            # 执行搜索（使用 query_points，兼容 qdrant_client 1.7+）
+            query_response = self.client.query_points(
                 collection_name=self.collection_name,
-                query_vector=query_vector,
+                query=query_vector,
                 query_filter=filter_condition,
                 limit=query.top_k,
                 score_threshold=query.min_score,
             )
+            search_results = query_response.points
         else:
             # Fallback：在进程内点集做最小可用检索
             qv = np.array(query_vector, dtype=np.float32)
