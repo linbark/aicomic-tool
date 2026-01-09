@@ -707,3 +707,5 @@
 {"location": "projects.py:54", "message": "create_project success", "data": {"id": 2, "name": "DebugProj"}, "timestamp": 1767623792137, "sessionId": "debug-session", "runId": "run1", "hypothesisId": "D"}
 {"location": "projects.py:48", "message": "create_project called", "data": {"name": "\u86ca\u771f\u4eba", "description": null}, "timestamp": 1767879107019, "sessionId": "debug-session", "runId": "run1", "hypothesisId": "D"}
 {"location": "projects.py:54", "message": "create_project success", "data": {"id": 2, "name": "\u86ca\u771f\u4eba"}, "timestamp": 1767879107035, "sessionId": "debug-session", "runId": "run1", "hypothesisId": "D"}
+{"location": "projects.py:48", "message": "create_project called", "data": {"name": "tmp_proj", "description": "x"}, "timestamp": 1767963073572, "sessionId": "debug-session", "runId": "run1", "hypothesisId": "D"}
+{"location": "projects.py:54", "message": "create_project success", "data": {"id": 3, "name": "tmp_proj"}, "timestamp": 1767963073574, "sessionId": "debug-session", "runId": "run1", "hypothesisId": "D"}

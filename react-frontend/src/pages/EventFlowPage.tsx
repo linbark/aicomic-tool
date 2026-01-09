@@ -122,7 +122,7 @@ export function EventFlowPage() {
             <Link to="/events" style={{ color: 'rgba(229,231,235,0.65)', textDecoration: 'none' }}>
               ← Back
             </Link>
-            <select value={projectId ?? ''} onChange={(e) => setProjectId(e.target.value ? Number(e.target.value) : null)} style={styles.select}>
+            <select value={projectId ?? ''} onChange={(e) => setProjectId(e.target.value || null)} style={styles.select}>
               <option value="" disabled>
                 选择项目…
               </option>

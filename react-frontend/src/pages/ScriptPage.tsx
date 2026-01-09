@@ -13,7 +13,16 @@ type ChatRole = 'user' | 'assistant'
 type ChatMsg = { id: string; role: ChatRole; content: string; ts: number; cards?: any[]; debug?: any }
 
 type StepUi = { index: number; action_key: string; why?: string | null; status: 'pending' | 'running' | 'done'; ms?: number; output_preview?: string }
-type ChatRunUi = { runId: string; status: 'queued' | 'running' | 'done' | 'error'; steps: StepUi[]; error?: string | null }
+type ChatRunUi = {
+  runId: string
+  status: 'queued' | 'running' | 'done' | 'error'
+  steps: StepUi[]
+  error?: string | null
+  startedAtMs?: number
+  lastAtMs?: number
+  currentStepIndex?: number | null
+  currentActionKey?: string | null
+}
 
 function _now() {
   return Date.now()
@@ -69,6 +78,8 @@ export function ScriptPage() {
   const [chatDebug, setChatDebug] = useState(false)
   const [cardBusy, setCardBusy] = useState<Record<string, boolean>>({})
   const [chatRun, setChatRun] = useState<ChatRunUi | null>(null)
+  const [chatPollPaused, setChatPollPaused] = useState(false)
+  const [uiNowMs, setUiNowMs] = useState(() => Date.now())
 
   const episodeDirtyForIdRef = useRef<number | null>(null)
   const sceneDirtyForIdRef = useRef<number | null>(null)
@@ -167,6 +178,7 @@ export function ScriptPage() {
   useEffect(() => {
     if (!projectId) return
     if (!chatRun?.runId) return
+    if (chatPollPaused) return
     let alive = true
     const pid = projectId
     const runId = chatRun.runId
@@ -185,12 +197,19 @@ export function ScriptPage() {
           const st = await api.getRunStage(pid, runId, 'chat.status')
           const sd = (st.data as any)?.data || {}
           const s = sd?.status
+          const atMs = typeof sd?.at_ms === 'number' ? Number(sd.at_ms) : null
           const curIdx = typeof sd?.current_step_index === 'number' ? Number(sd.current_step_index) : null
           const curAk = sd?.current_action_key ? String(sd.current_action_key) : null
           if (s && alive) {
             setChatRun((prev) => {
               if (!prev) return prev
-              const next: any = { ...prev, status: s }
+              const next: any = {
+                ...prev,
+                status: s,
+                currentStepIndex: curIdx,
+                currentActionKey: curAk,
+                lastAtMs: atMs != null ? atMs : prev.lastAtMs,
+              }
               // 兜底：用 current_step_index 标记 running（即使 start stage 没被前端识别到）
               if (curIdx != null && prev.steps.length) {
                 const steps = prev.steps.slice()
@@ -311,17 +330,38 @@ export function ScriptPage() {
           }
         }
     } catch (e: any) {
-        // ignore transient polling errors
+        // 轮询失败时记录错误，连续3次失败则提示用户
+        console.warn('[poll tick error]', e?.message || e)
       }
     }
 
-    const timer = window.setInterval(() => tick().catch(() => {}), 800)
+    let consecutiveErrors = 0
+    const timer = window.setInterval(() => {
+      tick()
+        .then(() => { consecutiveErrors = 0 })
+        .catch((e) => {
+          consecutiveErrors++
+          console.warn('[poll tick error]', consecutiveErrors, e?.message || e)
+          if (consecutiveErrors >= 3) {
+            setChatRun((prev) => prev ? { ...prev, error: `轮询失败 (${e?.message || '网络错误'})，后端可能已重启。请刷新页面重试。` } : prev)
+          }
+        })
+    }, 800)
     tick().catch(() => {})
     return () => {
       alive = false
       window.clearInterval(timer)
     }
-  }, [projectId, chatRun?.runId])
+  }, [projectId, chatRun?.runId, chatPollPaused])
+
+  // Heartbeat re-render (elapsed timers) even if polling stalls
+  useEffect(() => {
+    if (!chatRun?.runId) return
+    if (chatRun.status !== 'running' && chatRun.status !== 'queued') return
+    if (chatPollPaused) return
+    const timer = window.setInterval(() => setUiNowMs(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [chatRun?.runId, chatRun?.status, chatPollPaused])
 
   async function saveEpisode() {
     if (!projectId || selected.kind !== 'episode') return
@@ -400,9 +440,9 @@ export function ScriptPage() {
     setError(null)
     try {
       const res = await api.createProject({ name, description: desc || null })
-      const pid = Number((res.data as any)?.id)
+      const pid = String((res.data as any)?.id || '').trim()
       await refreshProjects()
-      if (Number.isFinite(pid)) setProjectId(pid)
+      if (pid) setProjectId(pid)
       setShowCreateProject(false)
       setCreateProjectName('')
       setCreateProjectDesc('')
@@ -420,8 +460,8 @@ export function ScriptPage() {
     setError(null)
     try {
       await api.deleteProject(projectId)
-      // 重新加载项目列表 & 清空选择
-      setProjectId(null)
+      // 重新加载项目列表（useProjectSelection 会自动选择第一个或置空）
+      await refreshProjects()
     } catch (e: any) {
       setError(e?.response?.data?.detail || e?.message || '删除项目失败')
     } finally {
@@ -487,6 +527,7 @@ export function ScriptPage() {
     setChatError(null)
     setChatBusy(true)
     setChatRun(null)
+    setChatPollPaused(false)
     try {
       const res = await api.aiChatActAsync({
         project_id: projectId,
@@ -506,7 +547,7 @@ export function ScriptPage() {
       const data = res.data as any
       const runId = String(data?.run_id || '')
       if (runId) {
-        setChatRun({ runId, status: 'queued', steps: [] })
+        setChatRun({ runId, status: 'queued', steps: [], startedAtMs: _now(), lastAtMs: _now(), currentStepIndex: null, currentActionKey: null })
         setChatMsgs((prev) => [...prev, { id: `${_now()}-a`, role: 'assistant', content: `已开始执行（run=${runId}）…`, ts: _now() }])
       } else {
         setChatBusy(false)
@@ -611,7 +652,7 @@ export function ScriptPage() {
       <div style={styles.topbar}>
         <div style={{ fontWeight: 700 }}>剧本</div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <select value={projectId ?? ''} onChange={(e) => setProjectId(e.target.value ? Number(e.target.value) : null)} style={styles.select}>
+          <select value={projectId ?? ''} onChange={(e) => setProjectId(e.target.value || null)} style={styles.select}>
             <option value="" disabled>
               选择项目…
             </option>
@@ -761,6 +802,93 @@ export function ScriptPage() {
                       状态：{chatRun.status} {chatRun.runId ? `（${chatRun.runId}）` : ''}
                                       </div>
                                     </div>
+                  <div style={{ marginTop: 6, display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center' }}>
+                    <div style={{ fontSize: 11, opacity: 0.7 }}>
+                      当前：{chatRun.currentActionKey || (chatRun.currentStepIndex != null ? `step_${chatRun.currentStepIndex + 1}` : '—')}
+                      {typeof chatRun.startedAtMs === 'number' ? `｜已运行 ${(Math.max(0, uiNowMs - chatRun.startedAtMs) / 1000).toFixed(0)}s` : ''}
+                      {typeof chatRun.lastAtMs === 'number' ? `｜最近更新 ${(Math.max(0, uiNowMs - chatRun.lastAtMs) / 1000).toFixed(0)}s 前` : ''}
+                    </div>
+                    <div style={{ display: 'flex', gap: 8 }}>
+                      {chatRun.status === 'running' || chatRun.status === 'queued' ? (
+                        <button
+                          style={styles.btn}
+                          onClick={() => {
+                            setChatPollPaused(true)
+                            setChatBusy(false)
+                            setChatMsgs((prev) => [
+                              ...prev,
+                              { id: `${_now()}-a`, role: 'assistant', content: '已暂停轮询（后端仍在执行）。你可以稍后点击“继续轮询”。', ts: _now() },
+                            ])
+                          }}
+                        >
+                          暂停轮询
+                        </button>
+                      ) : null}
+                      {chatPollPaused ? (
+                        <button
+                          style={styles.btnPrimary}
+                          onClick={() => {
+                            setChatPollPaused(false)
+                            setChatBusy(true)
+                          }}
+                        >
+                          继续轮询
+                        </button>
+                      ) : null}
+                    </div>
+                  </div>
+                  {(() => {
+                    const last = typeof chatRun.lastAtMs === 'number' ? chatRun.lastAtMs : null
+                    if (!last) return null
+                    const idleMs = uiNowMs - last
+                    if (idleMs < 120_000) return null
+                    const msg =
+                      idleMs >= 300_000
+                        ? '超过 5 分钟无进展更新，可能卡住或网络较慢。后端可能仍在执行，你可以继续等待，或暂停轮询后稍后再继续。'
+                        : '超过 2 分钟无进展更新（可能在长耗时步骤中）。如需，可暂停轮询后稍后再继续。'
+                    return (
+                      <div style={{ marginTop: 8, fontSize: 12, color: idleMs >= 300_000 ? '#fca5a5' : '#fbbf24' }}>
+                        {msg}
+                        <button
+                          style={{ ...styles.btn, marginLeft: 8, fontSize: 11, padding: '2px 8px' }}
+                          onClick={async () => {
+                            // 强制重新读取 run 状态
+                            if (!projectId || !chatRun?.runId) return
+                            try {
+                              const stagesRes = await api.listRunStages(projectId, chatRun.runId)
+                              const stages = (stagesRes.data as any)?.stages || []
+                              const stageSet = new Set(Array.isArray(stages) ? stages.map((s: any) => String(s)) : [])
+                              if (stageSet.has('chat.status')) {
+                                const st = await api.getRunStage(projectId, chatRun.runId, 'chat.status')
+                                const sd = (st.data as any)?.data || {}
+                                const s = sd?.status
+                                if (s === 'done') {
+                                  setChatMsgs((prev) => [...prev, { id: `${_now()}-a`, role: 'assistant', content: '检测到任务已完成，正在读取结果...', ts: _now() }])
+                                  if (stageSet.has('chat.final')) {
+                                    const fin = await api.getRunStage(projectId, chatRun.runId, 'chat.final')
+                                    const d = (fin.data as any)?.data || {}
+                                    const assistantText = String(d?.assistant_message || '完成')
+                                    const cards = Array.isArray(d?.cards) ? d.cards : undefined
+                                    setChatMsgs((prev) => [...prev, { id: `${_now()}-a`, role: 'assistant', content: assistantText, ts: _now(), cards }])
+                                  }
+                                  setChatRun((prev) => prev ? { ...prev, status: 'done', steps: prev.steps.map((x) => ({ ...x, status: 'done' })) } : prev)
+                                  setChatBusy(false)
+                                } else {
+                                  setChatMsgs((prev) => [...prev, { id: `${_now()}-a`, role: 'assistant', content: `当前状态：${s}，继续等待...`, ts: _now() }])
+                                }
+                              } else {
+                                setChatMsgs((prev) => [...prev, { id: `${_now()}-a`, role: 'assistant', content: '暂无 status 文件，可能后端还未写入', ts: _now() }])
+                              }
+                            } catch (e: any) {
+                              setChatMsgs((prev) => [...prev, { id: `${_now()}-a`, role: 'assistant', content: `刷新失败：${e?.message || '网络错误'}`, ts: _now() }])
+                            }
+                          }}
+                        >
+                          强制刷新状态
+                        </button>
+                      </div>
+                    )
+                  })()}
                   {chatRun.error ? <div style={{ marginTop: 6, color: '#f87171', fontSize: 12 }}>{chatRun.error}</div> : null}
                   {chatRun.steps.length ? (
                     <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 6 }}>

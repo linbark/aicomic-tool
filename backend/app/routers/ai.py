@@ -1,3 +1,73 @@
+"""
+AI 路由聚合入口（/ai）。
+
+说明：
+- 该文件仅负责聚合各功能子模块的 APIRouter，避免单文件过大。
+- 具体实现拆分在同目录下的 `ai_*.py`。
+"""
+
+from fastapi import APIRouter
+
+from . import (
+    ai_basic,
+    ai_chat,
+    ai_context,
+    ai_prompts,
+    ai_runs_files,
+    ai_visual_dna,
+    ai_workflows,
+    ai_writing,
+)
+
+router = APIRouter(prefix="/ai", tags=["AI (DeepSeek)"])
+
+# 基础能力与设置
+router.include_router(ai_basic.router)
+router.include_router(ai_prompts.router)
+
+# 写作与编排
+router.include_router(ai_writing.router)
+router.include_router(ai_chat.router)
+router.include_router(ai_workflows.router)
+
+# 上下文与产物
+router.include_router(ai_context.router)
+router.include_router(ai_runs_files.router)
+router.include_router(ai_visual_dna.router)
+
+"""
+AI 路由聚合入口（/ai）。
+
+说明：
+- 该文件仅负责聚合各功能子模块的 APIRouter，避免单文件过大。
+- 具体实现拆分在同目录下的 `ai_*.py`。
+"""
+
+from fastapi import APIRouter
+
+from . import (
+    ai_basic,
+    ai_chat,
+    ai_context,
+    ai_prompts,
+    ai_runs_files,
+    ai_visual_dna,
+    ai_workflows,
+    ai_writing,
+)
+
+
+router = APIRouter(prefix="/ai", tags=["AI (DeepSeek)"])
+
+router.include_router(ai_basic.router)
+router.include_router(ai_prompts.router)
+router.include_router(ai_writing.router)
+router.include_router(ai_context.router)
+router.include_router(ai_chat.router)
+router.include_router(ai_workflows.router)
+router.include_router(ai_runs_files.router)
+router.include_router(ai_visual_dna.router)
+
 import json
 from typing import Optional, Any, Dict, List, Literal
 

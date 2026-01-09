@@ -144,7 +144,7 @@ export function AssetLibraryPage() {
           <div style={{ fontSize: 12, opacity: 0.7 }}>Project Assets Library</div>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <select value={projectId ?? ''} onChange={(e) => setProjectId(e.target.value ? Number(e.target.value) : null)} style={styles.select}>
+          <select value={projectId ?? ''} onChange={(e) => setProjectId(e.target.value || null)} style={styles.select}>
             <option value="" disabled>
               选择项目…
             </option>

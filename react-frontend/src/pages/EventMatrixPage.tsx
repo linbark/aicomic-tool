@@ -371,7 +371,7 @@ export function EventMatrixPage() {
       <div style={styles.topbar}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
           <div style={styles.badge}>事件纵览 (Overview)</div>
-          <select value={projectId ?? ''} onChange={(e) => setProjectId(e.target.value ? Number(e.target.value) : null)} style={styles.select}>
+          <select value={projectId ?? ''} onChange={(e) => setProjectId(e.target.value || null)} style={styles.select}>
             <option value="" disabled>
               选择项目…
             </option>
