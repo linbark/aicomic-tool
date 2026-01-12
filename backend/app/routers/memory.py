@@ -16,8 +16,23 @@ from ..services.app_paths import ai_settings_path
 from ..services.project_lookup import resolve_project_pk
 from ..workflows.memory_schemas import TimeBlock, TimeConstraint
 
+import logging
+import os
+log_dir = os.path.join(os.path.dirname(__file__), "..", "logs")
+os.makedirs(log_dir, exist_ok=True)
+log_file = os.path.join(log_dir, "memory.log")
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+handler = logging.FileHandler(log_file)
+handler.setLevel(logging.DEBUG)
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+handler.setFormatter(formatter)
+logger.addHandler(handler)
+
 
 router = APIRouter(prefix="/memory", tags=["Memory (记忆工程)"])
+
 
 
 class UpsertTimeConstraintRequest(BaseModel):
@@ -77,6 +92,7 @@ def upsert_time_block(payload: UpsertTimeBlockRequest):
         bid = store.upsert_time_block(payload.block)
         return UpsertTimeBlockResponse(id=bid)
     except Exception as e:
+        logger.error(f"[Memory] Upsert Time Block Error: {e}")
         raise HTTPException(status_code=500, detail=f"upsert_time_block failed: {e}")
 
 
@@ -93,6 +109,7 @@ def list_time_blocks(
         items = store.list_time_blocks(project_id=pid, status=status, limit=limit)
         return ListTimeBlocksResponse(items=items)
     except Exception as e:
+        logger.error(f"[Memory] List Time Blocks Error: {e}")
         raise HTTPException(status_code=500, detail=f"list_time_blocks failed: {e}")
 
 
@@ -123,6 +140,7 @@ def create_changeset(req: CreateChangeSetRequest, db: Session = Depends(get_db))
         )
         return CreateChangeSetResponse(changeset_id=cid)
     except Exception as e:
+        logger.error(f"[Memory] Create Change Set Error: {e}")
         raise HTTPException(status_code=500, detail=f"create_changeset failed: {e}")
 
 
@@ -143,6 +161,7 @@ def list_changesets(
         items = store.list_changesets(project_id=pid, review_status=review_status, limit=limit)
         return ListChangeSetsResponse(items=items)
     except Exception as e:
+        logger.error(f"[Memory] List Change Sets Error: {e}")
         raise HTTPException(status_code=500, detail=f"list_changesets failed: {e}")
 
 
@@ -171,8 +190,10 @@ def approve_changeset(changeset_id: str, req: ApplyChangeSetRequest):
         store.apply_changeset(changeset_id=changeset_id, reviewer=req.reviewer, note=req.note)
         return {"message": "approved"}
     except ValueError:
+        logger.error(f"[Memory] Change Set Not Found: {changeset_id}")
         raise HTTPException(status_code=404, detail="ChangeSet not found")
     except Exception as e:
+        logger.error(f"[Memory] Approve Change Set Error: {e}")
         raise HTTPException(status_code=500, detail=f"approve_changeset failed: {e}")
 
 
@@ -183,6 +204,7 @@ def reject_changeset(changeset_id: str, req: ApplyChangeSetRequest):
         store.reject_changeset(changeset_id=changeset_id, reviewer=req.reviewer, note=req.note)
         return {"message": "rejected"}
     except Exception as e:
+        logger.error(f"[Memory] Reject Change Set Error: {e}")
         raise HTTPException(status_code=500, detail=f"reject_changeset failed: {e}")
 
 
@@ -216,6 +238,7 @@ def create_conflict(req: CreateConflictRequest, db: Session = Depends(get_db)):
         )
         return CreateConflictResponse(conflict_id=conflict_id)
     except Exception as e:
+        logger.error(f"[Memory] Create Conflict Error: {e}")
         raise HTTPException(status_code=500, detail=f"create_conflict failed: {e}")
 
 
@@ -236,6 +259,7 @@ def list_conflicts(
         items = store.list_conflicts(project_id=pid, status=status, limit=limit)
         return ListConflictsResponse(items=items)
     except Exception as e:
+        logger.error(f"[Memory] List Conflicts Error: {e}")
         raise HTTPException(status_code=500, detail=f"list_conflicts failed: {e}")
 
 
@@ -257,6 +281,7 @@ def resolve_conflict(conflict_id: str, req: ResolveConflictRequest):
         )
         return {"message": "resolved"}
     except Exception as e:
+        logger.error(f"[Memory] Resolve Conflict Error: {e}")
         raise HTTPException(status_code=500, detail=f"resolve_conflict failed: {e}")
 
 
@@ -297,6 +322,7 @@ def ingest_evidence(req: EvidenceIngestRequest, db: Session = Depends(get_db)):
             ids.append(store.upsert_evidence(ev))
         return EvidenceIngestResponse(evidence_ids=ids, count=len(ids))
     except Exception as e:
+        logger.error(f"[Memory] Ingest Evidence Error: {e}")
         raise HTTPException(status_code=500, detail=f"ingest_evidence failed: {e}")
 
 
@@ -347,6 +373,7 @@ def create_changeset_from_payload(req: CreateChangeSetFromPayloadRequest, db: Se
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(f"[Memory] Create Change Set From Payload Error: {e}")
         raise HTTPException(status_code=500, detail=f"create_changeset_from_payload failed: {e}")
 
 
@@ -444,11 +471,13 @@ async def extract_changeset(req: ExtractChangeSetRequest, db: Session = Depends(
         evidence_ids = [str(x).strip() for x in (req.evidence_ids or []) if str(x).strip()]
 
     if not evidence_ids:
+        logger.error(f"[Memory] No evidence found for project_id: {project_id}, evidence_ids: {evidence_ids}")
         raise HTTPException(status_code=400, detail="必须提供 text 或 evidence_ids")
 
     # 2) 读取 evidence 内容
     evidence_rows = store.list_evidences_by_ids(project_id=project_id, evidence_ids=evidence_ids)
     if not evidence_rows:
+        logger.error(f"[Memory] No evidence found for project_id: {project_id}, evidence_ids: {evidence_ids}")
         raise HTTPException(status_code=404, detail="未找到任何 evidence（请确认 evidence_ids 属于该 project_id）")
 
     # 3) story_order_base
@@ -471,6 +500,7 @@ async def extract_changeset(req: ExtractChangeSetRequest, db: Session = Depends(
     try:
         payload, resolver_trace = resolve_changeset_entities_with_trace(store=store, project_id=project_id, payload=payload)
     except Exception:
+        logger.error(f"[Memory] Resolve Change Set Entities Error: {e}")
         resolver_trace = {"resolver_version": "entity_resolver.unknown", "error": "resolver_failed"}
 
     # 5) 可选：写入 changeset（待审阅）

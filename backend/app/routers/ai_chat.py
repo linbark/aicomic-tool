@@ -391,32 +391,11 @@ async def _chat_act_core(
     cards: List[Dict[str, Any]] = []
 
     def _step_timeout_seconds(action_key: str) -> float:
-        # 获取基础设置，如果没有设置则默认 60s
-        base = float(getattr(settings, "timeout_seconds", 60.0) or 60.0)
-        base = max(base, 60.0)
-        
-        ak = str(action_key or "")
-        
-        # [修改] 第一梯队：超级耗时任务 (工作流聚合、剧本生成、大纲优化)
-        # 建议直接给 5~10 分钟，防止 DeepSeek 思考时间过长导致断连
-        heavy_tasks = (
-            "workflow_script", 
-            "script_generate", 
-            "script_optimize", 
-            "outline_generate", 
-            "outline_optimize"
-        )
-        if ak in heavy_tasks:
-            return max(base * 5.0, 300.0) # 至少 300秒
-            
-        # [修改] 第二梯队：中等耗时 (分镜、记忆提取)
-        if ak in ("workflow_storyboard", "memory_extract_changeset"):
-            return max(base * 3.0, 180.0) # 至少 180秒
-            
-        # 第三梯队：普通对话/简单任务
-        return max(base + 30.0, 90.0)
+        return 600.0
 
     for idx, s in enumerate(steps):
+        logger.info(f"[AI][chat_act] Step {idx} Start: {s}")
+        log_ui(project_id_pk, run_id, f"Step {idx} Start: {s}", "INFO")
         ak = str(s.get("action_key"))
         in_text = (s.get("input_text") or "").strip()
         why = (s.get("why") or "").strip()
@@ -717,6 +696,8 @@ async def _chat_act_core(
                 "ms": int(dt),
             }
         )
+        logger.info(f"[AI][chat_act] Step {idx} End: {ak}, Output Text: {out_text}")
+        log_ui(project_id_pk, run_id, f"Step {idx} End: {ak}, Output Text: {out_text}", "INFO")
 
         if emit_stages and run_id:
             _context_store.snapshot_stage(
@@ -725,24 +706,44 @@ async def _chat_act_core(
                 stage_name=f"chat.step.{idx}.end",
                 data={"step_index": idx, "action_key": ak, "ms": int(dt), "output_preview": _trim_preview(out_text, 800), "at_ms": _now_ms()},
             )
+            logger.info(f"[AI][chat_act] Snapshot Stage: chat.step.{idx}.end")
+            log_ui(project_id_pk, run_id, f"Snapshot Stage: chat.step.{idx}.end", "INFO")
 
     created_run = None
     persistable = {"outline_generate", "generate_script", "script_optimize", "workflow_script", "workflow_storyboard"}
+    logger.info(f"[AI][chat_act] Persistable: {persistable}")
+    log_ui(project_id_pk, run_id, f"Persistable: {persistable}", "INFO")
     if req.episode_id and final_action_key in persistable:
+        logger.info(f"[AI][chat_act] Persist Final Action Key: {final_action_key}")
+        log_ui(project_id_pk, run_id, f"Persist Final Action Key: {final_action_key}", "INFO")
         if final_action_key in ("generate_script", "script_optimize"):
+            logger.info(f"[AI][chat_act] Generate Script: {artifacts.get('script')}")
+            log_ui(project_id_pk, run_id, f"Generate Script: {artifacts.get('script')}", "INFO")
             final_output = str(artifacts.get("script") or "")
         elif final_action_key == "workflow_script":
+            logger.info(f"[AI][chat_act] Workflow Script: {artifacts.get('script_fountain')}")
+            log_ui(project_id_pk, run_id, f"Workflow Script: {artifacts.get('script_fountain')}", "INFO")
             final_output = str(artifacts.get("script_fountain") or "")
         elif final_action_key == "workflow_storyboard":
             try:
+                logger.info(f"[AI][chat_act] Workflow Storyboard: {artifacts.get('shots')}")
+                log_ui(project_id_pk, run_id, f"Workflow Storyboard: {artifacts.get('shots')}", "INFO")
                 final_output = json.dumps(artifacts.get("shots") or [], ensure_ascii=False, indent=2)
             except Exception as e:
+                logger.error(f"[AI][chat_act] Workflow Storyboard Error: {e}")
+                log_ui(project_id_pk, run_id, f"Workflow Storyboard Error: {e}", "ERROR")
                 final_output = str(artifacts.get("shots") or "")
         else:
+            logger.info(f"[AI][chat_act] Outline: {artifacts.get('outline')}")
+            log_ui(project_id_pk, run_id, f"Outline: {artifacts.get('outline')}", "INFO")
             final_output = str(artifacts.get("outline") or "")
         persist_action_key = final_action_key
+        logger.info(f"[AI][chat_act] Persist Action Key: {persist_action_key}")
+        log_ui(project_id_pk, run_id, f"Persist Action Key: {persist_action_key}", "INFO")
         if persist_action_key == "outline_optimize":
             persist_action_key = "outline_generate"
+        logger.info(f"[AI][chat_act] Persist Action Key: {persist_action_key}")
+        log_ui(project_id_pk, run_id, f"Persist Action Key: {persist_action_key}", "INFO")
         db_obj = models.AiActionRun(
             project_id=project_id_pk,
             target_type="episode",
@@ -763,6 +764,8 @@ async def _chat_act_core(
         created_run = {"id": db_obj.id, "action_key": db_obj.action_key, "created_at": str(db_obj.created_at)}
 
     assistant_msg = f"已完成：{plan_parsed.get('intent_summary') or '执行完成'}（最终动作：{final_action_key}）"
+    logger.info(f"[AI][chat_act] Assistant Message: {assistant_msg}")
+    log_ui(project_id_pk, run_id, f"Assistant Message: {assistant_msg}", "INFO")
     resp = ChatActResponse(
         assistant_message=assistant_msg,
         created_run=created_run,
@@ -773,6 +776,8 @@ async def _chat_act_core(
         memory_trace=memory_trace if req.debug else None,
         planner_raw=(planner_raw or "") if req.debug else None,
     )
+    logger.info(f"[AI][chat_act] Response: {resp.model_dump()}")
+    log_ui(project_id_pk, run_id, f"Response: {resp.model_dump()}", "INFO")
 
     if emit_stages and run_id:
         _context_store.snapshot_stage(project_id=project_id_pk, run_id=run_id, stage_name="chat.final", data=resp.model_dump())
