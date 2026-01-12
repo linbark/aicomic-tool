@@ -9,6 +9,20 @@ from ..models import Character, Asset, Project
 from ..services.app_paths import project_root_dir, data_dir
 from ..services.project_lookup import resolve_project, resolve_project_pk, ensure_project_uuid
 
+import logging
+
+log_dir = os.path.join(os.path.dirname(__file__), "..", "logs")
+os.makedirs(log_dir, exist_ok=True)
+log_file = os.path.join(log_dir, "projects.log")
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+handler = logging.FileHandler(log_file)
+handler.setLevel(logging.DEBUG)
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+handler.setFormatter(formatter)
+logger.addHandler(handler)
+
 router = APIRouter(
     prefix="/projects",
     tags=["Projects (项目与人设)"]
@@ -59,11 +73,10 @@ def get_projects(db: Session = Depends(get_db)):
 @router.post("/", response_model=schemas.ProjectBase)
 def create_project(project: ProjectCreate, db: Session = Depends(get_db)):
     import json, os
-    log_path = '/Users/ljc/aicomic-tool/.cursor/debug.log'
     try:
-        with open(log_path, 'a') as f:
-            f.write(json.dumps({"location":"projects.py:48","message":"create_project called","data":{"name":project.name,"description":project.description},"timestamp":int(__import__('time').time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"D"})+"\n")
-    except: pass
+        logger.info(f"[Projects][create_project] create_project called: {project.name}, {project.description}")
+    except: 
+        logging.error(f"[Projects][create_project] create_project called: {project.name}, {project.description}")
     try:
         db_project = models.Project(name=project.name, description=project.description)
         db.add(db_project)
@@ -71,15 +84,11 @@ def create_project(project: ProjectCreate, db: Session = Depends(get_db)):
         db.refresh(db_project)
         ensure_project_uuid(db, db_project)
         try:
-            with open(log_path, 'a') as f:
-                f.write(json.dumps({"location":"projects.py:54","message":"create_project success","data":{"id":db_project.id,"name":db_project.name},"timestamp":int(__import__('time').time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"D"})+"\n")
+            logger.info(f"[Projects][create_project] create_project success: {db_project.id}, {db_project.name}")
         except: pass
         return {"id": str(db_project.uuid), "name": db_project.name, "description": db_project.description}
     except Exception as e:
-        try:
-            with open(log_path, 'a') as f:
-                f.write(json.dumps({"location":"projects.py:57","message":"create_project error","data":{"error":str(e),"type":type(e).__name__},"timestamp":int(__import__('time').time()*1000),"sessionId":"debug-session","runId":"run1","hypothesisId":"D"})+"\n")
-        except: pass
+        logger.error(f"[Projects][create_project] create_project error: {e}")
         raise
 
 # 【新增】修改项目 (重命名)
@@ -113,18 +122,18 @@ def delete_project(project_id: str, db: Session = Depends(get_db)):
         import shutil
         try:
             shutil.rmtree(project_dir)
-            print(f"Deleted project directory: {project_dir}")
+            logger.info(f"[Projects][delete_project] Deleted project directory: {project_dir}")
         except Exception as e:
-            print(f"Error deleting project directory {project_dir}: {e}")
+            logger.error(f"[Projects][delete_project] Error deleting project directory {project_dir}: {e}")
 
     # 删除 app_data_dir/projects/{project_id}（context / runs 等）
     if os.path.exists(app_project_dir):
         import shutil
         try:
             shutil.rmtree(app_project_dir)
-            print(f"Deleted app project directory: {app_project_dir}")
+            logger.info(f"[Projects][delete_project] Deleted app project directory: {app_project_dir}")
         except Exception as e:
-            print(f"Error deleting app project directory {app_project_dir}: {e}")
+            logger.error(f"[Projects][delete_project] Error deleting app project directory {app_project_dir}: {e}")
     
     # 删除数据库记录（显式清理所有 project_id 关联数据，避免 SQLite 未启用外键级联导致残留）
     try:
@@ -281,9 +290,9 @@ def delete_asset_item(item_id: int, db: Session = Depends(get_db)):
             try:
                 if os.path.exists(file_full_path):
                     os.remove(file_full_path)
-                    print(f"Deleted file: {file_full_path}")
+                    logger.info(f"[Projects][delete_asset_item] Deleted file: {file_full_path}")
             except Exception as e:
-                print(f"Error deleting file {file_full_path}: {e}")
+                logger.error(f"[Projects][delete_asset_item] Error deleting file {file_full_path}: {e}")
     # -----------------------------------
 
     # 删除数据库记录
@@ -328,11 +337,11 @@ def delete_asset(asset_id: int, db: Session = Depends(get_db)):
         try:
             if os.path.exists(file_full_path):
                 os.remove(file_full_path)
-                print(f"Deleted asset file: {file_full_path}")
+                logger.info(f"[Projects][delete_asset] Deleted asset file: {file_full_path}")
             else:
-                print(f"File not found on disk: {file_full_path}")
+                logger.error(f"[Projects][delete_asset] File not found on disk: {file_full_path}")
         except Exception as e:
-            print(f"Error deleting file {file_full_path}: {e}")
+            logger.error(f"[Projects][delete_asset] Error deleting file {file_full_path}: {e}")
 
     # 删除数据库记录
     db.delete(asset)

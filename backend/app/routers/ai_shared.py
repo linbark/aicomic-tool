@@ -16,8 +16,8 @@ class AiSettingsRead(BaseModel):
     base_url: str = "https://api.deepseek.com"
     model: str = "deepseek-chat"
     temperature: float = 0.2
-    max_tokens: int = 2048
-    timeout_seconds: float = 120.0
+    max_tokens: int = 8192
+    timeout_seconds: float = 300.0
 
 
 def _read_settings_raw() -> Dict[str, Any]:

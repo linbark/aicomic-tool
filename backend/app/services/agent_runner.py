@@ -14,6 +14,19 @@ from .memory_indexer import MemoryIndexer
 from .state_extractor import StateChangeExtractor
 from ..workflows.agent_state import AgentState
 
+import logging
+log_dir = os.path.join(os.path.dirname(__file__), "..", "logs")
+os.makedirs(log_dir, exist_ok=True)
+log_file = os.path.join(log_dir, "agent_runner.log")
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+handler = logging.FileHandler(log_file)
+handler.setLevel(logging.DEBUG)
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+handler.setFormatter(formatter)
+logger.addHandler(handler)
+
 
 class AgentRunner:
     """
@@ -127,9 +140,11 @@ class AgentRunner:
         Returns:
             最终状态
         """
+        logger.info(f"[AgentRunner] Running workflow with {len(workflow_steps)} steps")
         state = initial_state
 
         for step_idx, step_func in enumerate(workflow_steps):
+            logger.info(f"[AgentRunner] Running step {step_idx + 1} of {len(workflow_steps)}")
             # 更新阶段名称
             state.stage_name = f"step_{step_idx + 1}"
 

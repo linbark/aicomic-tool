@@ -24,6 +24,8 @@ type ChatRunUi = {
   currentActionKey?: string | null
 }
 
+type DebugLog = { id: string; ts: number; level: string; text: string }
+
 function _now() {
   return Date.now()
 }
@@ -81,6 +83,11 @@ export function ScriptPage() {
   const [chatPollPaused, setChatPollPaused] = useState(false)
   const [uiNowMs, setUiNowMs] = useState(() => Date.now())
 
+  const logsContainerRef = useRef<HTMLDivElement>(null)
+  const logsEndRef = useRef<HTMLDivElement>(null)
+  const [autoScrollEnabled, setAutoScrollEnabled] = useState(true)
+  const [hasNewLogs, setHasNewLogs] = useState(false)
+
   const episodeDirtyForIdRef = useRef<number | null>(null)
   const sceneDirtyForIdRef = useRef<number | null>(null)
 
@@ -102,7 +109,12 @@ export function ScriptPage() {
     const sc = ep?.scenes?.find((s) => s.id === selected.sceneId)
     return sc?.shots?.find((sh) => sh.id === selected.shotId) || null
   }, [episodes, selected])
-
+  
+  // [新增] Debug 日志状态
+  const [debugLogs, setDebugLogs] = useState<DebugLog[]>([])
+  const [showDebugWindow, setShowDebugWindow] = useState(false) // 控制窗口显示
+  const fetchedLogIdsRef = useRef<Set<string>>(new Set()) // 防止重复读取
+  
   async function refreshScript(pid = projectId) {
     if (!pid) return
     setBusy('load')
@@ -189,9 +201,46 @@ export function ScriptPage() {
       try {
         const stagesRes = await api.listRunStages(pid, runId)
         const stages = (stagesRes.data as any)?.stages || []
-        const stageList: string[] = Array.isArray(stages) ? stages.map((s: any) => String(s)) : []
+        const stageList: string[] = Array.isArray(stages) 
+          ? stages.map((s: any) => (typeof s === 'string' ? s : s?.name || '')) 
+          : []
         const stageSet = new Set(stageList)
 
+        // 轮询 log.* 文件并写入 debugLogs
+        const logStages = stageList.filter((s) => s.startsWith('log.'))
+        for (const logName of logStages) {
+          // 1. 如果已经读过（在 fetchedLogIdsRef 中），跳过
+          if (fetchedLogIdsRef.current.has(logName)) continue
+          
+          // 2. 标记为已读，防止重复请求
+          fetchedLogIdsRef.current.add(logName)
+
+          // 3. 异步获取日志内容 (不 await，避免阻塞主流程)
+          api.getRunStage(pid, runId, logName)
+            .then((res) => {
+              // 如果组件已卸载或停止轮询，不再更新状态
+              if (!alive) return 
+
+              const d = (res.data as any)?.data || {}
+              setDebugLogs((prev) => {
+                const newLog = {
+                  id: logName,
+                  ts: d.timestamp ? d.timestamp * 1000 : Date.now(),
+                  level: d.level || 'INFO',
+                  text: d.text || '',
+                }
+                // 加入新日志并重新按时间排序
+                const next = [...prev, newLog]
+                next.sort((a, b) => a.ts - b.ts)
+                return next
+              })
+            })
+            .catch(() => {
+              // 获取失败（如文件还没写完），可以稍后重试，或者简单地在下一次 tick 仍然因为 has(logName) 而跳过
+              // 为了稳健，如果失败应该允许重试，这里简单处理：从 Set 中移除以便下次重试
+              fetchedLogIdsRef.current.delete(logName)
+            })
+        }
         // status
         if (stageSet.has('chat.status')) {
           const st = await api.getRunStage(pid, runId, 'chat.status')
@@ -362,6 +411,33 @@ export function ScriptPage() {
     const timer = window.setInterval(() => setUiNowMs(Date.now()), 1000)
     return () => window.clearInterval(timer)
   }, [chatRun?.runId, chatRun?.status, chatPollPaused])
+  
+  // [新增] 监听日志列表容器的滚动事件
+  const handleDebugScroll = () => {
+    if (!logsContainerRef.current) return
+    const { scrollTop, scrollHeight, clientHeight } = logsContainerRef.current
+    
+    // 判断是否在底部 (允许 50px 的误差)
+    const isAtBottom = scrollHeight - scrollTop - clientHeight < 50
+    
+    if (isAtBottom) {
+      setAutoScrollEnabled(true)
+      setHasNewLogs(false)
+    } else {
+      setAutoScrollEnabled(false)
+    }
+  }
+
+  // [新增] 当日志更新时，决定是否滚动
+  useEffect(() => {
+    if (autoScrollEnabled && logsEndRef.current) {
+      logsEndRef.current.scrollIntoView({ behavior: 'smooth' })
+      setHasNewLogs(false)
+    } else if (!autoScrollEnabled) {
+      // 如果没开启自动滚动，说明用户正在看上面，标记有新日志
+      setHasNewLogs(true)
+    }
+  }, [debugLogs]) // 依赖 debugLogs 变化
 
   async function saveEpisode() {
     if (!projectId || selected.kind !== 'episode') return
@@ -444,8 +520,8 @@ export function ScriptPage() {
       await refreshProjects()
       if (pid) setProjectId(pid)
       setShowCreateProject(false)
-      setCreateProjectName('')
-      setCreateProjectDesc('')
+      setCreateProjectName(name || '')
+      setCreateProjectDesc(desc || '')
     } catch (e: any) {
       setError(e?.response?.data?.detail || e?.message || '新建项目失败')
     } finally {
@@ -517,7 +593,7 @@ export function ScriptPage() {
 
   async function sendChat() {
     if (!projectId) return
-    if (selected.kind !== 'episode') return
+    if (selected.kind === 'none') return
     const msg = (chatInput || '').trim()
     if (!msg) return
 
@@ -527,8 +603,20 @@ export function ScriptPage() {
     setChatError(null)
     setChatBusy(true)
     setChatRun(null)
+    setDebugLogs([])
+    fetchedLogIdsRef.current.clear()
     setChatPollPaused(false)
     try {
+      // 1. 计算当前上下文文本 (Current Input)
+      let currentInputText = ''
+      if (selected.kind === 'episode') {
+        currentInputText = episodeText
+      } else if (selected.kind === 'scene') {
+        currentInputText = sceneText
+      } else if (selected.kind === 'shot' && shotDraft) {
+        // 如果是镜头，可以将动作和对白拼起来
+        currentInputText = `[Title] ${shotDraft.title}\n[Action] ${shotDraft.action_text || ''}\n[Dialogue] ${shotDraft.dialogue || ''}`
+      }
       const res = await api.aiChatActAsync({
         project_id: projectId,
         episode_id: selected.episodeId,
@@ -537,6 +625,7 @@ export function ScriptPage() {
         debug: chatDebug,
         ui_context: {
           master_script: episodeText,
+          // current_input: currentInputText,
           episode_meta: {
             id: selectedEpisode?.id,
             title: selectedEpisode?.title,
@@ -1043,9 +1132,137 @@ export function ScriptPage() {
             ) : null}
           </div>
         </div>
-                            </div>
-                          )
-                        }
+        {/* 1. 悬浮开关按钮 */}
+      <div style={{ position: 'fixed', bottom: 20, right: 20, zIndex: 1000 }}>
+        <button 
+            style={{
+              ...styles.btn, 
+              background: '#111', 
+              border: '1px solid #444', 
+              boxShadow: '0 4px 12px rgba(0,0,0,0.5)',
+              display: 'flex', alignItems: 'center', gap: 6
+            }}
+            onClick={() => setShowDebugWindow(!showDebugWindow)}
+        >
+            <span>🐞 Debug</span> 
+            {debugLogs.length > 0 && (
+              <span style={{
+                background: '#ef4444', color: 'white', borderRadius: 10, 
+                padding: '0 5px', fontSize: 10, minWidth: 16, textAlign: 'center'
+              }}>
+                {debugLogs.length}
+              </span>
+            )}
+        </button>
+      </div>
+
+      {/* 2. Debug 窗口面板 */}
+      {showDebugWindow && (
+        <div style={{
+            position: 'fixed', bottom: 60, right: 20, width: 600, height: 400, 
+            background: 'rgba(15,15,15,0.98)', border: '1px solid #444', borderRadius: 8,
+            display: 'flex', flexDirection: 'column', boxShadow: '0 8px 30px rgba(0,0,0,0.7)',
+            zIndex: 1000, overflow: 'hidden', backdropFilter: 'blur(10px)'
+        }}>
+            {/* 标题栏 */}
+            <div style={{
+              padding: '8px 12px', background: '#222', borderBottom: '1px solid #333', 
+              fontSize: 12, fontWeight: 700, color: '#aaa',
+              display:'flex', justifyContent:'space-between', alignItems: 'center'
+            }}>
+                <div style={{display:'flex', gap:10}}>
+                   <span>后端实时日志</span>
+                   <span style={{opacity:0.5}}>Run: {chatRun?.runId ? chatRun.runId.slice(0,8) : '-'}</span>
+                </div>
+                <div style={{display:'flex', gap:10}}>
+                  {/* [新增] 手动开关 */}
+                  <div 
+                    style={{fontSize: 10, cursor:'pointer', color: autoScrollEnabled ? '#34d399' : '#aaa', display:'flex', alignItems:'center'}}
+                    onClick={() => {
+                        setAutoScrollEnabled(!autoScrollEnabled)
+                        // 如果开启，立即滚到底部
+                        if(!autoScrollEnabled && logsEndRef.current) logsEndRef.current.scrollIntoView()
+                    }}
+                  >
+                    {autoScrollEnabled ? '🟢 自动滚动' : '⚪️ 已暂停滚动'}
+                  </div>
+
+                  <button 
+                    onClick={() => { setDebugLogs([]); fetchedLogIdsRef.current.clear(); }} 
+                    style={{background:'none', border:'none', color:'#aaa', cursor:'pointer', fontSize:11}}
+                  >
+                    清空
+                  </button>
+                  <button 
+                    onClick={() => setShowDebugWindow(false)} 
+                    style={{background:'none', border:'none', color:'#aaa', cursor:'pointer', fontSize:14}}
+                  >
+                    ×
+                  </button>
+                </div>
+            </div>
+
+            {/* 日志内容区域 (增加 ref 和 onScroll) */}
+            <div 
+              ref={logsContainerRef}      // <--- 绑定容器 Ref
+              onScroll={handleDebugScroll} // <--- 绑定滚动事件
+              style={{
+                flex: 1, overflowY: 'auto', padding: 12, 
+                fontFamily: 'Menlo, Monaco, "Courier New", monospace', fontSize: 11,
+                lineHeight: '1.5', color: '#e5e5e5', position: 'relative'
+              }}
+            >
+                {debugLogs.length === 0 ? (
+                  <div style={{opacity:0.3, textAlign:'center', marginTop: 40}}>暂无日志...</div>
+                ) : null}
+                
+                {debugLogs.map(log => (
+                    <div key={log.id} style={{
+                      marginBottom: 6, display:'flex', gap:8, alignItems:'flex-start',
+                      borderBottom: '1px solid rgba(255,255,255,0.03)', paddingBottom: 4
+                    }}>
+                        <span style={{opacity: 0.4, minWidth: 60, fontSize: 10, paddingTop: 1}}>
+                          {new Date(log.ts).toLocaleTimeString([], {hour12:false, hour:'2-digit', minute:'2-digit', second:'2-digit'})}
+                        </span>
+                        <span style={{
+                            color: log.level === 'ERROR' ? '#f87171' : log.level === 'SUCCESS' ? '#34d399' : '#60a5fa',
+                            fontWeight: 'bold', minWidth: 45, fontSize: 10, paddingTop: 1
+                        }}>
+                          [{log.level}]
+                        </span>
+                        <span style={{whiteSpace: 'pre-wrap', wordBreak:'break-all', flex: 1}}>
+                          {log.text}
+                        </span>
+                    </div>
+                ))}
+                
+                {/* 滚动锚点 (增加 ref) */}
+                <div ref={logsEndRef} />
+
+                {/* [新增] 底部新消息提示浮层 */}
+                {!autoScrollEnabled && hasNewLogs && (
+                  <div 
+                    onClick={() => {
+                        logsEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+                        setAutoScrollEnabled(true)
+                    }}
+                    style={{
+                      position: 'sticky', bottom: 10, left: '50%', transform: 'translateX(-50%)',
+                      background: '#6366f1', color: 'white', padding: '4px 12px', borderRadius: 20,
+                      fontSize: 11, cursor: 'pointer', boxShadow: '0 4px 12px rgba(0,0,0,0.5)',
+                      fontWeight: 600, animation: 'fadeIn 0.2s'
+                    }}
+                  >
+                    ⬇️ 有新日志
+                  </div>
+                )}
+            </div>
+        </div>
+      )}
+
+      </div>
+    )
+  }
 
 const styles: Record<string, any> = {
   page: {

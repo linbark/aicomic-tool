@@ -6,7 +6,7 @@ from pydantic import BaseModel
 from ..services import prompt_registry
 from ..services.llm_client import LlmChatSettings
 from .ai_shared import _build_memory_context, _chat_client, _mask_settings, _read_settings_raw
-
+from .ai_helpers import log_ui, safe_parse_json
 
 router = APIRouter(tags=["AI (DeepSeek)"])
 
@@ -91,10 +91,12 @@ async def outline_optimize(req: OutlineOptimizeRequest):
     raw = _read_settings_raw()
     settings = _mask_settings(raw)
     if not settings.has_api_key:
+        log_ui(req.project_id, "outline_optimize", "AI API Key 未配置", "ERROR")
         raise HTTPException(status_code=400, detail="AI API Key 未配置")
 
     user_text = (req.text or "").strip()
     if not user_text:
+        log_ui(req.project_id, "outline_optimize", "用户输入为空", "ERROR")
         return OutlineOptimizeResponse(text="")
 
     system_prompt = prompt_registry.get_template_prompt("outline_optimize_system")
@@ -121,7 +123,7 @@ async def outline_optimize(req: OutlineOptimizeRequest):
             if memory_context:
                 system_prompt = f"{system_prompt}\n\n## 记忆上下文\n\n{memory_context}"
         except Exception as e:
-            print(f"[AI][outline_optimize] Memory retrieval failed: {e}")
+            log_ui(req.project_id, "outline_optimize", f"Memory retrieval failed: {e}", "ERROR")
 
     effective_max_tokens = max(int(settings.max_tokens or 0), 4096)
     content = await _chat_client.chat(
