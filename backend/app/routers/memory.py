@@ -483,7 +483,7 @@ async def extract_changeset(req: ExtractChangeSetRequest, db: Session = Depends(
                 changeset_id=changeset_id,
                 entry={"at_ms": int(time.time() * 1000), "action": "extractor_trace", "data": extractor_trace},
             )
-        except Exception:
+        except Exception as e:
             pass
         try:
             store.append_changeset_review_entry(

@@ -41,7 +41,8 @@ def _read_json(path: str) -> Optional[Dict[str, Any]]:
         # 对于 context 文件，我们要求是 object（dict）
         return {"_value": data}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to read json: {e}")
+        logger.error(f"[ContextStore] Error reading json: {e}")
+        raise
 
 
 def _write_json(path: str, data: Any) -> None:
@@ -51,7 +52,8 @@ def _write_json(path: str, data: Any) -> None:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to write json: {e}")
+        logger.error(f"[ContextStore] Error writing json: {e}")
+        raise
 
 
 @dataclass(frozen=True)

@@ -8,8 +8,19 @@ from typing import Any
 from ..services.json_extract import extract_json_any
 from ..services.context_store import ContextStore
 
+import os
+log_dir = os.path.join(os.path.dirname(__file__), "..", "logs")
+os.makedirs(log_dir, exist_ok=True)
+log_file = os.path.join(log_dir, "ai_helpers.log")
+
 # 初始化 logger
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+handler = logging.FileHandler(log_file)
+handler.setLevel(logging.DEBUG)
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+handler.setFormatter(formatter)
+logger.addHandler(handler)
 
 # 实例化一个 store 对象供 _log_ui 使用
 # ContextStore 主要是文件操作，开销很小，可以在这里独立实例化

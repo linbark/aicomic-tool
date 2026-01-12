@@ -1432,7 +1432,7 @@ class MemoryStore:
             "updated_at_ms": row[7],
         }
 
-    def _append_changeset_review_log(
+    def append_changeset_review_log(
         self,
         changeset_id: str,
         entry: Dict[str, Any],
@@ -1457,6 +1457,20 @@ class MemoryStore:
         )
         conn.commit()
         conn.close()
+
+    def append_changeset_review_entry(
+        self,
+        changeset_id: str,
+        entry: Dict[str, Any],
+    ) -> None:
+        """
+        追加 changeset 审阅日志条目（与 append_changeset_review_log 功能相同）
+        
+        Args:
+            changeset_id: 变更集ID
+            entry: 要追加的日志条目（字典格式，通常包含 at_ms, action, data 等字段）
+        """
+        self.append_changeset_review_log(changeset_id, entry)
 
     def apply_changeset(
         self,
@@ -1579,7 +1593,7 @@ class MemoryStore:
         conn.commit()
         conn.close()
 
-        self._append_changeset_review_log(
+        self.append_changeset_review_log(
             changeset_id,
             {
                 "at_ms": now_ms,
@@ -1604,7 +1618,7 @@ class MemoryStore:
         )
         conn.commit()
         conn.close()
-        self._append_changeset_review_log(
+        self.append_changeset_review_log(
             changeset_id,
             {
                 "at_ms": now_ms,

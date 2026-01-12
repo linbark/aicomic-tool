@@ -217,7 +217,7 @@ async def _chat_act_core(
                 for k in ["L2_static", "L1", "L2_dynamic", "negative_constraints"]:
                     try:
                         memory_trace.append({"key": k, "text": (retriever.format_for_prompt(retrieval_results) or {}).get(k)})
-                    except Exception:
+                    except Exception as e:
                         memory_trace.append({"key": k, "text": None})
         except Exception as e:
             logger.error(f"[AI][chat_act] Memory retrieval failed: {e}")
@@ -531,12 +531,12 @@ async def _chat_act_core(
                 if artifacts.get("beat_sheet"):
                     try:
                         base_text += "### beat_sheet\n" + json.dumps(artifacts.get("beat_sheet"), ensure_ascii=False, indent=2) + "\n\n"
-                    except Exception:
+                    except Exception as e:
                         log_ui(project_id_pk, "memory_extract_changeset", f"Memory Extract Changeset Beat Sheet Error: {e}", "ERROR")
                 if artifacts.get("series_bible"):
                     try:
                         base_text += "### series_bible\n" + json.dumps(artifacts.get("series_bible"), ensure_ascii=False, indent=2) + "\n\n"
-                    except Exception:
+                    except Exception as e:
                         log_ui(project_id_pk, "memory_extract_changeset", f"Memory Extract Changeset Series Bible Error: {e}", "ERROR")
                 if not base_text:
                     base_text = master_script_preview or message
@@ -552,7 +552,7 @@ async def _chat_act_core(
                 for ev in evidences:
                     try:
                         evidence_ids.append(store.upsert_evidence(ev))
-                    except Exception:
+                    except Exception as e:
                         log_ui(project_id_pk, "memory_extract_changeset", f"Memory Extract Changeset Upsert Evidence Error: {e}", "ERROR")
                         continue
 
@@ -576,12 +576,12 @@ async def _chat_act_core(
                 )
                 try:
                     store.append_changeset_review_entry(changeset_id=changeset_id, entry={"at_ms": _now_ms(), "action": "extractor_trace", "data": extractor_trace})
-                except Exception:
+                except Exception as e:
                     log_ui(project_id_pk, "memory_extract_changeset", f"Memory Extract Changeset Append Changeset Review Entry Extractor Trace Error: {e}", "ERROR")
                     pass
                 try:
                     store.append_changeset_review_entry(changeset_id=changeset_id, entry={"at_ms": _now_ms(), "action": "resolver_trace", "data": resolver_trace})
-                except Exception:
+                except Exception as e:
                     log_ui(project_id_pk, "memory_extract_changeset", f"Memory Extract Changeset Append Changeset Review Entry Resolver Trace Error: {e}", "ERROR")
                     pass
 
@@ -627,7 +627,7 @@ async def _chat_act_core(
             out_text = await asyncio.wait_for(_do_step(), timeout=timeout_sec)
         
         # [新增] 1. 专门捕获超时异常
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as e:
             err_text = f"Step '{ak}' execution timed out (> {timeout_sec}s)"
             logger.warning(f"[AI] {err_text}")
             log_ui(project_id_pk, run_id, f"Step '{ak}' execution timed out (> {timeout_sec}s)", "WARNING")
@@ -682,11 +682,16 @@ async def _chat_act_core(
                 err_text = f"{type(e).__name__}: {e}"
                 ts = _now_ms()
                 log_ui(project_id_pk, run_id, f"Step '{ak}' execution error: {err_text}", "ERROR")
+                logger.error(f"[AI][chat_act] Step '{ak}' execution error: {err_text}")
                 _context_store.snapshot_stage(
                     project_id=project_id_pk,
                     run_id=run_id,
                     stage_name=f"chat.step.{idx}.error",
-                    data={"step_index": idx, "action_key": ak, "error": err_text, "at_ms": ts},
+                    data={
+                            "step_index": idx, 
+                            "action_key": ak, 
+                            "error": err_text, 
+                            "at_ms": ts},
                 )
                 _context_store.snapshot_stage(
                     project_id=project_id_pk,
@@ -700,7 +705,7 @@ async def _chat_act_core(
                     stage_name="chat.status",
                     data={"status": "error", "at_ms": ts, "current_step_index": idx, "current_action_key": ak},
                 )
-            raise e
+            raise
 
         dt = _now_ms() - t0
         steps_trace.append(
@@ -731,7 +736,7 @@ async def _chat_act_core(
         elif final_action_key == "workflow_storyboard":
             try:
                 final_output = json.dumps(artifacts.get("shots") or [], ensure_ascii=False, indent=2)
-            except Exception:
+            except Exception as e:
                 final_output = str(artifacts.get("shots") or "")
         else:
             final_output = str(artifacts.get("outline") or "")
@@ -808,7 +813,7 @@ def chat_act_async(req: ChatActRequest, bg: BackgroundTasks):
     finally:
         try:
             _db.close()
-        except Exception:
+        except Exception as e:
             pass
     _context_store.snapshot_stage(project_id=project_id_pk, run_id=run_id, stage_name="chat.status", data={"status": "queued", "at_ms": _now_ms()})
     payload = req.model_dump()
@@ -833,7 +838,7 @@ def chat_act_async(req: ChatActRequest, bg: BackgroundTasks):
         finally:
             try:
                 db.close()
-            except Exception:
+            except Exception as e:
                 pass
 
     # IMPORTANT: 不使用 BackgroundTasks（其执行在同一 worker 线程，可能阻塞事件循环，导致轮询接口也卡死）。
