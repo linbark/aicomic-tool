@@ -227,8 +227,8 @@ async def _chat_act_core(
     logger.info(f"[AI][chat_act] UI Context: {ui_ctx}")
     log_ui(project_id_pk, run_id, f"UI Context: {ui_ctx}", "INFO")
     current_action_key = (req.current_action_key or "").strip()
-    master_script_preview = _trim_preview(str(ui_ctx.get("master_script") or ""), 1200)
-    selected_input_preview = _trim_preview(str(ui_ctx.get("current_input") or ""), 800)
+    master_script_preview = str(ui_ctx.get("master_script") or "")
+    selected_input_preview = str(ui_ctx.get("current_input") or "")
 
     planner_system = f"""你是一个“写作编排器（planner）”，负责把用户的自然语言意图拆解为可执行的动作序列。
 
@@ -504,22 +504,22 @@ async def _chat_act_core(
 
                 store = get_memory_store()
                 base_text = ""
-                log_ui(project_id_pk, "memory_extract_changeset", f"Memory Extract Changeset Artifacts: {artifacts}", "INFO")
+                log_ui(project_id_pk, run_id, f"Memory Extract Changeset Artifacts: {artifacts}", "INFO")
                 if artifacts.get("script_fountain"):
                     base_text += f"### script_fountain\n{artifacts.get('script_fountain')}\n\n"
                 if artifacts.get("beat_sheet"):
                     try:
                         base_text += "### beat_sheet\n" + json.dumps(artifacts.get("beat_sheet"), ensure_ascii=False, indent=2) + "\n\n"
                     except Exception as e:
-                        log_ui(project_id_pk, "memory_extract_changeset", f"Memory Extract Changeset Beat Sheet Error: {e}", "ERROR")
+                        log_ui(project_id_pk, run_id, f"Memory Extract Changeset Beat Sheet Error: {e}", "ERROR")
                 if artifacts.get("series_bible"):
                     try:
                         base_text += "### series_bible\n" + json.dumps(artifacts.get("series_bible"), ensure_ascii=False, indent=2) + "\n\n"
                     except Exception as e:
-                        log_ui(project_id_pk, "memory_extract_changeset", f"Memory Extract Changeset Series Bible Error: {e}", "ERROR")
+                        log_ui(project_id_pk, run_id, f"Memory Extract Changeset Series Bible Error: {e}", "ERROR")
                 if not base_text:
                     base_text = master_script_preview or message
-                log_ui(project_id_pk, "memory_extract_changeset", f"Memory Extract Changeset Base Text: {base_text}", "INFO")
+                log_ui(project_id_pk, run_id, f"Memory Extract Changeset Base Text: {base_text}", "INFO")
                 evidences = chunk_text_to_evidences(
                     project_id=project_id_pk,
                     episode_id=int(req.episode_id) if req.episode_id else None,
@@ -532,9 +532,10 @@ async def _chat_act_core(
                     try:
                         evidence_ids.append(store.upsert_evidence(ev))
                     except Exception as e:
-                        log_ui(project_id_pk, "memory_extract_changeset", f"Memory Extract Changeset Upsert Evidence Error: {e}", "ERROR")
+                        log_ui(project_id_pk, run_id, f"Memory Extract Changeset Upsert Evidence Error: {e}", "ERROR")
                         continue
-
+                logger.info(f"[AI][chat_act] Memory Extract Changeset Evidence IDs: {evidence_ids}")
+                log_ui(project_id_pk, run_id, f"Memory Extract Changeset Evidence IDs: {evidence_ids}", "INFO")
                 payload, extractor_trace = await extract_changeset_v0_with_llm_with_trace(
                     llm_settings=LlmChatSettings(
                         base_url=settings.base_url,
@@ -556,12 +557,12 @@ async def _chat_act_core(
                 try:
                     store.append_changeset_review_entry(changeset_id=changeset_id, entry={"at_ms": _now_ms(), "action": "extractor_trace", "data": extractor_trace})
                 except Exception as e:
-                    log_ui(project_id_pk, "memory_extract_changeset", f"Memory Extract Changeset Append Changeset Review Entry Extractor Trace Error: {e}", "ERROR")
+                    log_ui(project_id_pk, run_id, f"Memory Extract Changeset Append Changeset Review Entry Extractor Trace Error: {e}", "ERROR")
                     pass
                 try:
                     store.append_changeset_review_entry(changeset_id=changeset_id, entry={"at_ms": _now_ms(), "action": "resolver_trace", "data": resolver_trace})
                 except Exception as e:
-                    log_ui(project_id_pk, "memory_extract_changeset", f"Memory Extract Changeset Append Changeset Review Entry Resolver Trace Error: {e}", "ERROR")
+                    log_ui(project_id_pk, run_id, f"Memory Extract Changeset Append Changeset Review Entry Resolver Trace Error: {e}", "ERROR")
                     pass
 
                 def _count_by_type(items: Any) -> Dict[str, int]:
