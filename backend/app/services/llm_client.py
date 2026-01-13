@@ -15,7 +15,7 @@ class LlmChatSettings:
     api_key: str
     model: str
     temperature: float
-    max_tokens: int
+    max_tokens: Optional[int]  # None 表示不限制输出长度
     timeout_seconds: float
 
 
@@ -41,8 +41,11 @@ class DeepSeekChatClient:
             "model": settings.model or "deepseek-chat",
             "messages": messages,
             "temperature": settings.temperature,
-            "max_tokens": settings.max_tokens,
         }
+        # 只有当 max_tokens 不为 None 时才添加到 payload 中
+        # None 表示不限制输出长度，让 API 自己决定
+        if settings.max_tokens is not None:
+            payload["max_tokens"] = settings.max_tokens
 
         timeout = httpx.Timeout(
             connect=min(10.0, settings.timeout_seconds),

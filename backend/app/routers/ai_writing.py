@@ -58,15 +58,14 @@ async def outline_generate(req: OutlineGenerateRequest):
             # 记忆检索失败不阻断主流程，只记录日志
             print(f"[AI][outline_generate] Memory retrieval failed: {e}")
 
-    # 大纲类输出容易较长，给一个最低 max_tokens，避免中途截断
-    effective_max_tokens = max(int(settings.max_tokens or 0), 4096)
+    # 不限制 max_tokens，让 API 自己决定输出长度
     content = await _chat_client.chat(
         settings=LlmChatSettings(
             base_url=settings.base_url,
             api_key=raw.get("api_key") or "",
             model=settings.model,
             temperature=settings.temperature,
-            max_tokens=effective_max_tokens,
+            max_tokens=settings.max_tokens,  # None 表示不限制
             timeout_seconds=settings.timeout_seconds,
         ),
         messages=[
@@ -157,9 +156,8 @@ async def outline_optimize(req: OutlineOptimizeRequest):
             logger.error(f"[outline_optimize] Memory retrieval failed: {type(e).__name__}: {e}", exc_info=True)
             log_ui(req.project_id, "outline_optimize", f"Memory retrieval failed: {type(e).__name__}: {e}", "ERROR")
 
-    effective_max_tokens = max(int(settings.max_tokens or 0), 4096)
-    logger.info(f"[outline_optimize] Calling LLM: max_tokens={effective_max_tokens}, timeout={settings.timeout_seconds}")
-    log_ui(req.project_id, "outline_optimize", f"Calling LLM: max_tokens={effective_max_tokens}, timeout={settings.timeout_seconds}", "INFO")
+    logger.info(f"[outline_optimize] Calling LLM: max_tokens={settings.max_tokens} (None=unlimited), timeout={settings.timeout_seconds}")
+    log_ui(req.project_id, "outline_optimize", f"Calling LLM: max_tokens={settings.max_tokens} (None=unlimited), timeout={settings.timeout_seconds}", "INFO")
     
     try:
         content = await _chat_client.chat(
@@ -168,7 +166,7 @@ async def outline_optimize(req: OutlineOptimizeRequest):
                 api_key=raw.get("api_key") or "",
                 model=settings.model,
                 temperature=settings.temperature,
-                max_tokens=effective_max_tokens,
+                max_tokens=settings.max_tokens,  # None 表示不限制
                 timeout_seconds=settings.timeout_seconds,
             ),
             messages=[
@@ -240,14 +238,13 @@ async def generate_script(req: ScriptGenerateRequest):
         except Exception as e:
             print(f"[AI][generate_script] Memory retrieval failed: {e}")
 
-    effective_max_tokens = max(int(settings.max_tokens or 0), 4096)
     content = await _chat_client.chat(
         settings=LlmChatSettings(
             base_url=settings.base_url,
             api_key=raw.get("api_key") or "",
             model=settings.model,
             temperature=settings.temperature,
-            max_tokens=effective_max_tokens,
+            max_tokens=settings.max_tokens,  # None 表示不限制
             timeout_seconds=settings.timeout_seconds,
         ),
         messages=[
@@ -304,14 +301,13 @@ async def script_optimize(req: ScriptOptimizeRequest):
         except Exception as e:
             print(f"[AI][script_optimize] Memory retrieval failed: {e}")
 
-    effective_max_tokens = max(int(settings.max_tokens or 0), 4096)
     content = await _chat_client.chat(
         settings=LlmChatSettings(
             base_url=settings.base_url,
             api_key=raw.get("api_key") or "",
             model=settings.model,
             temperature=settings.temperature,
-            max_tokens=effective_max_tokens,
+            max_tokens=settings.max_tokens,  # None 表示不限制
             timeout_seconds=settings.timeout_seconds,
         ),
         messages=[

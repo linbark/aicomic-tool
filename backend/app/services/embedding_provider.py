@@ -42,12 +42,19 @@ class EmbeddingProvider:
     def _get_model(self) -> "SentenceTransformer":
         """懒加载模型（并延迟导入 sentence_transformers 以加速服务启动）"""
         if self._model is None:
+            import time
+            import logging
+            logger = logging.getLogger(__name__)
+            t_start = time.time()
+            logger.info(f"[EmbeddingProvider] Loading model '{self.model_name}' (device={self.device})...")
             from sentence_transformers import SentenceTransformer  # type: ignore
             self._model = SentenceTransformer(
                 self.model_name,
                 device=self.device,
                 cache_folder=self._cache_folder,
             )
+            t_end = time.time()
+            logger.info(f"[EmbeddingProvider] Model '{self.model_name}' loaded in {t_end - t_start:.2f}s")
         return self._model
 
     def embed(self, texts: List[str], normalize: bool = True) -> np.ndarray:

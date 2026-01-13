@@ -1,5 +1,5 @@
 import json
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from fastapi import HTTPException
 from pydantic import BaseModel
@@ -16,8 +16,8 @@ class AiSettingsRead(BaseModel):
     base_url: str = "https://api.deepseek.com"
     model: str = "deepseek-chat"
     temperature: float = 0.2
-    max_tokens: int = 8192
-    timeout_seconds: float = 300.0
+    max_tokens: Optional[int] = None  # None 表示不限制输出长度
+    timeout_seconds: float = 600.0
 
 
 def _read_settings_raw() -> Dict[str, Any]:
@@ -53,12 +53,15 @@ def _write_settings_raw(data: Dict[str, Any]) -> None:
 
 def _mask_settings(raw: Dict[str, Any]) -> AiSettingsRead:
     api_key = raw.get("api_key") or ""
+    max_tokens_val = raw.get("max_tokens")
+    # 如果配置中没有 max_tokens 或为 0，则返回 None（不限制）
+    max_tokens = None if max_tokens_val is None or max_tokens_val == 0 else int(max_tokens_val)
     return AiSettingsRead(
         has_api_key=bool(api_key),
         base_url=raw.get("base_url") or "https://api.deepseek.com",
         model=raw.get("model") or "deepseek-chat",
         temperature=float(raw.get("temperature") or 0.2),
-        max_tokens=int(raw.get("max_tokens") or 8192),
+        max_tokens=max_tokens,
         timeout_seconds=float(raw.get("timeout_seconds") or 120.0),
     )
 
@@ -76,7 +79,7 @@ def _get_llm_settings() -> LlmChatSettings:
         api_key=str(raw.get("api_key") or ""),
         model=str(masked.model),
         temperature=float(masked.temperature),
-        max_tokens=int(masked.max_tokens),
+        max_tokens=masked.max_tokens,  # 可能是 None
         timeout_seconds=float(masked.timeout_seconds),
     )
 

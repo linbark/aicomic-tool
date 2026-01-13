@@ -1,10 +1,13 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, memo, useCallback } from 'react'
 import api from '../api/client'
 import type { AiSettingsRead } from '../api/types'
+import { Button } from '../components/ui/Button'
+import { Input } from '../components/ui/Input'
+import { panelStyle } from '../styles/shared'
 
 type FormState = Omit<AiSettingsRead, 'has_api_key'>
 
-export function AiSettingsPage() {
+export const AiSettingsPage = memo(function AiSettingsPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string>('')
   const [success, setSuccess] = useState<string>('')
@@ -34,7 +37,8 @@ export function AiSettingsPage() {
         base_url: data?.base_url || 'https://api.deepseek.com',
         model: data?.model || 'deepseek-chat',
         temperature: Number(data?.temperature ?? 0.2),
-        max_tokens: Number(data?.max_tokens ?? 8192),
+        // 如果 max_tokens 为 null/undefined，显示为 0（表示不限制）
+        max_tokens: data?.max_tokens === null || data?.max_tokens === undefined ? 0 : Number(data.max_tokens),
         timeout_seconds: Number(data?.timeout_seconds ?? 30),
       })
     } catch (e: any) {
@@ -44,7 +48,7 @@ export function AiSettingsPage() {
     }
   }
 
-  async function handleSave() {
+  const handleSave = useCallback(async () => {
     if (isSaving) return
     setIsSaving(true)
     setError('')
@@ -54,7 +58,8 @@ export function AiSettingsPage() {
         base_url: form.base_url,
         model: form.model,
         temperature: form.temperature,
-        max_tokens: form.max_tokens,
+        // 如果 max_tokens 为 0，发送 0（后端会将其转换为 None，表示不限制）
+        max_tokens: form.max_tokens === 0 ? 0 : form.max_tokens,
         timeout_seconds: form.timeout_seconds,
       }
       if (clearApiKey) payload.api_key = ''
@@ -70,9 +75,9 @@ export function AiSettingsPage() {
     } finally {
       setIsSaving(false)
     }
-  }
+  }, [isSaving, form, apiKeyInput, clearApiKey])
 
-  async function handleTest() {
+  const handleTest = useCallback(async () => {
     if (isTesting) return
     setIsTesting(true)
     setError('')
@@ -86,7 +91,7 @@ export function AiSettingsPage() {
     } finally {
       setIsTesting(false)
     }
-  }
+  }, [isTesting])
 
   useEffect(() => {
     load().catch(() => {})
@@ -102,73 +107,84 @@ export function AiSettingsPage() {
           </p>
         </div>
         <div style={{ display: 'flex', gap: 10 }}>
-          <button onClick={() => handleTest().catch(() => {})} disabled={isTesting} style={styles.btn}>
+          <Button onClick={() => handleTest().catch(() => {})} disabled={isTesting}>
             {isTesting ? '测试中…' : '测试连接'}
-          </button>
-          <button onClick={() => handleSave().catch(() => {})} disabled={isSaving} style={styles.btnPrimary}>
+          </Button>
+          <Button variant="primary" onClick={() => handleSave().catch(() => {})} disabled={isSaving}>
             {isSaving ? '保存中…' : '保存配置'}
-          </button>
+          </Button>
         </div>
       </div>
 
       {loading ? <div style={{ opacity: 0.7 }}>加载中…</div> : null}
 
       {!loading ? (
-        <div style={styles.card}>
-          {error ? <div style={{ color: '#f87171', fontSize: 12 }}>{error}</div> : null}
-          {success ? <div style={{ color: '#34d399', fontSize: 12 }}>{success}</div> : null}
+        <div style={panelStyle}>
+          {error ? (
+            <div style={{ color: '#f87171', fontSize: 12 }} role="alert" aria-live="assertive">
+              {error}
+            </div>
+          ) : null}
+          {success ? (
+            <div style={{ color: '#34d399', fontSize: 12 }} role="status" aria-live="polite">
+              {success}
+            </div>
+          ) : null}
 
           <div style={styles.grid2}>
             <Field label="Base URL">
-              <input
+              <Input
                 value={form.base_url}
                 onChange={(e) => setForm((p) => ({ ...p, base_url: e.target.value }))}
-                style={styles.input}
                 placeholder="https://api.deepseek.com"
+                aria-label="Base URL"
               />
             </Field>
             <Field label="Model">
-              <input
+              <Input
                 value={form.model}
                 onChange={(e) => setForm((p) => ({ ...p, model: e.target.value }))}
-                style={styles.input}
                 placeholder="deepseek-chat"
+                aria-label="Model"
               />
             </Field>
           </div>
 
           <div style={styles.grid3}>
             <Field label="temperature">
-              <input
+              <Input
                 value={String(form.temperature)}
                 type="number"
                 step="0.1"
                 min={0}
                 max={2}
                 onChange={(e) => setForm((p) => ({ ...p, temperature: Number(e.target.value) }))}
-                style={styles.input}
+                aria-label="Temperature"
               />
             </Field>
-            <Field label="max_tokens">
-              <input
+            <Field label="max_tokens (0=不限制)">
+              <Input
                 value={String(form.max_tokens)}
                 type="number"
                 step="1"
-                min={64}
-                max={8192}
-                onChange={(e) => setForm((p) => ({ ...p, max_tokens: Number(e.target.value) }))}
-                style={styles.input}
+                min={0}
+                placeholder="0 表示不限制"
+                onChange={(e) => {
+                  const val = e.target.value === '' ? 0 : Number(e.target.value)
+                  setForm((p) => ({ ...p, max_tokens: val < 0 ? 0 : val }))
+                }}
+                aria-label="Max tokens (0 means unlimited)"
               />
             </Field>
             <Field label="timeout(s)">
-              <input
+              <Input
                 value={String(form.timeout_seconds)}
                 type="number"
                 step="1"
                 min={5}
                 max={120}
                 onChange={(e) => setForm((p) => ({ ...p, timeout_seconds: Number(e.target.value) }))}
-                style={styles.input}
+                aria-label="Timeout seconds"
               />
             </Field>
           </div>
@@ -176,18 +192,18 @@ export function AiSettingsPage() {
           <div style={{ marginTop: 4 }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
               <div style={styles.label}>API Key</div>
-              <div style={{ fontSize: 11, color: hasApiKey ? '#34d399' : 'rgba(229,231,235,0.55)' }}>
+              <div style={{ fontSize: 11, color: hasApiKey ? '#34d399' : 'rgba(229,231,235,0.55)' }} role="status" aria-live="polite">
                 {hasApiKey ? '已设置' : '未设置'}
               </div>
             </div>
-            <input
+            <Input
               value={apiKeyInput}
               onChange={(e) => setApiKeyInput(e.target.value)}
               type="password"
-              style={styles.input}
               placeholder="输入新的 API Key（留空表示不修改）"
+              aria-label="API Key"
             />
-            <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, marginTop: 10, fontSize: 12, opacity: 0.8 }}>
+            <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, marginTop: 10, fontSize: 12, opacity: 0.8, cursor: 'pointer' }}>
               <input type="checkbox" checked={clearApiKey} onChange={(e) => setClearApiKey(e.target.checked)} />
               清空 API Key
             </label>
@@ -196,16 +212,16 @@ export function AiSettingsPage() {
       ) : null}
     </div>
   )
-}
+})
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+const Field = memo(function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div>
       <div style={styles.label}>{label}</div>
       {children}
     </div>
   )
-}
+})
 
 const styles: Record<string, React.CSSProperties> = {
   wrap: {
@@ -224,15 +240,6 @@ const styles: Record<string, React.CSSProperties> = {
     background: 'rgba(255,255,255,0.04)',
     marginBottom: 12,
   },
-  card: {
-    padding: 16,
-    borderRadius: 12,
-    border: '1px solid rgba(255,255,255,0.08)',
-    background: 'rgba(255,255,255,0.03)',
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 12,
-  },
   grid2: {
     display: 'grid',
     gridTemplateColumns: '1fr 1fr',
@@ -250,32 +257,6 @@ const styles: Record<string, React.CSSProperties> = {
     textTransform: 'uppercase',
     letterSpacing: 0.5,
     marginBottom: 6,
-  },
-  input: {
-    width: '100%',
-    borderRadius: 10,
-    border: '1px solid rgba(255,255,255,0.10)',
-    background: 'rgba(0,0,0,0.18)',
-    color: '#e5e7eb',
-    padding: '9px 10px',
-    outline: 'none',
-    boxSizing: 'border-box',
-  },
-  btn: {
-    borderRadius: 10,
-    border: '1px solid rgba(255,255,255,0.14)',
-    background: 'rgba(255,255,255,0.04)',
-    color: '#e5e7eb',
-    padding: '8px 10px',
-    cursor: 'pointer',
-  },
-  btnPrimary: {
-    borderRadius: 10,
-    border: '1px solid rgba(99,102,241,0.6)',
-    background: 'rgba(99,102,241,0.35)',
-    color: '#fff',
-    padding: '8px 10px',
-    cursor: 'pointer',
   },
 }
 

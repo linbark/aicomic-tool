@@ -1,13 +1,14 @@
 import { NavLink } from 'react-router-dom'
+import { memo } from 'react'
 
 type Props = {
   children: React.ReactNode
 }
 
-export function AppLayout({ children }: Props) {
+export const AppLayout = memo(function AppLayout({ children }: Props) {
   return (
     <div style={styles.shell}>
-      <aside style={styles.sidebar}>
+      <aside style={styles.sidebar} role="navigation" aria-label="主导航">
         <div style={styles.brand}>星晴</div>
         <nav style={styles.nav}>
           <NavItem to="/script" label="剧本" />
@@ -17,12 +18,12 @@ export function AppLayout({ children }: Props) {
           <NavItem to="/settings/prompts" label="Prompt 模板" />
         </nav>
       </aside>
-      <main style={styles.main}>{children}</main>
+      <main style={styles.main} role="main">{children}</main>
     </div>
   )
-}
+})
 
-function NavItem({ to, label }: { to: string; label: string }) {
+const NavItem = memo(function NavItem({ to, label }: { to: string; label: string }) {
   return (
     <NavLink
       to={to}
@@ -30,11 +31,28 @@ function NavItem({ to, label }: { to: string; label: string }) {
         ...styles.navItem,
         ...(isActive ? styles.navItemActive : null),
       })}
+      onMouseEnter={(e) => {
+        if (!e.currentTarget.classList.contains('active')) {
+          e.currentTarget.style.background = 'rgba(255,255,255,0.06)'
+        }
+      }}
+      onMouseLeave={(e) => {
+        if (!e.currentTarget.classList.contains('active')) {
+          e.currentTarget.style.background = 'transparent'
+        }
+      }}
+      onFocus={(e) => {
+        e.currentTarget.style.outline = '2px solid rgba(99,102,241,0.6)'
+        e.currentTarget.style.outlineOffset = '2px'
+      }}
+      onBlur={(e) => {
+        e.currentTarget.style.outline = 'none'
+      }}
     >
       {label}
     </NavLink>
   )
-}
+})
 
 const styles: Record<string, React.CSSProperties> = {
   shell: {
@@ -69,6 +87,9 @@ const styles: Record<string, React.CSSProperties> = {
     textDecoration: 'none',
     color: '#e5e7eb',
     background: 'transparent',
+    cursor: 'pointer',
+    transition: 'all 200ms ease',
+    display: 'block',
   },
   navItemActive: {
     background: 'rgba(99,102,241,0.25)',

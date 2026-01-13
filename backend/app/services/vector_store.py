@@ -85,7 +85,15 @@ class VectorStore:
             self.client.get_collection(self.collection_name)
         except Exception:
             # Collection 不存在，创建它
+            # 注意：get_dimension() 可能会触发模型首次加载，这可能很耗时
+            import time
+            import logging
+            logger = logging.getLogger(__name__)
+            t_start = time.time()
+            logger.info(f"[VectorStore] Collection '{self.collection_name}' not found, creating it. Getting embedding dimension...")
             embedding_dim = self.embedding_provider.get_dimension()
+            t_dim = time.time()
+            logger.info(f"[VectorStore] Got embedding dimension: {embedding_dim}, took {t_dim - t_start:.2f}s")
             self.client.create_collection(
                 collection_name=self.collection_name,
                 vectors_config=VectorParams(
@@ -93,6 +101,8 @@ class VectorStore:
                     distance=Distance.COSINE,
                 ),
             )
+            t_end = time.time()
+            logger.info(f"[VectorStore] Created collection '{self.collection_name}', total time: {t_end - t_start:.2f}s")
 
     def upsert(
         self,

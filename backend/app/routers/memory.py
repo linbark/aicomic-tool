@@ -439,7 +439,9 @@ async def extract_changeset(req: ExtractChangeSetRequest, db: Session = Depends(
     base_url = str(raw.get("base_url") or "https://api.deepseek.com").strip()
     model = str(raw.get("model") or "deepseek-chat").strip()
     temperature = float(raw.get("temperature") or 0.2)
-    max_tokens = int(raw.get("max_tokens") or 4096)
+    max_tokens_val = raw.get("max_tokens")
+    # 如果配置中没有 max_tokens 或为 0，则返回 None（不限制）
+    max_tokens = None if max_tokens_val is None or max_tokens_val == 0 else int(max_tokens_val)
     timeout_seconds = float(raw.get("timeout_seconds") or 120.0)
 
     llm_settings = LlmChatSettings(
@@ -447,7 +449,7 @@ async def extract_changeset(req: ExtractChangeSetRequest, db: Session = Depends(
         api_key=api_key,
         model=model,
         temperature=min(temperature, 0.3),
-        max_tokens=max(max_tokens, 2048),
+        max_tokens=max_tokens,  # None 表示不限制
         timeout_seconds=timeout_seconds,
     )
 

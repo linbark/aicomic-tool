@@ -607,16 +607,6 @@ export function ScriptPage() {
     fetchedLogIdsRef.current.clear()
     setChatPollPaused(false)
     try {
-      // 1. 计算当前上下文文本 (Current Input)
-      let currentInputText = ''
-      if (selected.kind === 'episode') {
-        currentInputText = episodeText
-      } else if (selected.kind === 'scene') {
-        currentInputText = sceneText
-      } else if (selected.kind === 'shot' && shotDraft) {
-        // 如果是镜头，可以将动作和对白拼起来
-        currentInputText = `[Title] ${shotDraft.title}\n[Action] ${shotDraft.action_text || ''}\n[Dialogue] ${shotDraft.dialogue || ''}`
-      }
       const res = await api.aiChatActAsync({
         project_id: projectId,
         episode_id: selected.episodeId,
@@ -625,7 +615,6 @@ export function ScriptPage() {
         debug: chatDebug,
         ui_context: {
           master_script: episodeText,
-          // current_input: currentInputText,
           episode_meta: {
             id: selectedEpisode?.id,
             title: selectedEpisode?.title,

@@ -16,6 +16,7 @@ from typing import List, Optional
 
 from ..workflows.memory_schemas import EvidenceRecordPayload, EvidenceSpan
 
+from ..routers.ai_helpers import log_ui
 
 def _split_by_blank_lines(text: str) -> List[str]:
     lines = (text or "").splitlines()
@@ -52,6 +53,7 @@ def _chunk_by_chars(s: str, max_chars: int) -> List[str]:
 def chunk_text_to_evidences(
     *,
     project_id: int,
+    run_id: str,
     text: str,
     episode_id: Optional[int] = None,
     scene_id: Optional[int] = None,
@@ -70,9 +72,12 @@ def chunk_text_to_evidences(
     evidences: List[EvidenceRecordPayload] = []
 
     for p_idx, para in enumerate(paras):
+        log_ui(project_id, run_id, f"Chunking Text: {para}", "INFO")
         chunks = _chunk_by_chars(para, max_quote_chars)
         for c_idx, chunk in enumerate(chunks):
+            log_ui(project_id, run_id, f"Chunking Text Chunk: {chunk}", "INFO")
             span = EvidenceSpan(paragraph_index=int(p_idx), sentence_index=None, start_offset=None, end_offset=None)
+            log_ui(project_id, run_id, f"Chunking Text Span: {span}", "INFO")
             # 如果同段落被切成多块，用 tags 标注 chunk 序号（便于回溯）
             extra_tags = list(tags)
             if len(chunks) > 1:

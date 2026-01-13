@@ -33,6 +33,18 @@ from ..workflows.memory_schemas import (
     SourceKind,
 )
 
+import logging
+
+log_dir = os.path.join(os.path.dirname(__file__), "..", "logs")
+os.makedirs(log_dir, exist_ok=True)
+log_file = os.path.join(log_dir, "memory_store.log")
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+handler = logging.FileHandler(log_file)
+handler.setLevel(logging.DEBUG)
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+handler.setFormatter(formatter)
+logger.addHandler(handler)
 
 class MemoryStore:
     """
@@ -54,14 +66,32 @@ class MemoryStore:
             embedding_provider: Embedding 提供者（None 则使用默认单例）
             db_path: SQLite 数据库路径（None 则使用默认路径）
         """
+        import time
+        
+        t_start = time.time()
+        logger.info("[MemoryStore.__init__] Starting initialization...")
+        
+        t_vs_start = time.time()
+        logger.info("[MemoryStore.__init__] Getting vector_store...")
         self.vector_store = vector_store or get_vector_store()
+        t_vs_end = time.time()
+        logger.info(f"[MemoryStore.__init__] Got vector_store in {t_vs_end - t_vs_start:.2f}s")
+        
         self.embedding_provider = embedding_provider or self.vector_store.embedding_provider
 
         # SQLite 数据库（用于 episodic 记忆的结构化存储）
         if db_path is None:
             db_path = os.path.join(app_data_dir(), "memory_store.db")
         self.db_path = db_path
+        
+        t_db_start = time.time()
+        logger.info("[MemoryStore.__init__] Initializing database...")
         self._init_db()
+        t_db_end = time.time()
+        logger.info(f"[MemoryStore.__init__] Database initialized in {t_db_end - t_db_start:.2f}s")
+        
+        t_end = time.time()
+        logger.info(f"[MemoryStore.__init__] Initialization completed in {t_end - t_start:.2f}s")
 
     def _init_db(self) -> None:
         """初始化 SQLite 数据库表结构"""
@@ -1938,12 +1968,19 @@ def get_memory_store(
     db_path: Optional[str] = None,
 ) -> MemoryStore:
     """获取全局记忆存储（单例模式）"""
+    
     global _global_memory_store
     if _global_memory_store is None:
+        t_start = time.time()
+        logger.info("[MemoryStore] Creating new MemoryStore instance...")
         _global_memory_store = MemoryStore(
             vector_store=vector_store,
             embedding_provider=embedding_provider,
             db_path=db_path,
         )
+        t_end = time.time()
+        logger.info(f"[MemoryStore] MemoryStore instance created in {t_end - t_start:.2f}s")
+    else:
+        logger.debug("[MemoryStore] Returning existing MemoryStore instance")
     return _global_memory_store
 

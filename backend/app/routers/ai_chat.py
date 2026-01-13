@@ -294,7 +294,7 @@ async def _chat_act_core(
             api_key=raw.get("api_key") or "",
             model=settings.model,
             temperature=min(float(settings.temperature or 0.2), 0.3),
-            max_tokens=max(int(settings.max_tokens or 0), 2048),
+            max_tokens=settings.max_tokens,  # None 表示不限制
             timeout_seconds=settings.timeout_seconds,
         ),
         messages=[
@@ -535,10 +535,21 @@ async def _chat_act_core(
                 from ..services.entity_resolver import resolve_changeset_entities_with_trace
                 from ..services.evidence_ingestor import chunk_text_to_evidences
                 from ..services.memory_store import get_memory_store
-
-                store = get_memory_store()
-                base_text = ""
+                logger.info(f"[AI][chat_act] Memory Extract Changeset Artifacts: {artifacts}")
                 log_ui(project_id_pk, run_id, f"Memory Extract Changeset Artifacts: {artifacts}", "INFO")
+                
+                # 记录 get_memory_store() 调用前后的时间，用于诊断性能问题
+                import time
+                t_start = time.time()
+                logger.info(f"[AI][chat_act] About to call get_memory_store() at {t_start}")
+                log_ui(project_id_pk, run_id, f"About to call get_memory_store()", "INFO")
+                store = get_memory_store()
+                t_end = time.time()
+                elapsed = t_end - t_start
+                logger.info(f"[AI][chat_act] Memory Extract Changeset Store: {store}, elapsed={elapsed:.2f}s")
+                log_ui(project_id_pk, run_id, f"Memory Extract Changeset Store initialized in {elapsed:.2f}s", "INFO")
+                base_text = ""
+                
                 if artifacts.get("script_fountain"):
                     base_text += f"### script_fountain\n{artifacts.get('script_fountain')}\n\n"
                 if artifacts.get("beat_sheet"):
@@ -553,9 +564,11 @@ async def _chat_act_core(
                         log_ui(project_id_pk, run_id, f"Memory Extract Changeset Series Bible Error: {e}", "ERROR")
                 if not base_text:
                     base_text = master_script_preview or message
+                logger.info(f"[AI][chat_act] Memory Extract Changeset Base Text: {base_text}")
                 log_ui(project_id_pk, run_id, f"Memory Extract Changeset Base Text: {base_text}", "INFO")
                 evidences = chunk_text_to_evidences(
                     project_id=project_id_pk,
+                    run_id=run_id,
                     episode_id=int(req.episode_id) if req.episode_id else None,
                     text=base_text,
                     max_quote_chars=600,
@@ -576,7 +589,7 @@ async def _chat_act_core(
                         api_key=raw.get("api_key") or "",
                         model=settings.model,
                         temperature=min(float(settings.temperature or 0.2), 0.3),
-                        max_tokens=max(int(settings.max_tokens or 0), 4096),
+                        max_tokens=settings.max_tokens,  # None 表示不限制
                         timeout_seconds=settings.timeout_seconds,
                     ),
                     project_id=project_id_pk,

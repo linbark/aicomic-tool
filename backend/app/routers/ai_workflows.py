@@ -66,8 +66,7 @@ async def workflow_script(req: WorkflowScriptRequest, db: Session = Depends(get_
 
     run_id = new_run_id()
     project_id = resolve_project_pk(db, req.project_id)
-    # workflow 输出通常更长，给一个最低 max_tokens，避免中途截断
-    effective_max_tokens = max(int(settings.max_tokens or 0), 4096)
+    # 不限制 max_tokens，让 API 自己决定输出长度
 
     # 读取已有 series_bible（可为空）
     existing_bible = _context_store.get_series_bible(project_id=project_id, version="v1")
@@ -135,7 +134,7 @@ async def workflow_script(req: WorkflowScriptRequest, db: Session = Depends(get_
             api_key=raw.get("api_key") or "",
             model=settings.model,
             temperature=settings.temperature,
-            max_tokens=effective_max_tokens,
+            max_tokens=settings.max_tokens,  # None 表示不限制
             timeout_seconds=settings.timeout_seconds,
         ),
         messages=[
@@ -153,7 +152,7 @@ async def workflow_script(req: WorkflowScriptRequest, db: Session = Depends(get_
                 api_key=raw.get("api_key") or "",
                 model=settings.model,
                 temperature=settings.temperature,
-                max_tokens=effective_max_tokens,
+                max_tokens=settings.max_tokens,  # None 表示不限制
                 timeout_seconds=settings.timeout_seconds,
             ),
             system_prompt=architect_system,
@@ -179,7 +178,7 @@ async def workflow_script(req: WorkflowScriptRequest, db: Session = Depends(get_
                 api_key=raw.get("api_key") or "",
                 model=settings.model,
                 temperature=settings.temperature,
-                max_tokens=effective_max_tokens,
+                max_tokens=settings.max_tokens,  # None 表示不限制
                 timeout_seconds=settings.timeout_seconds,
             ),
             system_prompt=architect_system,
@@ -242,7 +241,7 @@ async def workflow_script(req: WorkflowScriptRequest, db: Session = Depends(get_
             api_key=raw.get("api_key") or "",
             model=settings.model,
             temperature=settings.temperature,
-            max_tokens=effective_max_tokens,
+            max_tokens=settings.max_tokens,  # None 表示不限制
             timeout_seconds=settings.timeout_seconds,
         ),
         messages=[
@@ -259,7 +258,7 @@ async def workflow_script(req: WorkflowScriptRequest, db: Session = Depends(get_
                 api_key=raw.get("api_key") or "",
                 model=settings.model,
                 temperature=settings.temperature,
-                max_tokens=effective_max_tokens,
+                max_tokens=settings.max_tokens,  # None 表示不限制
                 timeout_seconds=settings.timeout_seconds,
             ),
             system_prompt=writer_system,
@@ -343,7 +342,7 @@ async def workflow_script(req: WorkflowScriptRequest, db: Session = Depends(get_
                 api_key=raw.get("api_key") or "",
                 model=settings.model,
                 temperature=settings.temperature,
-                max_tokens=effective_max_tokens,
+                max_tokens=settings.max_tokens,  # None 表示不限制
                 timeout_seconds=settings.timeout_seconds,
             ),
             messages=[
@@ -367,7 +366,7 @@ async def workflow_script(req: WorkflowScriptRequest, db: Session = Depends(get_
                         api_key=raw.get("api_key") or "",
                         model=settings.model,
                         temperature=settings.temperature,
-                        max_tokens=effective_max_tokens,
+                        max_tokens=settings.max_tokens,  # None 表示不限制
                         timeout_seconds=settings.timeout_seconds,
                     ),
                     system_prompt=qc_system,
@@ -414,7 +413,7 @@ async def workflow_script(req: WorkflowScriptRequest, db: Session = Depends(get_
                 api_key=raw.get("api_key") or "",
                 model=settings.model,
                 temperature=settings.temperature,
-                max_tokens=effective_max_tokens,
+                max_tokens=settings.max_tokens,  # None 表示不限制
                 timeout_seconds=settings.timeout_seconds,
             ),
             messages=[
