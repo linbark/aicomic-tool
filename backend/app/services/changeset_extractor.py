@@ -457,7 +457,7 @@ async def extract_changeset_v0_with_llm_with_trace(
     story_order_base: str,
     evidences: List[Dict[str, Any]],
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    
+    logger.info(f"[extract_changeset] Extracting changeset with LLM: project_id={project_id}, episode_id={episode_id}, story_order_base={story_order_base}, evidence_count={len(evidences)}, llm_settings={llm_settings}")
     if not evidences:
         raise HTTPException(status_code=400, detail="evidences 为空，无法抽取")
 
@@ -514,7 +514,7 @@ async def extract_changeset_v0_with_llm_with_trace(
         logger.error(f"[extract_changeset] Full LLM response:\n{content}")
         raise HTTPException(
             status_code=502, 
-            detail=f"LLM 返回了数组而不是 JSON 对象。LLM 可能误解了任务，只返回了部分数据（如 evidence_ids 列表）。请检查 prompt 和 LLM 响应。返回的数组长度: {len(parsed)}"
+            detail=f"LLM 返回了数组而不是 JSON 对象。LLM 可能误解了任务，只返回了部分数据（如 evidence_ids 列表）。请检查 prompt 和 LLM 响应。返回的数组长度: {len(parsed)},  配置: {llm_settings}"
         )
     if not isinstance(parsed, dict):
         logger.error(f"[extract_changeset] Parsed result is not a dict: type={type(parsed)}, value={str(parsed)[:500]}")
