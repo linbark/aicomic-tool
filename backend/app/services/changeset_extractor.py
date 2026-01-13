@@ -22,7 +22,21 @@ from fastapi import HTTPException
 
 from .llm_client import DeepSeekChatClient, LlmChatSettings
 from .json_extract import extract_json_any
+import logging
+import os
 
+
+log_dir = os.path.join(os.path.dirname(__file__), "..", "logs")
+os.makedirs(log_dir, exist_ok=True)
+log_file = os.path.join(log_dir, "ai_chat.log")
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+handler = logging.FileHandler(log_file)
+handler.setLevel(logging.DEBUG)
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+handler.setFormatter(formatter)
+logger.addHandler(handler)
 
 def _slugify_name(name: str) -> str:
     n = (name or "").strip()
@@ -58,15 +72,22 @@ def _preview(text: str, limit: int = 1200) -> str:
 
 def _build_system_prompt() -> str:
     # 这里不用你 workflow 那套 XML system prompt，先走最小可用
-    return """你是一位“小说→漫剧记忆抽取器（Memory Extractor）”。
+    return """你是一位"小说→漫剧记忆抽取器（Memory Extractor）"。
 
 你的任务：基于输入的 evidence 列表，为本章生成一个 changeset.v0 的 JSON payload，用于写入记忆系统。
 
+【关键】输出格式要求：
+- 必须输出一个完整的 JSON 对象（JSON object），以 { 开头，以 } 结尾
+- 不要输出数组（array），不要只输出 evidence_ids 列表
+- 不要使用 Markdown 代码块（不要用 ```json 包裹）
+- 不要添加任何解释文字，只输出纯 JSON
+- 必须包含 output_skeleton 中定义的所有字段（entities、snapshots、events、state_changes 等）
+
 硬性输出约束（必须遵守）：
-1) 只输出一个 JSON object（不要 Markdown，不要解释）。
+1) 只输出一个 JSON object（不要 Markdown，不要解释，不要数组）。
 2) schema_version 必须是 "changeset.v0"。
 3) 你必须只使用输入 evidence 中明确出现的信息；不允许凭空编造事实。
-4) Evidence-first：entities/snapshots/time_constraints/time_blocks/conflicts 里所有“主张”都必须引用 evidence_ids（来自输入 evidence_id）。
+4) Evidence-first：entities/snapshots/time_constraints/time_blocks/conflicts 里所有"主张"都必须引用 evidence_ids（来自输入 evidence_id）。
 5) entity_type 仅允许：character | location | organization | prop
 6) snapshots.fields 必须是一个 JSON object，顶层仅使用这些命名空间（可以为空）：visual/personality/goals/relations/items/injuries
 7) events/state_changes/time_constraints 也必须 Evidence-first：每条都要引用 evidence_ids（来自输入 evidence_id）
@@ -436,9 +457,12 @@ async def extract_changeset_v0_with_llm_with_trace(
     story_order_base: str,
     evidences: List[Dict[str, Any]],
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    
     if not evidences:
         raise HTTPException(status_code=400, detail="evidences 为空，无法抽取")
 
+    logger.info(f"[extract_changeset] Starting extraction: project_id={project_id}, episode_id={episode_id}, story_order_base={story_order_base}, evidence_count={len(evidences)}")
+    
     client = DeepSeekChatClient()
     system_prompt = _build_system_prompt()
     user_payload = _build_user_payload(
@@ -447,6 +471,16 @@ async def extract_changeset_v0_with_llm_with_trace(
         story_order_base=story_order_base,
         evidences=evidences,
     )
+    
+    # 记录请求详情
+    logger.info(f"[extract_changeset] System prompt length={len(system_prompt)}, preview={system_prompt[:300]}...")
+    logger.info(f"[extract_changeset] User payload length={len(user_payload)}")
+    logger.info(f"[extract_changeset] User payload preview (first 2000 chars):\n{user_payload[:2000]}")
+    
+    # 记录 LLM 设置
+    logger.info(f"[extract_changeset] LLM settings: model={llm_settings.model}, max_tokens={llm_settings.max_tokens}, temperature={llm_settings.temperature}, timeout={llm_settings.timeout_seconds}")
+    
+    logger.info(f"[extract_changeset] Calling LLM...")
     content = await client.chat(
         settings=llm_settings,
         messages=[
@@ -454,9 +488,41 @@ async def extract_changeset_v0_with_llm_with_trace(
             {"role": "user", "content": user_payload},
         ],
     )
-    parsed = extract_json_any(content)
+    logger.info(f"[extract_changeset] LLM response received, length={len(content) if content else 0}")
+    # 记录 LLM 返回的原始内容
+    logger.info(f"[extract_changeset] LLM raw response preview (first 3000 chars):\n{content[:3000] if content else 'None'}")
+    if content and len(content) > 3000:
+        logger.info(f"[extract_changeset] LLM raw response (last 1000 chars):\n...{content[-1000:]}")
+    
+    try:
+        logger.info(f"[extract_changeset] Attempting to extract JSON from response...")
+        parsed = extract_json_any(content)
+        logger.info(f"[extract_changeset] JSON extraction successful, type={type(parsed)}")
+    except Exception as e:
+        logger.error(f"[extract_changeset] JSON extraction failed: {type(e).__name__}: {e}")
+        logger.error(f"[extract_changeset] Full content length={len(content) if content else 0}")
+        logger.error(f"[extract_changeset] Content preview (first 2000 chars): {content[:2000] if content else 'None'}")
+        if content and len(content) > 2000:
+            logger.error(f"[extract_changeset] Content middle (chars 2000-4000): {content[2000:4000]}")
+            logger.error(f"[extract_changeset] Content end (last 1000 chars): {content[-1000:]}")
+        raise HTTPException(status_code=502, detail=f"LLM 输出无法解析为 JSON: {type(e).__name__}: {str(e)}")
+    
+    # 检查解析结果类型
+    if isinstance(parsed, list):
+        logger.error(f"[extract_changeset] Parsed result is a list (length={len(parsed)}), expected dict")
+        logger.error(f"[extract_changeset] List content preview: {parsed[:20] if len(parsed) > 20 else parsed}")
+        logger.error(f"[extract_changeset] Full LLM response:\n{content}")
+        raise HTTPException(
+            status_code=502, 
+            detail=f"LLM 返回了数组而不是 JSON 对象。LLM 可能误解了任务，只返回了部分数据（如 evidence_ids 列表）。请检查 prompt 和 LLM 响应。返回的数组长度: {len(parsed)}"
+        )
     if not isinstance(parsed, dict):
-        raise HTTPException(status_code=502, detail="LLM 输出无法解析为 JSON object（changeset.v0）")
+        logger.error(f"[extract_changeset] Parsed result is not a dict: type={type(parsed)}, value={str(parsed)[:500]}")
+        logger.error(f"[extract_changeset] Full LLM response:\n{content}")
+        raise HTTPException(
+            status_code=502, 
+            detail=f"LLM 输出无法解析为 JSON object（changeset.v0），实际类型: {type(parsed).__name__}"
+        )
 
     evidence_ids = [str(x.get("evidence_id")) for x in evidences if isinstance(x, dict) and x.get("evidence_id")]
     normalized, _ = _validate_and_normalize_payload(

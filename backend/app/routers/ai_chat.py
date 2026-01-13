@@ -400,18 +400,35 @@ async def _chat_act_core(
         in_text = (s.get("input_text") or "").strip()
         why = (s.get("why") or "").strip()
 
-        if not in_text:
-            if ak in ("outline_optimize",) and isinstance(artifacts.get("outline"), str) and artifacts.get("outline").strip():
-                in_text = artifacts["outline"]
-            elif ak in ("script_optimize",) and isinstance(artifacts.get("script"), str) and artifacts.get("script").strip():
-                in_text = artifacts["script"]
-            elif ak in ("generate_script",) and isinstance(artifacts.get("outline"), str) and artifacts.get("outline").strip():
-                in_text = artifacts["outline"]
-            else:
-                in_text = selected_input_preview or master_script_preview or message
+        # 对于优化类操作，优先使用前一步的 artifacts 输出（如果存在）
+        # 因为优化操作需要的是前一步的输出，而不是用户意图
+        logger.info(f"[AI][chat_act] Step {idx} Before input processing: ak={ak}, input_text={_trim_preview(in_text, 100)}, artifacts.keys()={list(artifacts.keys())}")
+        log_ui(project_id_pk, run_id, f"Step {idx} Before input processing: ak={ak}, artifacts.keys()={list(artifacts.keys())}", "INFO")
+        
+        if ak == "outline_optimize" and isinstance(artifacts.get("outline"), str) and artifacts.get("outline").strip():
+            logger.info(f"[AI][chat_act] Step {idx} Using artifacts['outline'] (length={len(artifacts['outline'])})")
+            log_ui(project_id_pk, run_id, f"Step {idx} Using artifacts['outline'] (length={len(artifacts['outline'])})", "INFO")
+            in_text = artifacts["outline"]
+        elif ak == "script_optimize" and isinstance(artifacts.get("script"), str) and artifacts.get("script").strip():
+            logger.info(f"[AI][chat_act] Step {idx} Using artifacts['script'] (length={len(artifacts['script'])})")
+            log_ui(project_id_pk, run_id, f"Step {idx} Using artifacts['script'] (length={len(artifacts['script'])})", "INFO")
+            in_text = artifacts["script"]
+        elif ak == "generate_script" and isinstance(artifacts.get("outline"), str) and artifacts.get("outline").strip():
+            logger.info(f"[AI][chat_act] Step {idx} Using artifacts['outline'] for generate_script (length={len(artifacts['outline'])})")
+            log_ui(project_id_pk, run_id, f"Step {idx} Using artifacts['outline'] for generate_script (length={len(artifacts['outline'])})", "INFO")
+            in_text = artifacts["outline"]
+        elif not in_text:
+            # 如果 input_text 为空且没有可用的 artifacts，使用 UI 上下文或用户消息
+            logger.info(f"[AI][chat_act] Step {idx} No artifacts available, using UI context or message")
+            log_ui(project_id_pk, run_id, f"Step {idx} No artifacts available, using UI context or message", "INFO")
+            in_text = selected_input_preview or master_script_preview or message
 
+        # 对于优化类操作，将用户意图追加到输入文本后面
         if ak in ("outline_optimize", "script_optimize"):
             in_text = f"{in_text}\n\n[用户意图]\n{message}"
+        
+        logger.info(f"[AI][chat_act] Step {idx} After input processing: in_text length={len(in_text)}, preview={_trim_preview(in_text, 200)}")
+        log_ui(project_id_pk, run_id, f"Step {idx} After input processing: in_text length={len(in_text)}", "INFO")
 
         if emit_stages and run_id:
             _context_store.snapshot_stage(
@@ -430,10 +447,18 @@ async def _chat_act_core(
 
         t0 = _now_ms()
         out_text = ""
+        
+        logger.info(f"[AI][chat_act] Step {idx} About to call _do_step() for action_key={ak}")
+        log_ui(project_id_pk, run_id, f"Step {idx} About to call _do_step() for action_key={ak}", "INFO")
 
         async def _do_step() -> str:
             nonlocal out_text
+            logger.info(f"[AI][chat_act] _do_step() called for action_key={ak}")
+            log_ui(project_id_pk, run_id, f"_do_step() called for action_key={ak}", "INFO")
+            
             if ak == "outline_generate":
+                logger.info(f"[AI][chat_act] Calling outline_generate with text length={len(in_text)}")
+                log_ui(project_id_pk, run_id, f"Calling outline_generate with text length={len(in_text)}", "INFO")
                 resp = await outline_generate(OutlineGenerateRequest(text=in_text, project_id=project_id_pk))
                 out_text = (resp.text or "").strip()
                 artifacts["outline"] = out_text
@@ -443,14 +468,23 @@ async def _chat_act_core(
                 logger.info(f"[AI][chat_act] Outline Generate Response artifacts: {artifacts}")
                 return out_text
             if ak == "outline_optimize":
-                resp = await outline_optimize(OutlineOptimizeRequest(text=in_text, project_id=project_id_pk))
-                out_text = (resp.text or "").strip()
-                artifacts["outline"] = out_text
-                log_ui(project_id_pk, run_id, f"Outline Optimize Response: {out_text}", "INFO")
-                log_ui(project_id_pk, run_id, f"Outline Optimize Response artifacts: {artifacts}", "INFO")
-                logger.info(f"[AI][chat_act] Outline Optimize Response: {out_text}")
-                logger.info(f"[AI][chat_act] Outline Optimize Response artifacts: {artifacts}")
-                return out_text
+                logger.info(f"[AI][chat_act] Calling outline_optimize with text length={len(in_text)}, project_id={project_id_pk}")
+                log_ui(project_id_pk, run_id, f"Calling outline_optimize with text length={len(in_text)}, project_id={project_id_pk}", "INFO")
+                try:
+                    resp = await outline_optimize(OutlineOptimizeRequest(text=in_text, project_id=project_id_pk))
+                    logger.info(f"[AI][chat_act] outline_optimize returned, response length={len(resp.text or '')}")
+                    log_ui(project_id_pk, run_id, f"outline_optimize returned, response length={len(resp.text or '')}", "INFO")
+                    out_text = (resp.text or "").strip()
+                    artifacts["outline"] = out_text
+                    log_ui(project_id_pk, run_id, f"Outline Optimize Response: {out_text}", "INFO")
+                    log_ui(project_id_pk, run_id, f"Outline Optimize Response artifacts: {artifacts}", "INFO")
+                    logger.info(f"[AI][chat_act] Outline Optimize Response: {out_text}")
+                    logger.info(f"[AI][chat_act] Outline Optimize Response artifacts: {artifacts}")
+                    return out_text
+                except Exception as e:
+                    logger.error(f"[AI][chat_act] outline_optimize raised exception: {type(e).__name__}: {e}")
+                    log_ui(project_id_pk, run_id, f"outline_optimize raised exception: {type(e).__name__}: {e}", "ERROR")
+                    raise
             if ak == "generate_script":
                 resp = await generate_script(ScriptGenerateRequest(text=in_text, project_id=project_id_pk))
                 out_text = (resp.text or "").strip()
@@ -604,7 +638,11 @@ async def _chat_act_core(
         try:
             # 执行步骤（带超时控制）
             timeout_sec = _step_timeout_seconds(ak)
+            logger.info(f"[AI][chat_act] Step {idx} Starting execution with timeout={timeout_sec}s")
+            log_ui(project_id_pk, run_id, f"Step {idx} Starting execution with timeout={timeout_sec}s", "INFO")
             out_text = await asyncio.wait_for(_do_step(), timeout=timeout_sec)
+            logger.info(f"[AI][chat_act] Step {idx} Execution completed successfully")
+            log_ui(project_id_pk, run_id, f"Step {idx} Execution completed successfully", "INFO")
         
         # [新增] 1. 专门捕获超时异常
         except asyncio.TimeoutError as e:
