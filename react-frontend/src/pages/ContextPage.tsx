@@ -55,7 +55,7 @@ export function ContextPage() {
     let parsed: Record<string, unknown>
     try {
       parsed = JSON.parse(outlineJson)
-    } catch (e) {
+    } catch {
       setOutlineError('JSON 格式无效')
       return
     }
@@ -144,7 +144,7 @@ export function ContextPage() {
     let parsed: Record<string, unknown>
     try {
       parsed = JSON.parse(seriesBibleJson)
-    } catch (e) {
+    } catch {
       setSeriesBibleError('JSON 格式无效')
       return
     }
@@ -200,7 +200,7 @@ export function ContextPage() {
     let parsed: Record<string, unknown>
     try {
       parsed = JSON.parse(visualDnaJson)
-    } catch (e) {
+    } catch {
       setVisualDnaError('JSON 格式无效')
       return
     }
@@ -523,4 +523,3 @@ const styles: Record<string, React.CSSProperties> = {
   },
   error: { color: '#f87171', fontSize: 12, marginBottom: 8 },
 }
-

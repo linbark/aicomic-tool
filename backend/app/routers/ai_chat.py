@@ -10,7 +10,6 @@ from sqlalchemy.orm import Session
 
 from .. import models
 from ..database import SessionLocal, get_db
-from ..services.context_store import new_run_id
 from ..services.json_extract import extract_json_any
 from ..services.llm_client import LlmChatSettings
 from ..services.project_lookup import resolve_project_pk
@@ -66,6 +65,7 @@ class ChatActRequest(BaseModel):
     message: str
     ui_context: Optional[Dict[str, Any]] = None
     debug: bool = False
+    run_id: str
 
 
 class ChatPlanStep(BaseModel):
@@ -100,6 +100,7 @@ class ChatMemoryTraceItem(BaseModel):
 
 
 class ChatActResponse(BaseModel):
+    run_id: Optional[str] = None
     assistant_message: str
     created_run: Optional[Dict[str, Any]] = None
     # 非 debug：也可返回轻量卡片（用于前端 inline 审阅/确认）
@@ -120,6 +121,17 @@ def _trim_preview(text: str, limit: int = 300) -> str:
     t = (text or "").strip()
     return t[:limit] + ("..." if len(t) > limit else "")
 
+def _log_chat_event(project_id: int, run_id: str, stage: str, summary: str, level: str = "INFO", data: Optional[Dict[str, Any]] = None):
+    payload: Dict[str, Any] = {
+        "stage": str(stage),
+        "summary": str(summary),
+        "run_id": str(run_id),
+        "project_id": int(project_id),
+        "data": data or {},
+        "at_ms": _now_ms(),
+    }
+    log_ui(payload, level)
+
 
 class ChatActAsyncResponse(BaseModel):
     run_id: str
@@ -138,6 +150,17 @@ async def _chat_act_core(
     - emit_stages=True 时，把 plan/step start/end/final 写入 runs-files stages，供前端轮询展示“执行步骤”
     """
     project_id_pk = resolve_project_pk(db, req.project_id)
+    run_id = (str(run_id or "") or str(req.run_id or "")).strip()
+    if not run_id:
+        raise HTTPException(status_code=400, detail="run_id 不能为空")
+    _log_chat_event(
+        project_id_pk,
+        run_id,
+        "chat.core.enter",
+        "进入 chat 核心流程",
+        "INFO",
+        data={"episode_id": req.episode_id, "current_action_key": req.current_action_key},
+    )
     if emit_stages and run_id:
         _context_store.snapshot_stage(
             project_id=project_id_pk, run_id=run_id, stage_name="chat.status", data={"status": "running", "at_ms": _now_ms()}
@@ -147,14 +170,15 @@ async def _chat_act_core(
     settings = _mask_settings(raw)
     if not settings.has_api_key:
         logger.error(f"[AI][chat_act] AI API Key 未配置")
-        log_ui(project_id_pk, run_id, "AI API Key 未配置", "ERROR")
+        _log_chat_event(project_id_pk, run_id, "chat.settings.api_key", "AI API Key 未配置", "ERROR")
         raise HTTPException(status_code=400, detail="AI API Key 未配置")
 
     message = (req.message or "").strip()
     if not message:
         logger.error(f"[AI][chat_act] message 不能为空")
-        log_ui(project_id_pk, run_id, "message 不能为空", "ERROR")
+        _log_chat_event(project_id_pk, str(run_id or ""), "chat.validate.message", "message 不能为空", "ERROR")
         raise HTTPException(status_code=400, detail="message 不能为空")
+    _log_chat_event(project_id_pk, str(run_id or ""), "chat.validate.ok", "输入校验通过", "INFO", data={"message_len": len(message)})
 
     # -------- Intent clarification (rule-first) --------
     def _looks_ambiguous(msg: str) -> bool:
@@ -168,8 +192,9 @@ async def _chat_act_core(
 
     if _looks_ambiguous(message):
         logger.error(f"[AI][chat_act] message 模糊不清: {message}")
-        log_ui(project_id_pk, run_id, f"message 模糊不清: {message}", "ERROR")
+        _log_chat_event(project_id_pk, str(run_id or ""), "chat.intent.ambiguous", "意图不清，需要澄清", "WARN", data={"message_preview": _trim_preview(message, 120)})
         resp = ChatActResponse(
+            run_id=run_id,
             assistant_message="我需要你明确一下目标：你希望我对本集做什么？（可多选）",
             cards=[
                 {
@@ -193,10 +218,17 @@ async def _chat_act_core(
                 project_id=project_id_pk, run_id=run_id, request=req.model_dump(), response=resp.model_dump(), meta={"workflow": "chat_act"}
             )
         logger.info(f"[AI][chat_act] Response: {resp.model_dump()}")
-        log_ui(project_id_pk, run_id, f"Response: {resp.model_dump()}", "INFO")
+        _log_chat_event(project_id_pk, str(run_id or ""), "chat.response.clarify", "返回澄清请求", "INFO")
         return resp
     logger.info(f"[AI][chat_act] Message: {message}")
-    log_ui(project_id_pk, run_id, f"Message: {message}", "INFO")
+    _log_chat_event(
+        project_id_pk,
+        str(run_id or ""),
+        "chat.message",
+        "收到用户消息",
+        "INFO",
+        data={"message_len": len(message or ""), "message_preview": _trim_preview(message, 200)},
+    )
     # -------- Memory (for planner / debug) --------
     memory_trace: List[Dict[str, Any]] = []
     memory_context_text = ""
@@ -221,11 +253,29 @@ async def _chat_act_core(
                         memory_trace.append({"key": k, "text": None})
         except Exception as e:
             logger.error(f"[AI][chat_act] Memory retrieval failed: {e}")
-            log_ui(project_id_pk, run_id, f"Memory retrieval failed: {e}", "ERROR")
+            _log_chat_event(
+                project_id_pk,
+                str(run_id or ""),
+                "chat.memory.retrieval.error",
+                "记忆检索失败",
+                "ERROR",
+                data={"error": f"{type(e).__name__}: {e}"},
+            )
     # -------- Planner Prompt --------
     ui_ctx = req.ui_context or {}
     logger.info(f"[AI][chat_act] UI Context: {ui_ctx}")
-    log_ui(project_id_pk, run_id, f"UI Context: {ui_ctx}", "INFO")
+    _log_chat_event(
+        project_id_pk,
+        str(run_id or ""),
+        "chat.ui_context",
+        "读取 UI 上下文",
+        "INFO",
+        data={
+            "keys": sorted([str(k) for k in (ui_ctx or {}).keys()]),
+            "master_script_len": len(str((ui_ctx or {}).get("master_script") or "")),
+            "current_input_len": len(str((ui_ctx or {}).get("current_input") or "")),
+        },
+    )
     current_action_key = (req.current_action_key or "").strip()
     master_script_preview = str(ui_ctx.get("master_script") or "")
     selected_input_preview = str(ui_ctx.get("current_input") or "")
@@ -284,10 +334,11 @@ async def _chat_act_core(
 {selected_input_preview or "(empty)"}
 """
     logger.info(f"[AI][chat_act] Planner User: {planner_user}")
-    log_ui(project_id_pk, run_id, f"Planner User: {planner_user}", "INFO")
+    _log_chat_event(project_id_pk, str(run_id or ""), "chat.planner.prompt", "生成 planner 提示词", "INFO", data={"prompt_len": len(planner_user)})
     if memory_context_text:
         planner_user += f"\n\n记忆上下文（必须遵守，可能为空）：\n{memory_context_text}"
 
+    _log_chat_event(project_id_pk, str(run_id or ""), "chat.planner.call", "调用 planner 模型", "INFO")
     planner_raw = await _chat_client.chat(
         settings=LlmChatSettings(
             base_url=settings.base_url,
@@ -306,17 +357,18 @@ async def _chat_act_core(
         plan_parsed = safe_parse_json(planner_raw or "")
     except Exception as e:
         logger.error(f"Planner JSON parse failed: {e}\nRaw: {planner_raw}")
-        log_ui(project_id_pk, run_id, f"Planner JSON parse failed: {e}\nRaw: {planner_raw}", "ERROR")
+        _log_chat_event(project_id_pk, str(run_id or ""), "chat.planner.parse_error", "planner 输出解析失败", "ERROR", data={"error": str(e)})
         # 构造一个错误提示返回给用户，而不是让后台崩溃
         raise HTTPException(status_code=502, detail=f"AI 响应格式错误: {str(e)}")
     # [修改结束]
     logger.info(f"[AI][chat_act] Planner Parsed: {plan_parsed}")
-    log_ui(project_id_pk, run_id, f"Planner Parsed: {plan_parsed}", "INFO")
+    _log_chat_event(project_id_pk, str(run_id or ""), "chat.planner.parsed", "planner 计划解析完成", "INFO", data={"has_steps": bool((plan_parsed or {}).get("steps"))})
     if not isinstance(plan_parsed, dict):
         logger.error(f"[AI][chat_act] Planner 输出无法解析为 JSON: {(planner_raw or '')[:500]}")
         raise HTTPException(status_code=502, detail=f"Planner 输出无法解析为 JSON: {(planner_raw or '')[:500]}")
     logger.info(f"[AI][chat_act] Planner Needs Clarification: {bool(plan_parsed.get('needs_clarification'))}")
-    log_ui(project_id_pk, run_id, f"Planner Needs Clarification: {bool(plan_parsed.get('needs_clarification'))}", "INFO")
+    if bool(plan_parsed.get("needs_clarification")):
+        _log_chat_event(project_id_pk, str(run_id or ""), "chat.planner.needs_clarification", "planner 要求澄清", "WARN")
     if bool(plan_parsed.get("needs_clarification")):
         logger.info(f"[AI][chat_act] Planner Needs Clarification: True")
         q = str(plan_parsed.get("clarifying_question") or "").strip() or "我需要你补充一下目标/范围：你希望我具体做什么？"
@@ -325,6 +377,7 @@ async def _chat_act_core(
         if isinstance(opts, list):
             options = [{"label": str(x), "value": str(x)} for x in opts[:8] if str(x).strip()]
         resp = ChatActResponse(
+            run_id=run_id,
             assistant_message=q,
             cards=[
                 {
@@ -350,11 +403,28 @@ async def _chat_act_core(
         return resp
 
     logger.info(f"[AI][chat_act] Planner Steps: {plan_parsed.get('steps')}")
-    log_ui(project_id_pk, run_id, f"Planner Steps: {plan_parsed.get('steps')}", "INFO")
+    _log_chat_event(
+        project_id_pk,
+        str(run_id or ""),
+        "chat.planner.steps",
+        "planner 返回 steps",
+        "INFO",
+        data={
+            "step_count": int(len(plan_parsed.get("steps") or [])) if isinstance(plan_parsed.get("steps"), list) else 0,
+            "action_keys": [str(x.get("action_key")) for x in (plan_parsed.get("steps") or []) if isinstance(x, dict)][:8],
+        },
+    )
     steps = plan_parsed.get("steps") or []
     if not isinstance(steps, list) or len(steps) == 0:
         logger.error(f"[AI][chat_act] Planner steps 为空: {plan_parsed}")
-        log_ui(project_id_pk, run_id, f"Planner steps 为空: {plan_parsed}", "ERROR")
+        _log_chat_event(
+            project_id_pk,
+            str(run_id or ""),
+            "chat.planner.steps.empty",
+            "planner steps 为空",
+            "ERROR",
+            data={"plan_preview": _trim_preview(json.dumps(plan_parsed, ensure_ascii=False), 400)},
+        )
         raise HTTPException(status_code=502, detail=f"Planner steps 为空: {plan_parsed}")
     if len(steps) > 4:
         steps = steps[:4]
@@ -375,10 +445,23 @@ async def _chat_act_core(
     final_action_key = steps[-1].get("action_key")
     plan_parsed["final_action_key"] = final_action_key
     logger.info(f"[AI][chat_act] Final Action Key: {final_action_key}")
-    log_ui(project_id_pk, run_id, f"Final Action Key: {final_action_key}", "INFO")
+    _log_chat_event(
+        project_id_pk,
+        str(run_id or ""),
+        "chat.planner.final_action_key",
+        "确定最终动作",
+        "INFO",
+        data={"final_action_key": str(final_action_key or "")},
+    )
     if emit_stages and run_id:
         logger.info(f"[AI][chat_act] Snapshot Stage: chat.plan")
-        log_ui(project_id_pk, run_id, f"Snapshot Stage: chat.plan", "INFO")
+        _log_chat_event(
+            project_id_pk,
+            str(run_id or ""),
+            "chat.snapshot.plan",
+            "写入 plan stage",
+            "INFO",
+        )
         _context_store.snapshot_stage(
             project_id=project_id_pk,
             run_id=run_id,
@@ -393,34 +476,76 @@ async def _chat_act_core(
     def _step_timeout_seconds(action_key: str) -> float:
         return 600.0
 
-    for idx, s in enumerate(steps):
-        logger.info(f"[AI][chat_act] Step {idx} Start: {s}")
-        log_ui(project_id_pk, run_id, f"Step {idx} Start: {s}", "INFO")
-        ak = str(s.get("action_key"))
-        in_text = (s.get("input_text") or "").strip()
-        why = (s.get("why") or "").strip()
+    for idx, step in enumerate(steps):
+        logger.info(f"[AI][chat_act] Step {idx} Start: {step}")
+        _log_chat_event(
+            project_id_pk,
+            str(run_id or ""),
+            "chat.step.loop.start",
+            "进入 step",
+            "INFO",
+            data={"step_index": idx, "action_key": str((step or {}).get("action_key") or ""), "why": str((step or {}).get("why") or "")},
+        )
+        ak = str(step.get("action_key"))
+        in_text = (step.get("input_text") or "").strip()
+        why = (step.get("why") or "").strip()
 
         # 对于优化类操作，优先使用前一步的 artifacts 输出（如果存在）
         # 因为优化操作需要的是前一步的输出，而不是用户意图
         logger.info(f"[AI][chat_act] Step {idx} Before input processing: ak={ak}, input_text={_trim_preview(in_text, 100)}, artifacts.keys()={list(artifacts.keys())}")
-        log_ui(project_id_pk, run_id, f"Step {idx} Before input processing: ak={ak}, artifacts.keys()={list(artifacts.keys())}", "INFO")
+        _log_chat_event(
+            project_id_pk,
+            str(run_id or ""),
+            "chat.step.input.before",
+            "准备 step 输入",
+            "INFO",
+            data={"step_index": idx, "action_key": ak, "input_len": len(in_text or ""), "artifacts_keys": sorted(list(artifacts.keys()))},
+        )
         
         if ak == "outline_optimize" and isinstance(artifacts.get("outline"), str) and artifacts.get("outline").strip():
             logger.info(f"[AI][chat_act] Step {idx} Using artifacts['outline'] (length={len(artifacts['outline'])})")
-            log_ui(project_id_pk, run_id, f"Step {idx} Using artifacts['outline'] (length={len(artifacts['outline'])})", "INFO")
+            _log_chat_event(
+                project_id_pk,
+                str(run_id or ""),
+                "chat.step.input.select",
+                "选择输入：使用 outline",
+                "INFO",
+                data={"step_index": idx, "action_key": ak, "source": "artifacts.outline", "text_len": len(artifacts.get("outline") or "")},
+            )
             in_text = artifacts["outline"]
         elif ak == "script_optimize" and isinstance(artifacts.get("script"), str) and artifacts.get("script").strip():
             logger.info(f"[AI][chat_act] Step {idx} Using artifacts['script'] (length={len(artifacts['script'])})")
-            log_ui(project_id_pk, run_id, f"Step {idx} Using artifacts['script'] (length={len(artifacts['script'])})", "INFO")
+            _log_chat_event(
+                project_id_pk,
+                str(run_id or ""),
+                "chat.step.input.select",
+                "选择输入：使用 script",
+                "INFO",
+                data={"step_index": idx, "action_key": ak, "source": "artifacts.script", "text_len": len(artifacts.get("script") or "")},
+            )
             in_text = artifacts["script"]
         elif ak == "generate_script" and isinstance(artifacts.get("outline"), str) and artifacts.get("outline").strip():
             logger.info(f"[AI][chat_act] Step {idx} Using artifacts['outline'] for generate_script (length={len(artifacts['outline'])})")
-            log_ui(project_id_pk, run_id, f"Step {idx} Using artifacts['outline'] for generate_script (length={len(artifacts['outline'])})", "INFO")
+            _log_chat_event(
+                project_id_pk,
+                str(run_id or ""),
+                "chat.step.input.select",
+                "选择输入：用 outline 生成 script",
+                "INFO",
+                data={"step_index": idx, "action_key": ak, "source": "artifacts.outline", "text_len": len(artifacts.get("outline") or "")},
+            )
             in_text = artifacts["outline"]
         elif not in_text:
             # 如果 input_text 为空且没有可用的 artifacts，使用 UI 上下文或用户消息
             logger.info(f"[AI][chat_act] Step {idx} No artifacts available, using UI context or message")
-            log_ui(project_id_pk, run_id, f"Step {idx} No artifacts available, using UI context or message", "INFO")
+            _log_chat_event(
+                project_id_pk,
+                str(run_id or ""),
+                "chat.step.input.select",
+                "选择输入：回退到 UI/消息",
+                "INFO",
+                data={"step_index": idx, "action_key": ak, "source": "ui_or_message"},
+            )
             in_text = selected_input_preview or master_script_preview or message
 
         # 对于优化类操作，将用户意图追加到输入文本后面
@@ -428,7 +553,14 @@ async def _chat_act_core(
             in_text = f"{in_text}\n\n[用户意图]\n{message}"
         
         logger.info(f"[AI][chat_act] Step {idx} After input processing: in_text length={len(in_text)}, preview={_trim_preview(in_text, 200)}")
-        log_ui(project_id_pk, run_id, f"Step {idx} After input processing: in_text length={len(in_text)}", "INFO")
+        _log_chat_event(
+            project_id_pk,
+            str(run_id or ""),
+            "chat.step.input.ready",
+            "step 输入已就绪",
+            "INFO",
+            data={"step_index": idx, "action_key": ak, "in_text_len": len(in_text or ""), "in_text_preview": _trim_preview(in_text, 200)},
+        )
 
         if emit_stages and run_id:
             _context_store.snapshot_stage(
@@ -445,61 +577,135 @@ async def _chat_act_core(
                 data={"status": "running", "at_ms": _now_ms(), "current_step_index": idx, "current_action_key": ak},
             )
 
+        _log_chat_event(
+            project_id_pk,
+            str(run_id or ""),
+            "chat.step.start",
+            "开始执行 step",
+            "INFO",
+            data={"step_index": idx, "action_key": ak},
+        )
         t0 = _now_ms()
         out_text = ""
         
         logger.info(f"[AI][chat_act] Step {idx} About to call _do_step() for action_key={ak}")
-        log_ui(project_id_pk, run_id, f"Step {idx} About to call _do_step() for action_key={ak}", "INFO")
+        _log_chat_event(
+            project_id_pk,
+            str(run_id or ""),
+            "chat.step.execute.prepare",
+            "准备执行 step",
+            "INFO",
+            data={"step_index": idx, "action_key": ak},
+        )
 
         async def _do_step() -> str:
             nonlocal out_text
             logger.info(f"[AI][chat_act] _do_step() called for action_key={ak}")
-            log_ui(project_id_pk, run_id, f"_do_step() called for action_key={ak}", "INFO")
+            _log_chat_event(
+                project_id_pk,
+                str(run_id or ""),
+                "chat.step.execute.enter",
+                "进入 step 执行",
+                "INFO",
+                data={"step_index": idx, "action_key": ak},
+            )
             
             if ak == "outline_generate":
                 logger.info(f"[AI][chat_act] Calling outline_generate with text length={len(in_text)}")
-                log_ui(project_id_pk, run_id, f"Calling outline_generate with text length={len(in_text)}", "INFO")
-                resp = await outline_generate(OutlineGenerateRequest(text=in_text, project_id=project_id_pk))
+                _log_chat_event(
+                    project_id_pk,
+                    str(run_id or ""),
+                    "chat.call.outline_generate",
+                    "调用 outline_generate",
+                    "INFO",
+                    data={"step_index": idx, "input_len": len(in_text or "")},
+                )
+                resp = await outline_generate(OutlineGenerateRequest(text=in_text, project_id=project_id_pk, run_id=run_id))
                 out_text = (resp.text or "").strip()
                 artifacts["outline"] = out_text
-                log_ui(project_id_pk, run_id, f"Outline Generate Response: {out_text}", "INFO")
-                log_ui(project_id_pk, run_id, f"Outline Generate Response artifacts: {artifacts}", "INFO")
+                _log_chat_event(
+                    project_id_pk,
+                    str(run_id or ""),
+                    "chat.result.outline_generate",
+                    "outline_generate 返回",
+                    "INFO",
+                    data={"step_index": idx, "outline_len": len(out_text or ""), "outline_preview": _trim_preview(out_text, 400)},
+                )
                 logger.info(f"[AI][chat_act] Outline Generate Response: {out_text}")
                 logger.info(f"[AI][chat_act] Outline Generate Response artifacts: {artifacts}")
                 return out_text
             if ak == "outline_optimize":
                 logger.info(f"[AI][chat_act] Calling outline_optimize with text length={len(in_text)}, project_id={project_id_pk}")
-                log_ui(project_id_pk, run_id, f"Calling outline_optimize with text length={len(in_text)}, project_id={project_id_pk}", "INFO")
+                _log_chat_event(
+                    project_id_pk,
+                    str(run_id or ""),
+                    "chat.call.outline_optimize",
+                    "调用 outline_optimize",
+                    "INFO",
+                    data={"step_index": idx, "input_len": len(in_text or ""), "project_id": int(project_id_pk)},
+                )
                 try:
-                    resp = await outline_optimize(OutlineOptimizeRequest(text=in_text, project_id=project_id_pk))
+                    resp = await outline_optimize(OutlineOptimizeRequest(text=in_text, project_id=project_id_pk, run_id=run_id))
                     logger.info(f"[AI][chat_act] outline_optimize returned, response length={len(resp.text or '')}")
-                    log_ui(project_id_pk, run_id, f"outline_optimize returned, response length={len(resp.text or '')}", "INFO")
+                    _log_chat_event(
+                        project_id_pk,
+                        str(run_id or ""),
+                        "chat.result.outline_optimize",
+                        "outline_optimize 返回",
+                        "INFO",
+                        data={"step_index": idx, "response_len": len(resp.text or "")},
+                    )
                     out_text = (resp.text or "").strip()
                     artifacts["outline"] = out_text
-                    log_ui(project_id_pk, run_id, f"Outline Optimize Response: {out_text}", "INFO")
-                    log_ui(project_id_pk, run_id, f"Outline Optimize Response artifacts: {artifacts}", "INFO")
+                    _log_chat_event(
+                        project_id_pk,
+                        str(run_id or ""),
+                        "chat.result.outline_optimize",
+                        "outline_optimize 输出已写入 artifacts",
+                        "INFO",
+                        data={"step_index": idx, "outline_len": len(out_text or ""), "outline_preview": _trim_preview(out_text, 400)},
+                    )
                     logger.info(f"[AI][chat_act] Outline Optimize Response: {out_text}")
                     logger.info(f"[AI][chat_act] Outline Optimize Response artifacts: {artifacts}")
                     return out_text
                 except Exception as e:
                     logger.error(f"[AI][chat_act] outline_optimize raised exception: {type(e).__name__}: {e}")
-                    log_ui(project_id_pk, run_id, f"outline_optimize raised exception: {type(e).__name__}: {e}", "ERROR")
+                    _log_chat_event(
+                        project_id_pk,
+                        str(run_id or ""),
+                        "chat.call.outline_optimize.error",
+                        "outline_optimize 执行异常",
+                        "ERROR",
+                        data={"step_index": idx, "error": f"{type(e).__name__}: {e}"},
+                    )
                     raise
             if ak == "generate_script":
-                resp = await generate_script(ScriptGenerateRequest(text=in_text, project_id=project_id_pk))
+                resp = await generate_script(ScriptGenerateRequest(text=in_text, project_id=project_id_pk, run_id=run_id))
                 out_text = (resp.text or "").strip()
                 artifacts["script"] = out_text
-                log_ui(project_id_pk, run_id, f"Generate Script Response: {out_text}", "INFO")
-                log_ui(project_id_pk, run_id, f"Generate Script Response artifacts: {artifacts}", "INFO")
+                _log_chat_event(
+                    project_id_pk,
+                    str(run_id or ""),
+                    "chat.result.generate_script",
+                    "generate_script 返回",
+                    "INFO",
+                    data={"step_index": idx, "script_len": len(out_text or ""), "script_preview": _trim_preview(out_text, 400)},
+                )
                 logger.info(f"[AI][chat_act] Generate Script Response: {out_text}")
                 logger.info(f"[AI][chat_act] Generate Script Response artifacts: {artifacts}")
                 return out_text
             if ak == "script_optimize":
-                resp = await script_optimize(ScriptOptimizeRequest(text=in_text, project_id=project_id_pk))
+                resp = await script_optimize(ScriptOptimizeRequest(text=in_text, project_id=project_id_pk, run_id=run_id))
                 out_text = (resp.text or "").strip()
                 artifacts["script"] = out_text
-                log_ui(project_id_pk, run_id, f"Script Optimize Response: {out_text}", "INFO")
-                log_ui(project_id_pk, run_id, f"Script Optimize Response artifacts: {artifacts}", "INFO")
+                _log_chat_event(
+                    project_id_pk,
+                    str(run_id or ""),
+                    "chat.result.script_optimize",
+                    "script_optimize 返回",
+                    "INFO",
+                    data={"step_index": idx, "script_len": len(out_text or ""), "script_preview": _trim_preview(out_text, 400)},
+                )
                 logger.info(f"[AI][chat_act] Script Optimize Response: {out_text}")
                 logger.info(f"[AI][chat_act] Script Optimize Response artifacts: {artifacts}")
                 return out_text
@@ -509,6 +715,7 @@ async def _chat_act_core(
                         project_id=req.project_id,
                         input_text=in_text,
                         options=WorkflowScriptOptions(),
+                        run_id=run_id,
                     ),
                     db=db,
                 )
@@ -524,6 +731,7 @@ async def _chat_act_core(
                         project_id=req.project_id,
                         scene_text=in_text,
                         options=WorkflowStoryboardOptions(),
+                        run_id=run_id,
                     ),
                     db=db,
                 )
@@ -536,18 +744,39 @@ async def _chat_act_core(
                 from ..services.evidence_ingestor import chunk_text_to_evidences
                 from ..services.memory_store import get_memory_store
                 logger.info(f"[AI][chat_act] Memory Extract Changeset Artifacts: {artifacts}")
-                log_ui(project_id_pk, run_id, f"Memory Extract Changeset Artifacts: {artifacts}", "INFO")
+                _log_chat_event(
+                    project_id_pk,
+                    str(run_id or ""),
+                    "chat.memory_extract.artifacts",
+                    "准备抽取变更：读取 artifacts",
+                    "INFO",
+                    data={"step_index": idx, "artifacts_keys": sorted(list(artifacts.keys()))},
+                )
                 
                 # 记录 get_memory_store() 调用前后的时间，用于诊断性能问题
                 import time
                 t_start = time.time()
                 logger.info(f"[AI][chat_act] About to call get_memory_store() at {t_start}")
-                log_ui(project_id_pk, run_id, f"About to call get_memory_store()", "INFO")
+                _log_chat_event(
+                    project_id_pk,
+                    str(run_id or ""),
+                    "chat.memory_extract.store.start",
+                    "初始化 MemoryStore",
+                    "INFO",
+                    data={"step_index": idx},
+                )
                 store = get_memory_store()
                 t_end = time.time()
                 elapsed = t_end - t_start
                 logger.info(f"[AI][chat_act] Memory Extract Changeset Store: {store}, elapsed={elapsed:.2f}s")
-                log_ui(project_id_pk, run_id, f"Memory Extract Changeset Store initialized in {elapsed:.2f}s", "INFO")
+                _log_chat_event(
+                    project_id_pk,
+                    str(run_id or ""),
+                    "chat.memory_extract.store.done",
+                    "MemoryStore 初始化完成",
+                    "INFO",
+                    data={"step_index": idx, "elapsed_s": float(f"{elapsed:.4f}")},
+                )
                 base_text = ""
                 
                 if artifacts.get("script_fountain"):
@@ -556,16 +785,37 @@ async def _chat_act_core(
                     try:
                         base_text += "### beat_sheet\n" + json.dumps(artifacts.get("beat_sheet"), ensure_ascii=False, indent=2) + "\n\n"
                     except Exception as e:
-                        log_ui(project_id_pk, run_id, f"Memory Extract Changeset Beat Sheet Error: {e}", "ERROR")
+                        _log_chat_event(
+                            project_id_pk,
+                            str(run_id or ""),
+                            "chat.memory_extract.base_text.beat_sheet.error",
+                            "拼接 beat_sheet 失败",
+                            "ERROR",
+                            data={"step_index": idx, "error": f"{type(e).__name__}: {e}"},
+                        )
                 if artifacts.get("series_bible"):
                     try:
                         base_text += "### series_bible\n" + json.dumps(artifacts.get("series_bible"), ensure_ascii=False, indent=2) + "\n\n"
                     except Exception as e:
-                        log_ui(project_id_pk, run_id, f"Memory Extract Changeset Series Bible Error: {e}", "ERROR")
+                        _log_chat_event(
+                            project_id_pk,
+                            str(run_id or ""),
+                            "chat.memory_extract.base_text.series_bible.error",
+                            "拼接 series_bible 失败",
+                            "ERROR",
+                            data={"step_index": idx, "error": f"{type(e).__name__}: {e}"},
+                        )
                 if not base_text:
                     base_text = master_script_preview or message
                 logger.info(f"[AI][chat_act] Memory Extract Changeset Base Text: {base_text}")
-                log_ui(project_id_pk, run_id, f"Memory Extract Changeset Base Text: {base_text}", "INFO")
+                _log_chat_event(
+                    project_id_pk,
+                    str(run_id or ""),
+                    "chat.memory_extract.base_text",
+                    "构造抽取 base_text",
+                    "INFO",
+                    data={"step_index": idx, "base_text_len": len(base_text or ""), "base_text_preview": _trim_preview(base_text, 300)},
+                )
                 evidences = chunk_text_to_evidences(
                     project_id=project_id_pk,
                     run_id=run_id,
@@ -579,10 +829,24 @@ async def _chat_act_core(
                     try:
                         evidence_ids.append(store.upsert_evidence(ev))
                     except Exception as e:
-                        log_ui(project_id_pk, run_id, f"Memory Extract Changeset Upsert Evidence Error: {e}", "ERROR")
+                        _log_chat_event(
+                            project_id_pk,
+                            str(run_id or ""),
+                            "chat.memory_extract.evidence.upsert.error",
+                            "写入 evidence 失败",
+                            "ERROR",
+                            data={"step_index": idx, "error": f"{type(e).__name__}: {e}"},
+                        )
                         continue
                 logger.info(f"[AI][chat_act] Memory Extract Changeset Evidence IDs: {evidence_ids}")
-                log_ui(project_id_pk, run_id, f"Memory Extract Changeset Evidence IDs: {evidence_ids}", "INFO")
+                _log_chat_event(
+                    project_id_pk,
+                    str(run_id or ""),
+                    "chat.memory_extract.evidence.done",
+                    "evidence 切片完成",
+                    "INFO",
+                    data={"step_index": idx, "evidence_count": int(len(evidence_ids))},
+                )
                 payload, extractor_trace = await extract_changeset_v0_with_llm_with_trace(
                     llm_settings=LlmChatSettings(
                         base_url=settings.base_url,
@@ -604,12 +868,26 @@ async def _chat_act_core(
                 try:
                     store.append_changeset_review_entry(changeset_id=changeset_id, entry={"at_ms": _now_ms(), "action": "extractor_trace", "data": extractor_trace})
                 except Exception as e:
-                    log_ui(project_id_pk, run_id, f"Memory Extract Changeset Append Changeset Review Entry Extractor Trace Error: {e}", "ERROR")
+                    _log_chat_event(
+                        project_id_pk,
+                        str(run_id or ""),
+                        "chat.memory_extract.review_entry.extractor_trace.error",
+                        "写入 extractor_trace 失败",
+                        "ERROR",
+                        data={"step_index": idx, "error": f"{type(e).__name__}: {e}"},
+                    )
                     pass
                 try:
                     store.append_changeset_review_entry(changeset_id=changeset_id, entry={"at_ms": _now_ms(), "action": "resolver_trace", "data": resolver_trace})
                 except Exception as e:
-                    log_ui(project_id_pk, run_id, f"Memory Extract Changeset Append Changeset Review Entry Resolver Trace Error: {e}", "ERROR")
+                    _log_chat_event(
+                        project_id_pk,
+                        str(run_id or ""),
+                        "chat.memory_extract.review_entry.resolver_trace.error",
+                        "写入 resolver_trace 失败",
+                        "ERROR",
+                        data={"step_index": idx, "error": f"{type(e).__name__}: {e}"},
+                    )
                     pass
 
                 def _count_by_type(items: Any) -> Dict[str, int]:
@@ -652,16 +930,37 @@ async def _chat_act_core(
             # 执行步骤（带超时控制）
             timeout_sec = _step_timeout_seconds(ak)
             logger.info(f"[AI][chat_act] Step {idx} Starting execution with timeout={timeout_sec}s")
-            log_ui(project_id_pk, run_id, f"Step {idx} Starting execution with timeout={timeout_sec}s", "INFO")
+            _log_chat_event(
+                project_id_pk,
+                str(run_id or ""),
+                "chat.step.execute.start",
+                "开始执行 step（带超时）",
+                "INFO",
+                data={"step_index": idx, "action_key": ak, "timeout_s": float(timeout_sec)},
+            )
             out_text = await asyncio.wait_for(_do_step(), timeout=timeout_sec)
             logger.info(f"[AI][chat_act] Step {idx} Execution completed successfully")
-            log_ui(project_id_pk, run_id, f"Step {idx} Execution completed successfully", "INFO")
+            _log_chat_event(
+                project_id_pk,
+                str(run_id or ""),
+                "chat.step.execute.done",
+                "step 执行成功",
+                "INFO",
+                data={"step_index": idx, "action_key": ak},
+            )
         
         # [新增] 1. 专门捕获超时异常
         except asyncio.TimeoutError as e:
             err_text = f"Step '{ak}' execution timed out (> {timeout_sec}s)"
             logger.warning(f"[AI] {err_text}")
-            log_ui(project_id_pk, run_id, f"Step '{ak}' execution timed out (> {timeout_sec}s)", "WARNING")
+            _log_chat_event(
+                project_id_pk,
+                str(run_id or ""),
+                "chat.step.execute.timeout",
+                "step 执行超时",
+                "WARN",
+                data={"step_index": idx, "action_key": ak, "timeout_s": float(timeout_sec)},
+            )
             
             if emit_stages and run_id:
                 ts = _now_ms()
@@ -712,7 +1011,14 @@ async def _chat_act_core(
             if emit_stages and run_id:
                 err_text = f"{type(e).__name__}: {e}"
                 ts = _now_ms()
-                log_ui(project_id_pk, run_id, f"Step '{ak}' execution error: {err_text}", "ERROR")
+                _log_chat_event(
+                    project_id_pk,
+                    str(run_id or ""),
+                    "chat.step.execute.error",
+                    "step 执行异常",
+                    "ERROR",
+                    data={"step_index": idx, "action_key": ak, "error": err_text},
+                )
                 logger.error(f"[AI][chat_act] Step '{ak}' execution error: {err_text}")
                 _context_store.snapshot_stage(
                     project_id=project_id_pk,
@@ -749,7 +1055,22 @@ async def _chat_act_core(
             }
         )
         logger.info(f"[AI][chat_act] Step {idx} End: {ak}, Output Text: {out_text}")
-        log_ui(project_id_pk, run_id, f"Step {idx} End: {ak}, Output Text: {out_text}", "INFO")
+        _log_chat_event(
+            project_id_pk,
+            str(run_id or ""),
+            "chat.step.output",
+            "step 输出已生成",
+            "INFO",
+            data={"step_index": idx, "action_key": ak, "output_len": len(out_text or ""), "output_preview": _trim_preview(out_text, 400)},
+        )
+        _log_chat_event(
+            project_id_pk,
+            str(run_id or ""),
+            "chat.step.end",
+            "step 执行完成",
+            "INFO",
+            data={"step_index": idx, "action_key": ak, "ms": int(dt)},
+        )
 
         if emit_stages and run_id:
             _context_store.snapshot_stage(
@@ -759,43 +1080,121 @@ async def _chat_act_core(
                 data={"step_index": idx, "action_key": ak, "ms": int(dt), "output_preview": _trim_preview(out_text, 800), "at_ms": _now_ms()},
             )
             logger.info(f"[AI][chat_act] Snapshot Stage: chat.step.{idx}.end")
-            log_ui(project_id_pk, run_id, f"Snapshot Stage: chat.step.{idx}.end", "INFO")
+            _log_chat_event(
+                project_id_pk,
+                str(run_id or ""),
+                "chat.snapshot.step_end",
+                "写入 step end stage",
+                "INFO",
+                data={"step_index": idx, "action_key": ak},
+            )
 
     created_run = None
     persistable = {"outline_generate", "generate_script", "script_optimize", "workflow_script", "workflow_storyboard"}
     logger.info(f"[AI][chat_act] Persistable: {persistable}")
-    log_ui(project_id_pk, run_id, f"Persistable: {persistable}", "INFO")
+    _log_chat_event(
+        project_id_pk,
+        str(run_id or ""),
+        "chat.persist.persistable",
+        "可持久化动作集合",
+        "INFO",
+        data={"persistable": sorted(list(persistable))},
+    )
     if req.episode_id and final_action_key in persistable:
+        _log_chat_event(
+            project_id_pk,
+            str(run_id or ""),
+            "chat.persist.start",
+            "准备写入 AiActionRun",
+            "INFO",
+            data={"final_action_key": final_action_key, "episode_id": req.episode_id},
+        )
         logger.info(f"[AI][chat_act] Persist Final Action Key: {final_action_key}")
-        log_ui(project_id_pk, run_id, f"Persist Final Action Key: {final_action_key}", "INFO")
+        _log_chat_event(
+            project_id_pk,
+            str(run_id or ""),
+            "chat.persist.final_action_key",
+            "准备持久化最终结果",
+            "INFO",
+            data={"episode_id": int(req.episode_id), "final_action_key": str(final_action_key or "")},
+        )
         if final_action_key in ("generate_script", "script_optimize"):
             logger.info(f"[AI][chat_act] Generate Script: {artifacts.get('script')}")
-            log_ui(project_id_pk, run_id, f"Generate Script: {artifacts.get('script')}", "INFO")
+            _log_chat_event(
+                project_id_pk,
+                str(run_id or ""),
+                "chat.persist.payload",
+                "选择持久化内容：script",
+                "INFO",
+                data={"output_len": len(str(artifacts.get("script") or "")), "output_preview": _trim_preview(str(artifacts.get("script") or ""), 400)},
+            )
             final_output = str(artifacts.get("script") or "")
         elif final_action_key == "workflow_script":
             logger.info(f"[AI][chat_act] Workflow Script: {artifacts.get('script_fountain')}")
-            log_ui(project_id_pk, run_id, f"Workflow Script: {artifacts.get('script_fountain')}", "INFO")
+            _log_chat_event(
+                project_id_pk,
+                str(run_id or ""),
+                "chat.persist.payload",
+                "选择持久化内容：script_fountain",
+                "INFO",
+                data={"output_len": len(str(artifacts.get("script_fountain") or "")), "output_preview": _trim_preview(str(artifacts.get("script_fountain") or ""), 400)},
+            )
             final_output = str(artifacts.get("script_fountain") or "")
         elif final_action_key == "workflow_storyboard":
             try:
                 logger.info(f"[AI][chat_act] Workflow Storyboard: {artifacts.get('shots')}")
-                log_ui(project_id_pk, run_id, f"Workflow Storyboard: {artifacts.get('shots')}", "INFO")
+                _log_chat_event(
+                    project_id_pk,
+                    str(run_id or ""),
+                    "chat.persist.payload",
+                    "选择持久化内容：shots",
+                    "INFO",
+                    data={"shots_count": int(len(artifacts.get("shots") or [])) if isinstance(artifacts.get("shots"), list) else None},
+                )
                 final_output = json.dumps(artifacts.get("shots") or [], ensure_ascii=False, indent=2)
             except Exception as e:
                 logger.error(f"[AI][chat_act] Workflow Storyboard Error: {e}")
-                log_ui(project_id_pk, run_id, f"Workflow Storyboard Error: {e}", "ERROR")
+                _log_chat_event(
+                    project_id_pk,
+                    str(run_id or ""),
+                    "chat.persist.payload.error",
+                    "workflow_storyboard 序列化失败",
+                    "ERROR",
+                    data={"error": f"{type(e).__name__}: {e}"},
+                )
                 final_output = str(artifacts.get("shots") or "")
         else:
             logger.info(f"[AI][chat_act] Outline: {artifacts.get('outline')}")
-            log_ui(project_id_pk, run_id, f"Outline: {artifacts.get('outline')}", "INFO")
+            _log_chat_event(
+                project_id_pk,
+                str(run_id or ""),
+                "chat.persist.payload",
+                "选择持久化内容：outline",
+                "INFO",
+                data={"output_len": len(str(artifacts.get("outline") or "")), "output_preview": _trim_preview(str(artifacts.get("outline") or ""), 400)},
+            )
             final_output = str(artifacts.get("outline") or "")
         persist_action_key = final_action_key
         logger.info(f"[AI][chat_act] Persist Action Key: {persist_action_key}")
-        log_ui(project_id_pk, run_id, f"Persist Action Key: {persist_action_key}", "INFO")
+        _log_chat_event(
+            project_id_pk,
+            str(run_id or ""),
+            "chat.persist.action_key",
+            "确定写入 action_key",
+            "INFO",
+            data={"persist_action_key": str(persist_action_key or "")},
+        )
         if persist_action_key == "outline_optimize":
             persist_action_key = "outline_generate"
         logger.info(f"[AI][chat_act] Persist Action Key: {persist_action_key}")
-        log_ui(project_id_pk, run_id, f"Persist Action Key: {persist_action_key}", "INFO")
+        _log_chat_event(
+            project_id_pk,
+            str(run_id or ""),
+            "chat.persist.action_key",
+            "归一化写入 action_key",
+            "INFO",
+            data={"persist_action_key": str(persist_action_key or "")},
+        )
         db_obj = models.AiActionRun(
             project_id=project_id_pk,
             target_type="episode",
@@ -804,6 +1203,7 @@ async def _chat_act_core(
             input_text=message,
             output_text=final_output,
             meta_data={
+                "run_id": run_id,
                 "source": "chat",
                 "intent": plan_parsed.get("intent_summary"),
                 "planner_final_action_key": final_action_key,
@@ -814,11 +1214,27 @@ async def _chat_act_core(
         db.commit()
         db.refresh(db_obj)
         created_run = {"id": db_obj.id, "action_key": db_obj.action_key, "created_at": str(db_obj.created_at)}
+        _log_chat_event(
+            project_id_pk,
+            str(run_id or ""),
+            "chat.persist.done",
+            "AiActionRun 写入完成",
+            "INFO",
+            data={"run_db_id": db_obj.id, "action_key": db_obj.action_key},
+        )
 
     assistant_msg = f"已完成：{plan_parsed.get('intent_summary') or '执行完成'}（最终动作：{final_action_key}）"
     logger.info(f"[AI][chat_act] Assistant Message: {assistant_msg}")
-    log_ui(project_id_pk, run_id, f"Assistant Message: {assistant_msg}", "INFO")
+    _log_chat_event(
+        project_id_pk,
+        str(run_id or ""),
+        "chat.assistant_message",
+        "生成 assistant_message",
+        "INFO",
+        data={"assistant_message": str(assistant_msg or "")},
+    )
     resp = ChatActResponse(
+        run_id=run_id,
         assistant_message=assistant_msg,
         created_run=created_run,
         cards=cards or None,
@@ -829,7 +1245,8 @@ async def _chat_act_core(
         planner_raw=(planner_raw or "") if req.debug else None,
     )
     logger.info(f"[AI][chat_act] Response: {resp.model_dump()}")
-    log_ui(project_id_pk, run_id, f"Response: {resp.model_dump()}", "INFO")
+    _log_chat_event(project_id_pk, str(run_id or ""), "chat.response", "响应已构造", "INFO")
+    _log_chat_event(project_id_pk, str(run_id or ""), "chat.response.ready", "响应已生成", "INFO")
 
     if emit_stages and run_id:
         _context_store.snapshot_stage(project_id=project_id_pk, run_id=run_id, stage_name="chat.final", data=resp.model_dump())
@@ -848,11 +1265,30 @@ async def chat_act(req: ChatActRequest, db: Session = Depends(get_db)):
     2) 顺序执行 steps（复用现有原子能力：大纲/剧本生成与优化）
     3) 仅将最终结果写入 AiActionRun（source=chat），并返回 debug trace（可选）
     """
+    run_id = (req.run_id or "").strip()
+    if not run_id:
+        raise HTTPException(status_code=400, detail="run_id 不能为空")
+    project_id_pk = resolve_project_pk(db, req.project_id)
     logger.info(f"[AI][chat_act] Request: {req.model_dump()}")
-    log_ui(req.project_id, run_id, f"Request: {req.model_dump()}", "INFO")
-    resp = await _chat_act_core(req=req, db=db, emit_stages=False, run_id=None)
+    _log_chat_event(
+        project_id_pk,
+        str(run_id or ""),
+        "chat.request",
+        "收到 chat/act 请求",
+        "INFO",
+        data={"episode_id": req.episode_id, "current_action_key": req.current_action_key},
+    )
+    _log_chat_event(
+        project_id_pk,
+        run_id,
+        "chat.request.received",
+        "收到 chat/act 请求",
+        "INFO",
+        data={"episode_id": req.episode_id, "current_action_key": req.current_action_key},
+    )
+    resp = await _chat_act_core(req=req, db=db, emit_stages=False, run_id=run_id)
     logger.info(f"[AI][chat_act] Response: {resp.model_dump()}")
-    log_ui(req.project_id, run_id, f"Response: {resp.model_dump()}", "INFO")
+    _log_chat_event(project_id_pk, str(run_id or ""), "chat.response.sent", "响应已返回", "INFO")
     return resp
 
 
@@ -862,8 +1298,9 @@ def chat_act_async(req: ChatActRequest, bg: BackgroundTasks):
     异步版：返回 run_id；执行过程写入 runs-files stages，供前端轮询展示执行步骤。
     """
     logger.info(f"[AI][chat_act_async] Request: {req.model_dump()}")
-    log_ui(req.project_id, "chat_act_async", f"Request: {req.model_dump()}", "INFO")
-    run_id = new_run_id()
+    run_id = (req.run_id or "").strip()
+    if not run_id:
+        raise HTTPException(status_code=400, detail="run_id 不能为空")
     _db = SessionLocal()
     try:
         project_id_pk = resolve_project_pk(_db, req.project_id)
@@ -872,6 +1309,22 @@ def chat_act_async(req: ChatActRequest, bg: BackgroundTasks):
             _db.close()
         except Exception as e:
             pass
+    _log_chat_event(
+        project_id_pk,
+        str(run_id or ""),
+        "chat.async.request",
+        "收到 chat/act_async 请求",
+        "INFO",
+        data={"episode_id": req.episode_id, "current_action_key": req.current_action_key},
+    )
+    _log_chat_event(
+        project_id_pk,
+        run_id,
+        "chat.request.received",
+        "收到 chat/act_async 请求",
+        "INFO",
+        data={"episode_id": req.episode_id, "current_action_key": req.current_action_key},
+    )
     _context_store.snapshot_stage(project_id=project_id_pk, run_id=run_id, stage_name="chat.status", data={"status": "queued", "at_ms": _now_ms()})
     payload = req.model_dump()
 
@@ -883,11 +1336,27 @@ def chat_act_async(req: ChatActRequest, bg: BackgroundTasks):
             async def _go():
                 try:
                     logger.info(f"[AI][chat_act_async] Running step {payload}")
-                    log_ui(project_id_pk, run_id, f"开始执行任务，Payload长度: {len(str(payload))}", "INFO")
+                    _log_chat_event(
+                        project_id_pk,
+                        str(run_id or ""),
+                        "chat.async.runner.start",
+                        "后台线程开始执行",
+                        "INFO",
+                        data={"payload_len": len(str(payload))},
+                    )
+                    _log_chat_event(project_id_pk, run_id, "chat.async.start", "后台线程开始执行", "INFO", data={"payload_len": len(str(payload))})
                     await _chat_act_core(req=ChatActRequest(**payload), db=db, emit_stages=True, run_id=run_id)
                 except Exception as e:
                     logger.error(f"[AI][chat_act_async] Error: {e}")
-                    log_ui(project_id_pk, run_id, f"发生异常: {str(e)}", "ERROR")
+                    _log_chat_event(
+                        project_id_pk,
+                        str(run_id or ""),
+                        "chat.async.runner.error",
+                        "后台执行异常",
+                        "ERROR",
+                        data={"error": f"{type(e).__name__}: {e}"},
+                    )
+                    _log_chat_event(project_id_pk, run_id, "chat.async.error", "后台执行异常", "ERROR", data={"error": str(e)})
                     _context_store.snapshot_stage(project_id=project_id_pk, run_id=run_id, stage_name="chat.error", data={"error": str(e), "at_ms": _now_ms()})
                     _context_store.snapshot_stage(project_id=project_id_pk, run_id=run_id, stage_name="chat.status", data={"status": "error", "at_ms": _now_ms()})
 

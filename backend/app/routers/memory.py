@@ -12,11 +12,13 @@ from ..services.evidence_ingestor import chunk_text_to_evidences
 from ..services.changeset_extractor import extract_changeset_v0_with_llm_with_trace
 from ..services.entity_resolver import resolve_changeset_entities_with_trace
 from ..services.llm_client import LlmChatSettings
+ 
 from ..services.app_paths import ai_settings_path
 from ..services.project_lookup import resolve_project_pk
 from ..workflows.memory_schemas import TimeBlock, TimeConstraint
 
 import logging
+import time
 import os
 log_dir = os.path.join(os.path.dirname(__file__), "..", "logs")
 os.makedirs(log_dir, exist_ok=True)
@@ -37,22 +39,28 @@ router = APIRouter(prefix="/memory", tags=["Memory (记忆工程)"])
 
 class UpsertTimeConstraintRequest(BaseModel):
     constraint: TimeConstraint
+    run_id: str
 
 
 class UpsertTimeConstraintResponse(BaseModel):
     id: str
+    run_id: str
 
 
 class ListTimeConstraintsResponse(BaseModel):
     items: List[Dict[str, Any]]
+    run_id: str
 
 
 @router.post("/time-constraint", response_model=UpsertTimeConstraintResponse)
 def upsert_time_constraint(payload: UpsertTimeConstraintRequest):
     store = get_memory_store()
     try:
+        run_id = (payload.run_id or "").strip()
+        if not run_id:
+            raise HTTPException(status_code=400, detail="run_id 不能为空")
         cid = store.upsert_time_constraint(payload.constraint)
-        return UpsertTimeConstraintResponse(id=cid)
+        return UpsertTimeConstraintResponse(id=cid, run_id=run_id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"upsert_time_constraint failed: {e}")
 
@@ -62,35 +70,45 @@ def list_time_constraints(
     project_id: str,
     status: Optional[str] = None,
     limit: int = 200,
+    run_id: str = "",
     db: Session = Depends(get_db),
 ):
     store = get_memory_store()
     try:
+        run_id = (run_id or "").strip()
+        if not run_id:
+            raise HTTPException(status_code=400, detail="run_id 不能为空")
         pid = resolve_project_pk(db, project_id)
         items = store.list_time_constraints(project_id=pid, status=status, limit=limit)
-        return ListTimeConstraintsResponse(items=items)
+        return ListTimeConstraintsResponse(items=items, run_id=run_id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"list_time_constraints failed: {e}")
 
 
 class UpsertTimeBlockRequest(BaseModel):
     block: TimeBlock
+    run_id: str
 
 
 class UpsertTimeBlockResponse(BaseModel):
     id: str
+    run_id: str
 
 
 class ListTimeBlocksResponse(BaseModel):
     items: List[Dict[str, Any]]
+    run_id: str
 
 
 @router.post("/time-block", response_model=UpsertTimeBlockResponse)
 def upsert_time_block(payload: UpsertTimeBlockRequest):
     store = get_memory_store()
     try:
+        run_id = (payload.run_id or "").strip()
+        if not run_id:
+            raise HTTPException(status_code=400, detail="run_id 不能为空")
         bid = store.upsert_time_block(payload.block)
-        return UpsertTimeBlockResponse(id=bid)
+        return UpsertTimeBlockResponse(id=bid, run_id=run_id)
     except Exception as e:
         logger.error(f"[Memory] Upsert Time Block Error: {e}")
         raise HTTPException(status_code=500, detail=f"upsert_time_block failed: {e}")
@@ -101,13 +119,17 @@ def list_time_blocks(
     project_id: str,
     status: Optional[str] = None,
     limit: int = 200,
+    run_id: str = "",
     db: Session = Depends(get_db),
 ):
     store = get_memory_store()
     try:
+        run_id = (run_id or "").strip()
+        if not run_id:
+            raise HTTPException(status_code=400, detail="run_id 不能为空")
         pid = resolve_project_pk(db, project_id)
         items = store.list_time_blocks(project_id=pid, status=status, limit=limit)
-        return ListTimeBlocksResponse(items=items)
+        return ListTimeBlocksResponse(items=items, run_id=run_id)
     except Exception as e:
         logger.error(f"[Memory] List Time Blocks Error: {e}")
         raise HTTPException(status_code=500, detail=f"list_time_blocks failed: {e}")
@@ -122,23 +144,28 @@ class CreateChangeSetRequest(BaseModel):
     project_id: str
     episode_id: Optional[int] = None
     payload: Dict[str, Any] = {}
+    run_id: str
 
 
 class CreateChangeSetResponse(BaseModel):
     changeset_id: str
+    run_id: str
 
 
 @router.post("/changeset", response_model=CreateChangeSetResponse)
 def create_changeset(req: CreateChangeSetRequest, db: Session = Depends(get_db)):
     store = get_memory_store()
     try:
+        run_id = (req.run_id or "").strip()
+        if not run_id:
+            raise HTTPException(status_code=400, detail="run_id 不能为空")
         pid = resolve_project_pk(db, req.project_id)
         cid = store.create_changeset(
             project_id=pid,
             episode_id=req.episode_id,
             payload=req.payload,
         )
-        return CreateChangeSetResponse(changeset_id=cid)
+        return CreateChangeSetResponse(changeset_id=cid, run_id=run_id)
     except Exception as e:
         logger.error(f"[Memory] Create Change Set Error: {e}")
         raise HTTPException(status_code=500, detail=f"create_changeset failed: {e}")
@@ -146,6 +173,7 @@ def create_changeset(req: CreateChangeSetRequest, db: Session = Depends(get_db))
 
 class ListChangeSetsResponse(BaseModel):
     items: List[Dict[str, Any]]
+    run_id: str
 
 
 @router.get("/changesets", response_model=ListChangeSetsResponse)
@@ -153,13 +181,17 @@ def list_changesets(
     project_id: str,
     review_status: Optional[str] = None,
     limit: int = 50,
+    run_id: str = "",
     db: Session = Depends(get_db),
 ):
     store = get_memory_store()
     try:
+        run_id = (run_id or "").strip()
+        if not run_id:
+            raise HTTPException(status_code=400, detail="run_id 不能为空")
         pid = resolve_project_pk(db, project_id)
         items = store.list_changesets(project_id=pid, review_status=review_status, limit=limit)
-        return ListChangeSetsResponse(items=items)
+        return ListChangeSetsResponse(items=items, run_id=run_id)
     except Exception as e:
         logger.error(f"[Memory] List Change Sets Error: {e}")
         raise HTTPException(status_code=500, detail=f"list_changesets failed: {e}")
@@ -167,20 +199,25 @@ def list_changesets(
 
 class GetChangeSetResponse(BaseModel):
     changeset: Dict[str, Any]
+    run_id: str
 
 
 @router.get("/changeset/{changeset_id}", response_model=GetChangeSetResponse)
-def get_changeset(changeset_id: str):
+def get_changeset(changeset_id: str, run_id: str = ""):
     store = get_memory_store()
     cs = store.get_changeset(changeset_id)
     if not cs:
         raise HTTPException(status_code=404, detail="ChangeSet not found")
-    return GetChangeSetResponse(changeset=cs)
+    run_id = (run_id or "").strip()
+    if not run_id:
+        raise HTTPException(status_code=400, detail="run_id 不能为空")
+    return GetChangeSetResponse(changeset=cs, run_id=run_id)
 
 
 class ApplyChangeSetRequest(BaseModel):
     reviewer: str = "human"
     note: Optional[str] = None
+    run_id: str
 
 
 @router.post("/changeset/{changeset_id}/approve")
@@ -216,16 +253,21 @@ class CreateConflictRequest(BaseModel):
     old_claim: Optional[Dict[str, Any]] = None
     new_claim: Optional[Dict[str, Any]] = None
     suggested_actions: Optional[List[Dict[str, Any]]] = None
+    run_id: str
 
 
 class CreateConflictResponse(BaseModel):
     conflict_id: str
+    run_id: str
 
 
 @router.post("/conflict", response_model=CreateConflictResponse)
 def create_conflict(req: CreateConflictRequest, db: Session = Depends(get_db)):
     store = get_memory_store()
     try:
+        run_id = (req.run_id or "").strip()
+        if not run_id:
+            raise HTTPException(status_code=400, detail="run_id 不能为空")
         pid = resolve_project_pk(db, req.project_id)
         conflict_id = store.create_conflict(
             project_id=pid,
@@ -236,7 +278,7 @@ def create_conflict(req: CreateConflictRequest, db: Session = Depends(get_db)):
             new_claim=req.new_claim,
             suggested_actions=req.suggested_actions,
         )
-        return CreateConflictResponse(conflict_id=conflict_id)
+        return CreateConflictResponse(conflict_id=conflict_id, run_id=run_id)
     except Exception as e:
         logger.error(f"[Memory] Create Conflict Error: {e}")
         raise HTTPException(status_code=500, detail=f"create_conflict failed: {e}")
@@ -244,6 +286,7 @@ def create_conflict(req: CreateConflictRequest, db: Session = Depends(get_db)):
 
 class ListConflictsResponse(BaseModel):
     items: List[Dict[str, Any]]
+    run_id: str
 
 
 @router.get("/conflicts", response_model=ListConflictsResponse)
@@ -251,13 +294,17 @@ def list_conflicts(
     project_id: str,
     status: Optional[str] = "open",
     limit: int = 100,
+    run_id: str = "",
     db: Session = Depends(get_db),
 ):
     store = get_memory_store()
     try:
+        run_id = (run_id or "").strip()
+        if not run_id:
+            raise HTTPException(status_code=400, detail="run_id 不能为空")
         pid = resolve_project_pk(db, project_id)
         items = store.list_conflicts(project_id=pid, status=status, limit=limit)
-        return ListConflictsResponse(items=items)
+        return ListConflictsResponse(items=items, run_id=run_id)
     except Exception as e:
         logger.error(f"[Memory] List Conflicts Error: {e}")
         raise HTTPException(status_code=500, detail=f"list_conflicts failed: {e}")
@@ -267,6 +314,7 @@ class ResolveConflictRequest(BaseModel):
     resolved_by: str = "human"
     resolution_note: Optional[str] = None
     status: str = "resolved"
+    run_id: str
 
 
 @router.post("/conflict/{conflict_id}/resolve")
@@ -297,11 +345,13 @@ class EvidenceIngestRequest(BaseModel):
     text: str
     max_quote_chars: int = 600
     tags: List[str] = []
+    run_id: str
 
 
 class EvidenceIngestResponse(BaseModel):
     evidence_ids: List[str]
     count: int
+    run_id: str
 
 
 @router.post("/evidence/ingest", response_model=EvidenceIngestResponse)
@@ -309,8 +359,12 @@ def ingest_evidence(req: EvidenceIngestRequest, db: Session = Depends(get_db)):
     store = get_memory_store()
     try:
         pid = resolve_project_pk(db, req.project_id)
+        run_id = (req.run_id or "").strip()
+        if not run_id:
+            raise HTTPException(status_code=400, detail="run_id 不能为空")
         evidences = chunk_text_to_evidences(
             project_id=pid,
+            run_id=run_id,
             text=req.text,
             episode_id=req.episode_id,
             scene_id=req.scene_id,
@@ -320,7 +374,7 @@ def ingest_evidence(req: EvidenceIngestRequest, db: Session = Depends(get_db)):
         ids: List[str] = []
         for ev in evidences:
             ids.append(store.upsert_evidence(ev))
-        return EvidenceIngestResponse(evidence_ids=ids, count=len(ids))
+        return EvidenceIngestResponse(evidence_ids=ids, count=len(ids), run_id=run_id)
     except Exception as e:
         logger.error(f"[Memory] Ingest Evidence Error: {e}")
         raise HTTPException(status_code=500, detail=f"ingest_evidence failed: {e}")
@@ -336,16 +390,21 @@ class CreateChangeSetFromPayloadRequest(BaseModel):
     episode_id: Optional[int] = None
     payload: Dict[str, Any] = {}
     default_materialize_static_bible: bool = True
+    run_id: str
 
 
 class CreateChangeSetFromPayloadResponse(BaseModel):
     changeset_id: str
+    run_id: str
 
 
 @router.post("/changeset/from-payload", response_model=CreateChangeSetFromPayloadResponse)
 def create_changeset_from_payload(req: CreateChangeSetFromPayloadRequest, db: Session = Depends(get_db)):
     store = get_memory_store()
     try:
+        run_id = (req.run_id or "").strip()
+        if not run_id:
+            raise HTTPException(status_code=400, detail="run_id 不能为空")
         pid = resolve_project_pk(db, req.project_id)
         payload = dict(req.payload or {})
         # 最小校验：schema_version
@@ -369,7 +428,7 @@ def create_changeset_from_payload(req: CreateChangeSetFromPayloadRequest, db: Se
         payload["materialize"] = materialize
 
         cid = store.create_changeset(project_id=int(pid), payload=payload, episode_id=req.episode_id)
-        return CreateChangeSetFromPayloadResponse(changeset_id=cid)
+        return CreateChangeSetFromPayloadResponse(changeset_id=cid, run_id=run_id)
     except HTTPException:
         raise
     except Exception as e:
@@ -385,16 +444,14 @@ def create_changeset_from_payload(req: CreateChangeSetFromPayloadRequest, db: Se
 class ExtractChangeSetRequest(BaseModel):
     project_id: str
     episode_id: Optional[int] = None
-    # 二选一：
     evidence_ids: List[str] = []
     text: Optional[str] = None
-    # 如果传 text，会先自动切片入库
     ingest_max_quote_chars: int = 600
     ingest_tags: List[str] = []
-    # 输出策略
     story_order_base: Optional[str] = None
     create_changeset: bool = True
     debug: bool = False
+    run_id: str
 
 
 class ExtractChangeSetResponse(BaseModel):
@@ -402,6 +459,7 @@ class ExtractChangeSetResponse(BaseModel):
     payload: Dict[str, Any]
     evidence_ids: List[str]
     trace: Optional[Dict[str, Any]] = None
+    run_id: str
 
 
 def _read_ai_settings_raw() -> Dict[str, Any]:
@@ -458,9 +516,13 @@ async def extract_changeset(req: ExtractChangeSetRequest, db: Session = Depends(
 
     # 1) 获取/生成 evidence_ids
     evidence_ids: List[str] = []
+    run_id = (req.run_id or "").strip()
+    if not run_id:
+        raise HTTPException(status_code=400, detail="run_id 不能为空")
     if (req.text or "").strip():
         evidences = chunk_text_to_evidences(
             project_id=project_id,
+            run_id=run_id,
             text=str(req.text or ""),
             episode_id=episode_id,
             scene_id=None,
@@ -528,5 +590,10 @@ async def extract_changeset(req: ExtractChangeSetRequest, db: Session = Depends(
     trace = None
     if bool(req.debug):
         trace = {"extractor": extractor_trace, "resolver": resolver_trace}
-    return ExtractChangeSetResponse(changeset_id=changeset_id, payload=payload, evidence_ids=evidence_ids, trace=trace)
-
+    return ExtractChangeSetResponse(
+        changeset_id=changeset_id,
+        payload=payload,
+        evidence_ids=evidence_ids,
+        trace=trace,
+        run_id=run_id,
+    )

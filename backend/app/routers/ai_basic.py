@@ -56,6 +56,7 @@ def update_settings(payload: AiSettingsUpdate):
 class AiTestResponse(BaseModel):
     ok: bool
     detail: Optional[str] = None
+    run_id: Optional[str] = None
 
 
 @router.post("/test", response_model=AiTestResponse)
@@ -63,7 +64,7 @@ async def test_ai():
     raw = _read_settings_raw()
     settings = _mask_settings(raw)
     if not settings.has_api_key:
-        return AiTestResponse(ok=False, detail="API Key 未配置")
+        return AiTestResponse(ok=False, detail="API Key 未配置", run_id=None)
 
     try:
         content = await _chat_client.chat(
@@ -80,17 +81,19 @@ async def test_ai():
                 {"role": "user", "content": "Reply with exactly: OK"},
             ],
         )
+        run_id = None
         if (content or "").strip() == "OK":
-            return AiTestResponse(ok=True, detail="连接成功")
-        return AiTestResponse(ok=True, detail=f"连接成功（返回：{(content or '').strip()[:50]}）")
+            return AiTestResponse(ok=True, detail="连接成功", run_id=run_id)
+        return AiTestResponse(ok=True, detail=f"连接成功（返回：{(content or '').strip()[:50]}）", run_id=run_id)
     except HTTPException as e:
         # 透出后端代理错误
-        return AiTestResponse(ok=False, detail=str(e.detail))
+        return AiTestResponse(ok=False, detail=str(e.detail), run_id=None)
 
 
 class SplitScenesRequest(BaseModel):
     text: str
     max_scenes: int = 50
+    run_id: str
 
 
 class SplitSceneItem(BaseModel):
@@ -101,6 +104,7 @@ class SplitSceneItem(BaseModel):
 class SplitShotsRequest(BaseModel):
     text: str
     max_shots: int = 80
+    run_id: str
 
 
 class SplitShotItem(BaseModel):
@@ -199,4 +203,3 @@ async def split_shots(req: SplitShotsRequest):
         return out
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"AI output parse failed: {e}")
-

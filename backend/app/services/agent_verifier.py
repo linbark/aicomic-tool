@@ -167,6 +167,7 @@ class AgentVerifier:
         for design in character_designs:
             # 检查生成内容中是否使用了正确的角色设计
             # TODO: 实现更复杂的检查逻辑
+            pass
 
         return issues
 
@@ -194,4 +195,3 @@ def get_agent_verifier(memory_retriever: Optional[MemoryRetriever] = None) -> Ag
     if _global_verifier is None:
         _global_verifier = AgentVerifier(memory_retriever=memory_retriever)
     return _global_verifier
-

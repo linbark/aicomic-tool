@@ -7,7 +7,6 @@ from sqlalchemy.orm import Session
 
 from ..database import get_db
 from ..services import prompt_registry
-from ..services.context_store import new_run_id
 from ..services.llm_client import LlmChatSettings
 from ..services.project_lookup import resolve_project_pk
 from ..services.prompt_composer import PromptModules, compose_system_prompt_xml
@@ -22,6 +21,7 @@ class VisualDnaIngestRequest(BaseModel):
     item_id: int
     asset_file_path: str
     version: str = "v1"
+    run_id: str
 
 
 class VisualDnaIngestResponse(BaseModel):
@@ -57,7 +57,9 @@ async def ingest_visual_dna(req: VisualDnaIngestRequest, db: Session = Depends(g
     if not os.path.exists(full_path) or not full_path.startswith(os.path.abspath(data_dir_path)):
         raise HTTPException(status_code=400, detail="文件路径无效或不在允许的目录下")
 
-    run_id = new_run_id()
+    run_id = (req.run_id or "").strip()
+    if not run_id:
+        raise HTTPException(status_code=400, detail="run_id 不能为空")
 
     # 读取 series_bible（用于上下文）
     series_bible = _context_store.get_series_bible(project_id=project_id, version="v1") or {}
@@ -151,4 +153,3 @@ async def ingest_visual_dna(req: VisualDnaIngestRequest, db: Session = Depends(g
         visual_dna=visual_dna,
         qc_report=None,  # 可选：后续可加入 QC 检查
     )
-

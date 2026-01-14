@@ -72,12 +72,51 @@ def chunk_text_to_evidences(
     evidences: List[EvidenceRecordPayload] = []
 
     for p_idx, para in enumerate(paras):
-        log_ui(project_id, run_id, f"Chunking Text: {para}", "INFO")
+        para_preview = (para or "").strip()
+        if len(para_preview) > 200:
+            para_preview = para_preview[:200] + "..."
+        log_ui(
+            project_id,
+            run_id,
+            {
+                "stage": "memory.evidence.chunk.paragraph",
+                "summary": "切片段落",
+                "data": {"paragraph_index": int(p_idx), "para_len": len(para or ""), "para_preview": para_preview},
+            },
+            "INFO",
+        )
         chunks = _chunk_by_chars(para, max_quote_chars)
         for c_idx, chunk in enumerate(chunks):
-            log_ui(project_id, run_id, f"Chunking Text Chunk: {chunk}", "INFO")
+            chunk_preview = (chunk or "").strip()
+            if len(chunk_preview) > 200:
+                chunk_preview = chunk_preview[:200] + "..."
+            log_ui(
+                project_id,
+                run_id,
+                {
+                    "stage": "memory.evidence.chunk.chunk",
+                    "summary": "切片 chunk",
+                    "data": {
+                        "paragraph_index": int(p_idx),
+                        "chunk_index": int(c_idx),
+                        "chunk_total": int(len(chunks)),
+                        "chunk_len": len(chunk or ""),
+                        "chunk_preview": chunk_preview,
+                    },
+                },
+                "INFO",
+            )
             span = EvidenceSpan(paragraph_index=int(p_idx), sentence_index=None, start_offset=None, end_offset=None)
-            log_ui(project_id, run_id, f"Chunking Text Span: {span}", "INFO")
+            log_ui(
+                project_id,
+                run_id,
+                {
+                    "stage": "memory.evidence.chunk.span",
+                    "summary": "生成 span",
+                    "data": {"paragraph_index": int(p_idx), "chunk_index": int(c_idx), "span": span.model_dump()},
+                },
+                "INFO",
+            )
             # 如果同段落被切成多块，用 tags 标注 chunk 序号（便于回溯）
             extra_tags = list(tags)
             if len(chunks) > 1:
@@ -95,5 +134,4 @@ def chunk_text_to_evidences(
             )
 
     return evidences
-
 

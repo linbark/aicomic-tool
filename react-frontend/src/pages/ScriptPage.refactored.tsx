@@ -156,7 +156,6 @@ export function ScriptPage() {
     let alive = true
     const pid = projectId
     const runId = chatRun.runId
-    let finalConsumed = false
 
     async function tick() {
       if (!alive) return
@@ -166,7 +165,6 @@ export function ScriptPage() {
         const stageList: string[] = Array.isArray(stages)
           ? stages.map((s: any) => (typeof s === 'string' ? s : s?.name || ''))
           : []
-        const stageSet = new Set(stageList)
         
         // 完整的轮询逻辑需要在这里实现
         // 由于代码量很大，建议保持原有轮询逻辑不变
@@ -183,12 +181,18 @@ export function ScriptPage() {
               if (!alive) return
               const d = (res.data as any)?.data || {}
               setDebugLogs((prev) => {
-                const newLog = {
-                  id: logName,
-                  ts: d.timestamp ? d.timestamp * 1000 : Date.now(),
-                  level: d.level || 'INFO',
-                  text: d.text || '',
-                }
+                const ts =
+                  typeof d?.ts_ms === 'number'
+                    ? Number(d.ts_ms)
+                    : typeof d?.at_ms === 'number'
+                      ? Number(d.at_ms)
+                      : d.timestamp
+                        ? d.timestamp * 1000
+                        : Date.now()
+                const stage = d?.stage ? String(d.stage) : ''
+                const summary = d?.summary ? String(d.summary) : d?.text ? String(d.text) : ''
+                const text = stage ? `[${stage}] ${summary}` : summary
+                const newLog = { id: logName, ts, level: d.level || 'INFO', text }
                 const next = [...prev, newLog]
                 next.sort((a, b) => a.ts - b.ts)
                 return next

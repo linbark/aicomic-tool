@@ -21,6 +21,7 @@ router = APIRouter(tags=["AI (DeepSeek)"])
 class ContextWriteRequest(BaseModel):
     data: Dict[str, Any]
     version: str = "v1"
+    run_id: str
 
 
 class ContextReadResponse(BaseModel):
@@ -29,6 +30,7 @@ class ContextReadResponse(BaseModel):
     version: str
     exists: bool
     data: Optional[Dict[str, Any]] = None
+    run_id: str
 
 
 class ContextWriteResponse(BaseModel):
@@ -37,18 +39,22 @@ class ContextWriteResponse(BaseModel):
     version: str
     path: str
     updated_at_ms: int
+    run_id: str
 
 
 @router.get("/context/series-bible", response_model=ContextReadResponse)
-def get_series_bible(project_id: str, version: str = "v1", db: Session = Depends(get_db)):
+def get_series_bible(project_id: str, run_id: str, version: str = "v1", db: Session = Depends(get_db)):
     pid = resolve_project_pk(db, project_id)
     data = _context_store.get_series_bible(project_id=pid, version=version)
+    if not (run_id or "").strip():
+        raise HTTPException(status_code=400, detail="run_id 不能为空")
     return ContextReadResponse(
         project_id=str(project_id),
         kind="series_bible",
         version=version,
         exists=bool(data),
         data=data,
+        run_id=run_id,
     )
 
 
@@ -64,25 +70,32 @@ def put_series_bible(project_id: str, payload: ContextWriteRequest, db: Session 
         raise HTTPException(status_code=400, detail="data 必须是 JSON object")
     pid = resolve_project_pk(db, project_id)
     meta = _context_store.put_series_bible(project_id=pid, data=payload.data, version=payload.version)
+    run_id = (payload.run_id or "").strip()
+    if not run_id:
+        raise HTTPException(status_code=400, detail="run_id 不能为空")
     return ContextWriteResponse(
         project_id=str(project_id),
         kind="series_bible",
         version=meta.version,
         path=meta.path,
         updated_at_ms=meta.updated_at_ms,
+        run_id=run_id,
     )
 
 
 @router.get("/context/visual-dna", response_model=ContextReadResponse)
-def get_visual_dna(project_id: str, item_id: int, version: str = "v1", db: Session = Depends(get_db)):
+def get_visual_dna(project_id: str, item_id: int, run_id: str, version: str = "v1", db: Session = Depends(get_db)):
     pid = resolve_project_pk(db, project_id)
     data = _context_store.get_visual_dna(project_id=pid, item_id=item_id, version=version)
+    if not (run_id or "").strip():
+        raise HTTPException(status_code=400, detail="run_id 不能为空")
     return ContextReadResponse(
         project_id=str(project_id),
         kind="visual_dna",
         version=version,
         exists=bool(data),
         data=data,
+        run_id=run_id,
     )
 
 
@@ -98,12 +111,16 @@ def put_visual_dna(project_id: str, item_id: int, payload: ContextWriteRequest, 
         raise HTTPException(status_code=400, detail="data 必须是 JSON object")
     pid = resolve_project_pk(db, project_id)
     meta = _context_store.put_visual_dna(project_id=pid, item_id=item_id, data=payload.data, version=payload.version)
+    run_id = (payload.run_id or "").strip()
+    if not run_id:
+        raise HTTPException(status_code=400, detail="run_id 不能为空")
     return ContextWriteResponse(
         project_id=str(project_id),
         kind="visual_dna",
         version=meta.version,
         path=meta.path,
         updated_at_ms=meta.updated_at_ms,
+        run_id=run_id,
     )
 
 
@@ -117,11 +134,13 @@ class ProjectOutlineReadResponse(BaseModel):
     version: str
     exists: bool
     data: Optional[Dict[str, Any]] = None
+    run_id: str
 
 
 class ProjectOutlineWriteRequest(BaseModel):
     data: Dict[str, Any]
     version: str = "v1"
+    run_id: str
 
 
 class ProjectOutlineWriteResponse(BaseModel):
@@ -129,18 +148,22 @@ class ProjectOutlineWriteResponse(BaseModel):
     version: str
     path: str
     updated_at_ms: int
+    run_id: str
 
 
 @router.get("/context/project-outline", response_model=ProjectOutlineReadResponse)
-def get_project_outline(project_id: str, version: str = "v1", db: Session = Depends(get_db)):
+def get_project_outline(project_id: str, run_id: str, version: str = "v1", db: Session = Depends(get_db)):
     """获取项目级大纲"""
     pid = resolve_project_pk(db, project_id)
     data = _context_store.get_project_outline(project_id=pid, version=version)
+    if not (run_id or "").strip():
+        raise HTTPException(status_code=400, detail="run_id 不能为空")
     return ProjectOutlineReadResponse(
         project_id=str(project_id),
         version=version,
         exists=bool(data),
         data=data,
+        run_id=run_id,
     )
 
 
@@ -155,11 +178,15 @@ def put_project_outline(project_id: str, payload: ProjectOutlineWriteRequest, db
         raise HTTPException(status_code=400, detail="data 必须是 JSON object")
     pid = resolve_project_pk(db, project_id)
     meta = _context_store.put_project_outline(project_id=pid, data=payload.data, version=payload.version)
+    run_id = (payload.run_id or "").strip()
+    if not run_id:
+        raise HTTPException(status_code=400, detail="run_id 不能为空")
     return ProjectOutlineWriteResponse(
         project_id=str(project_id),
         version=meta.version,
         path=meta.path,
         updated_at_ms=meta.updated_at_ms,
+        run_id=run_id,
     )
 
 
@@ -167,10 +194,12 @@ class ProjectOutlineGenerateRequest(BaseModel):
     project_id: str
     input_text: str  # 故事灵感/概要
     num_episodes: int = 12  # 预计集数
+    run_id: str
 
 
 class ProjectOutlineGenerateResponse(BaseModel):
     project_outline: Dict[str, Any]
+    run_id: str
 
 
 @router.post("/project-outline-generate", response_model=ProjectOutlineGenerateResponse)
@@ -215,6 +244,9 @@ async def project_outline_generate(req: ProjectOutlineGenerateRequest, db: Sessi
 
 请生成完整的项目级大纲。"""
 
+    run_id = (req.run_id or "").strip()
+    if not run_id:
+        raise HTTPException(status_code=400, detail="run_id 不能为空")
     content = await _chat_client.chat(
         settings=settings,
         messages=[
@@ -232,18 +264,20 @@ async def project_outline_generate(req: ProjectOutlineGenerateRequest, db: Sessi
     pid = resolve_project_pk(db, req.project_id)
     _context_store.put_project_outline(project_id=pid, data=parsed, version="v1")
 
-    return ProjectOutlineGenerateResponse(project_outline=parsed)
+    return ProjectOutlineGenerateResponse(project_outline=parsed, run_id=run_id)
 
 
 class ProjectOutlineOptimizeRequest(BaseModel):
     project_id: str
     current_outline: str  # 当前大纲 JSON 字符串
     optimization_instructions: str = ""  # 可选的优化指令
+    run_id: str
 
 
 class ProjectOutlineOptimizeResponse(BaseModel):
     project_outline: Dict[str, Any]
     changes_summary: str
+    run_id: str
 
 
 @router.post("/project-outline-optimize", response_model=ProjectOutlineOptimizeResponse)
@@ -252,6 +286,9 @@ async def project_outline_optimize(req: ProjectOutlineOptimizeRequest, db: Sessi
     优化项目级大纲
     """
     settings = _get_llm_settings()
+    run_id = (req.run_id or "").strip()
+    if not run_id:
+        raise HTTPException(status_code=400, detail="run_id 不能为空")
 
     system_prompt = """你是一位资深的漫剧故事编辑和优化专家。
 你的任务是优化用户提供的项目级大纲，使其更加精炼、连贯、引人入胜。
@@ -302,5 +339,5 @@ async def project_outline_optimize(req: ProjectOutlineOptimizeRequest, db: Sessi
     return ProjectOutlineOptimizeResponse(
         project_outline=project_outline,
         changes_summary=changes_summary,
+        run_id=run_id,
     )
-

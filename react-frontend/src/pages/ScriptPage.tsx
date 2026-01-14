@@ -223,12 +223,18 @@ export function ScriptPage() {
 
               const d = (res.data as any)?.data || {}
               setDebugLogs((prev) => {
-                const newLog = {
-                  id: logName,
-                  ts: d.timestamp ? d.timestamp * 1000 : Date.now(),
-                  level: d.level || 'INFO',
-                  text: d.text || '',
-                }
+                const ts =
+                  typeof d?.ts_ms === 'number'
+                    ? Number(d.ts_ms)
+                    : typeof d?.at_ms === 'number'
+                      ? Number(d.at_ms)
+                      : d.timestamp
+                        ? d.timestamp * 1000
+                        : Date.now()
+                const stage = d?.stage ? String(d.stage) : ''
+                const summary = d?.summary ? String(d.summary) : d?.text ? String(d.text) : ''
+                const text = stage ? `[${stage}] ${summary}` : summary
+                const newLog = { id: logName, ts, level: d.level || 'INFO', text }
                 // 加入新日志并重新按时间排序
                 const next = [...prev, newLog]
                 next.sort((a, b) => a.ts - b.ts)
@@ -607,8 +613,15 @@ export function ScriptPage() {
     fetchedLogIdsRef.current.clear()
     setChatPollPaused(false)
     try {
+      const runId = (typeof window !== 'undefined' && (window as any).crypto && (window as any).crypto.randomUUID)
+        ? (window as any).crypto.randomUUID().replace(/-/g, '')
+        : (Math.random().toString(16).slice(2) + Date.now().toString(16)).slice(0, 32)
+      try {
+        localStorage.setItem('aicomic.lastRunId', runId)
+      } catch {}
       const res = await api.aiChatActAsync({
         project_id: projectId,
+        run_id: runId,
         episode_id: selected.episodeId,
         current_action_key: 'episode_chat',
         message: msg,
@@ -623,10 +636,10 @@ export function ScriptPage() {
         },
       } as any)
       const data = res.data as any
-      const runId = String(data?.run_id || '')
-      if (runId) {
-        setChatRun({ runId, status: 'queued', steps: [], startedAtMs: _now(), lastAtMs: _now(), currentStepIndex: null, currentActionKey: null })
-        setChatMsgs((prev) => [...prev, { id: `${_now()}-a`, role: 'assistant', content: `已开始执行（run=${runId}）…`, ts: _now() }])
+      const retRunId = String(data?.run_id || '')
+      if (retRunId) {
+        setChatRun({ runId: retRunId, status: 'queued', steps: [], startedAtMs: _now(), lastAtMs: _now(), currentStepIndex: null, currentActionKey: null })
+        setChatMsgs((prev) => [...prev, { id: `${_now()}-a`, role: 'assistant', content: `已开始执行（run=${retRunId}）…`, ts: _now() }])
       } else {
         setChatBusy(false)
         setChatMsgs((prev) => [...prev, { id: `${_now()}-a`, role: 'assistant', content: '启动失败：缺少 run_id', ts: _now() }])
@@ -1385,5 +1398,3 @@ const styles: Record<string, any> = {
   },
   mono: { fontFamily: 'monospace', fontSize: 11, opacity: 0.85 },
 }
-
-

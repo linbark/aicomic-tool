@@ -26,6 +26,8 @@ export interface AiTestResponse {
 
 export interface OutlineGenerateRequest {
   text: string
+  project_id?: number
+  run_id: string
 }
 
 export interface OutlineGenerateResponse {
@@ -34,6 +36,8 @@ export interface OutlineGenerateResponse {
 
 export interface OutlineOptimizeRequest {
   text: string
+  project_id?: number
+  run_id: string
 }
 
 export interface OutlineOptimizeResponse {
@@ -42,6 +46,8 @@ export interface OutlineOptimizeResponse {
 
 export interface ScriptGenerateRequest {
   text: string
+  project_id?: number
+  run_id: string
 }
 
 export interface ScriptGenerateResponse {
@@ -50,6 +56,8 @@ export interface ScriptGenerateResponse {
 
 export interface ScriptOptimizeRequest {
   text: string
+  project_id?: number
+  run_id: string
 }
 
 export interface ScriptOptimizeResponse {
@@ -66,6 +74,7 @@ export interface WorkflowScriptRequest {
   project_id: ProjectID
   input_text: string
   options?: WorkflowScriptOptions
+  run_id: string
 }
 
 export interface WorkflowScriptResponse {
@@ -88,6 +97,7 @@ export interface WorkflowStoryboardRequest {
   project_id: ProjectID
   scene_text: string
   options?: WorkflowStoryboardOptions
+  run_id: string
 }
 
 export interface WorkflowStoryboardResponse {
@@ -268,10 +278,36 @@ export interface VisualDnaIngestRequest {
   item_id: ID
   asset_file_path: string
   version?: string
+  run_id: string
 }
 
 export interface VisualDnaIngestResponse {
   run_id: string
   visual_dna: Record<string, unknown>
   qc_report?: Record<string, unknown> | null
+}
+
+export interface ProjectOutlineGenerateRequest {
+  project_id: ProjectID
+  input_text: string
+  num_episodes?: number
+  run_id: string
+}
+
+export interface ProjectOutlineGenerateResponse {
+  project_outline: Record<string, unknown>
+  run_id: string
+}
+
+export interface ProjectOutlineOptimizeRequest {
+  project_id: ProjectID
+  current_outline: string
+  optimization_instructions?: string
+  run_id: string
+}
+
+export interface ProjectOutlineOptimizeResponse {
+  project_outline: Record<string, unknown>
+  changes_summary: string
+  run_id: string
 }

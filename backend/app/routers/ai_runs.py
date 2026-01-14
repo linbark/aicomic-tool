@@ -25,6 +25,7 @@ class AiActionRunRead(BaseModel):
     output_text: str
     meta_data: Optional[Dict[str, Any]] = None
     created_at: datetime
+    run_id: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -38,6 +39,7 @@ class AiActionRunCreate(BaseModel):
     input_text: Optional[str] = None
     output_text: str
     meta_data: Optional[Dict[str, Any]] = None
+    run_id: str
 
 
 @router.get("/runs", response_model=List[AiActionRunRead])
@@ -56,7 +58,7 @@ def list_ai_runs(
     if action_key:
         q = q.filter(models.AiActionRun.action_key == str(action_key))
     rows = q.order_by(models.AiActionRun.created_at.desc()).limit(int(limit)).all()
-    return [
+    out = [
         {
             "id": r.id,
             "project_id": str(project.uuid),
@@ -67,9 +69,11 @@ def list_ai_runs(
             "output_text": r.output_text,
             "meta_data": r.meta_data,
             "created_at": r.created_at,
+            "run_id": (r.meta_data or {}).get("run_id") if isinstance(r.meta_data, dict) else None,
         }
         for r in rows
     ]
+    return out
 
 
 @router.post("/runs", response_model=AiActionRunRead)
@@ -81,6 +85,8 @@ def create_ai_run(payload: AiActionRunCreate, db: Session = Depends(get_db)):
     if payload.target_type != "episode":
         # 先只允许 episode（按计划范围）
         raise HTTPException(status_code=400, detail="target_type 暂仅支持 episode")
+    if not (payload.run_id or "").strip():
+        raise HTTPException(status_code=400, detail="run_id 不能为空")
 
     project = resolve_project(db, payload.project_id)
     db_obj = models.AiActionRun(
@@ -90,7 +96,7 @@ def create_ai_run(payload: AiActionRunCreate, db: Session = Depends(get_db)):
         action_key=str(payload.action_key),
         input_text=payload.input_text,
         output_text=payload.output_text,
-        meta_data=payload.meta_data or None,
+        meta_data={**(payload.meta_data or {}), **({"run_id": payload.run_id})} or None,
     )
     db.add(db_obj)
     db.commit()
@@ -105,6 +111,7 @@ def create_ai_run(payload: AiActionRunCreate, db: Session = Depends(get_db)):
         "output_text": db_obj.output_text,
         "meta_data": db_obj.meta_data,
         "created_at": db_obj.created_at,
+        "run_id": (db_obj.meta_data or {}).get("run_id") if isinstance(db_obj.meta_data, dict) else None,
     }
 
 
@@ -117,4 +124,3 @@ def delete_ai_run(run_id: int, db: Session = Depends(get_db)):
     db.delete(db_obj)
     db.commit()
     return {"ok": True, "deleted_id": run_id}
-

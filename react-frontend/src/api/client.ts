@@ -12,6 +12,7 @@ import type {
   EventCreate,
   EventRead,
   EventUpdate,
+  OutlineGenerateRequest,
   OutlineOptimizeRequest,
   OutlineOptimizeResponse,
   PromptTemplateCreate,
@@ -22,6 +23,7 @@ import type {
   ProjectUpdate,
   ScriptGenerateRequest,
   ScriptGenerateResponse,
+  ScriptOptimizeRequest,
   SplitSceneItem,
   SplitShotItem,
   VisualDnaIngestRequest,
@@ -30,6 +32,10 @@ import type {
   WorkflowScriptResponse,
   WorkflowStoryboardRequest,
   WorkflowStoryboardResponse,
+  ProjectOutlineGenerateRequest,
+  ProjectOutlineGenerateResponse,
+  ProjectOutlineOptimizeRequest,
+  ProjectOutlineOptimizeResponse,
 } from './types'
 
 let _apiBaseUrl =
@@ -150,10 +156,10 @@ export const api = {
   testAi: () => apiClient.post<AiTestResponse>(`/ai/test`),
   aiSplitScenes: (data: { text: string; max_scenes?: number }) => apiClient.post<SplitSceneItem[]>(`/ai/split-scenes`, data),
   aiSplitShots: (data: { text: string; max_shots?: number }) => apiClient.post<SplitShotItem[]>(`/ai/split-shots`, data),
-  aiOutlineGenerate: (data: { text: string }) => apiClient.post<{ text: string }>(`/ai/outline-generate`, data),
+  aiOutlineGenerate: (data: OutlineGenerateRequest) => apiClient.post<{ text: string }>(`/ai/outline-generate`, data),
   aiOutlineOptimize: (data: OutlineOptimizeRequest) => apiClient.post<OutlineOptimizeResponse>(`/ai/outline-optimize`, data),
   aiGenerateScript: (data: ScriptGenerateRequest) => apiClient.post<ScriptGenerateResponse>(`/ai/generate-script`, data),
-  aiScriptOptimize: (data: { text: string }) => apiClient.post<{ text: string }>(`/ai/script-optimize`, data),
+  aiScriptOptimize: (data: ScriptOptimizeRequest) => apiClient.post<{ text: string }>(`/ai/script-optimize`, data),
   aiWorkflowScript: (data: WorkflowScriptRequest) => apiClient.post<WorkflowScriptResponse>(`/ai/workflows/script`, data),
   aiWorkflowStoryboard: (data: WorkflowStoryboardRequest) => apiClient.post<WorkflowStoryboardResponse>(`/ai/workflows/storyboard`, data),
   aiApplyWorkflowScript: (data: ApplyScriptWorkflowRequest) => apiClient.post(`/ai/workflows/script/apply`, data),
@@ -179,6 +185,7 @@ export const api = {
   // Chat Orchestrator（意图识别 + 多步编排）
   aiChatAct: (data: {
     project_id: string
+    run_id: string
     episode_id?: number
     current_action_key?: string
     message: string
@@ -186,6 +193,7 @@ export const api = {
     debug?: boolean
   }) =>
     apiClient.post<{
+      run_id: string
       assistant_message: string
       created_run?: { id: number; action_key: string; created_at: string }
       cards?: any[]
@@ -197,6 +205,7 @@ export const api = {
     }>(`/ai/chat/act`, data),
   aiChatActAsync: (data: {
     project_id: string
+    run_id: string
     episode_id?: number
     current_action_key?: string
     message: string
@@ -209,44 +218,50 @@ export const api = {
     }>(`/ai/chat/act_async`, data),
 
   // Context 管理（Series Bible / Visual DNA / Project Outline）
-  getSeriesBible: (projectId: string, version: string = 'v1') => {
+  getSeriesBible: (projectId: string, runId: string, version: string = 'v1') => {
     const qs = new URLSearchParams()
     qs.set('project_id', String(projectId))
+    qs.set('run_id', String(runId))
     qs.set('version', version)
     return apiClient.get(`/ai/context/series-bible?${qs.toString()}`)
   },
-  putSeriesBible: (projectId: string, data: { data: Record<string, unknown>; version?: string }) => {
+  putSeriesBible: (projectId: string, data: { data: Record<string, unknown>; version?: string }, runId: string) => {
     const qs = new URLSearchParams()
     qs.set('project_id', String(projectId))
-    return apiClient.put(`/ai/context/series-bible?${qs.toString()}`, data)
+    const payload = { ...data, run_id: runId }
+    return apiClient.put(`/ai/context/series-bible?${qs.toString()}`, payload)
   },
-  getProjectOutline: (projectId: string, version: string = 'v1') => {
+  getProjectOutline: (projectId: string, runId: string, version: string = 'v1') => {
     const qs = new URLSearchParams()
     qs.set('project_id', String(projectId))
+    qs.set('run_id', String(runId))
     qs.set('version', version)
     return apiClient.get(`/ai/context/project-outline?${qs.toString()}`)
   },
-  putProjectOutline: (projectId: string, data: { data: Record<string, unknown>; version?: string }) => {
+  putProjectOutline: (projectId: string, data: { data: Record<string, unknown>; version?: string }, runId: string) => {
     const qs = new URLSearchParams()
     qs.set('project_id', String(projectId))
-    return apiClient.put(`/ai/context/project-outline?${qs.toString()}`, data)
+    const payload = { ...data, run_id: runId }
+    return apiClient.put(`/ai/context/project-outline?${qs.toString()}`, payload)
   },
-  aiProjectOutlineGenerate: (data: { project_id: string; input_text: string; num_episodes?: number }) =>
-    apiClient.post<{ project_outline: Record<string, unknown> }>(`/ai/project-outline-generate`, data),
-  aiProjectOutlineOptimize: (data: { project_id: string; current_outline: string; optimization_instructions?: string }) =>
-    apiClient.post<{ project_outline: Record<string, unknown>; changes_summary: string }>(`/ai/project-outline-optimize`, data),
-  getVisualDna: (projectId: string, itemId: number, version: string = 'v1') => {
+  aiProjectOutlineGenerate: (data: ProjectOutlineGenerateRequest) =>
+    apiClient.post<ProjectOutlineGenerateResponse>(`/ai/project-outline-generate`, data),
+  aiProjectOutlineOptimize: (data: ProjectOutlineOptimizeRequest) =>
+    apiClient.post<ProjectOutlineOptimizeResponse>(`/ai/project-outline-optimize`, data),
+  getVisualDna: (projectId: string, itemId: number, runId: string, version: string = 'v1') => {
     const qs = new URLSearchParams()
     qs.set('project_id', String(projectId))
     qs.set('item_id', String(itemId))
+    qs.set('run_id', String(runId))
     qs.set('version', version)
     return apiClient.get(`/ai/context/visual-dna?${qs.toString()}`)
   },
-  putVisualDna: (projectId: string, itemId: number, data: { data: Record<string, unknown>; version?: string }) => {
+  putVisualDna: (projectId: string, itemId: number, data: { data: Record<string, unknown>; version?: string }, runId: string) => {
     const qs = new URLSearchParams()
     qs.set('project_id', String(projectId))
     qs.set('item_id', String(itemId))
-    return apiClient.put(`/ai/context/visual-dna?${qs.toString()}`, data)
+    const payload = { ...data, run_id: runId }
+    return apiClient.put(`/ai/context/visual-dna?${qs.toString()}`, payload)
   },
 
   // Run 快照审计
@@ -306,5 +321,3 @@ export const api = {
 }
 
 export default api
-
-

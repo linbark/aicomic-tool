@@ -8,7 +8,6 @@ from sqlalchemy.orm import Session
 from .. import models
 from ..database import get_db
 from ..services import prompt_registry
-from ..services.context_store import new_run_id
 from ..services.json_extract import extract_json_any
 from ..services.llm_client import LlmChatSettings
 from ..services.project_lookup import resolve_project_pk
@@ -42,6 +41,7 @@ class WorkflowScriptRequest(BaseModel):
     project_id: str
     input_text: str
     options: WorkflowScriptOptions = Field(default_factory=WorkflowScriptOptions)
+    run_id: str
 
 
 class WorkflowScriptResponse(BaseModel):
@@ -64,7 +64,9 @@ async def workflow_script(req: WorkflowScriptRequest, db: Session = Depends(get_
     if not user_text:
         raise HTTPException(status_code=400, detail="input_text 不能为空")
 
-    run_id = new_run_id()
+    run_id = (req.run_id or "").strip()
+    if not run_id:
+        raise HTTPException(status_code=400, detail="run_id 不能为空")
     project_id = resolve_project_pk(db, req.project_id)
     # 不限制 max_tokens，让 API 自己决定输出长度
 
@@ -457,6 +459,7 @@ class WorkflowStoryboardRequest(BaseModel):
     project_id: str
     scene_text: str
     options: WorkflowStoryboardOptions = Field(default_factory=WorkflowStoryboardOptions)
+    run_id: str
 
 
 class WorkflowStoryboardResponse(BaseModel):
@@ -475,7 +478,9 @@ async def workflow_storyboard(req: WorkflowStoryboardRequest, db: Session = Depe
     if not scene_text:
         raise HTTPException(status_code=400, detail="scene_text 不能为空")
 
-    run_id = new_run_id()
+    run_id = (req.run_id or "").strip()
+    if not run_id:
+        raise HTTPException(status_code=400, detail="run_id 不能为空")
     project_id = resolve_project_pk(db, req.project_id)
     series_bible = _context_store.get_series_bible(project_id=project_id, version="v1") or {}
 
@@ -947,4 +952,3 @@ def apply_workflow_storyboard(payload: ApplyStoryboardWorkflowRequest, db: Sessi
 
     db.commit()
     return {"ok": True, "scene_id": sc.id, "run_id": run_id}
-

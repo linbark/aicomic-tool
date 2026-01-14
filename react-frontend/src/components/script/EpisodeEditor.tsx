@@ -113,7 +113,6 @@ export const EpisodeEditor = memo(function EpisodeEditor({
         chatPollPaused={chatPollPaused}
         cardBusy={cardBusy}
         onInputChange={onChatInputChange}
-        onDebugChange={onDebugChange}
         onSend={onSendChat}
         onPausePoll={onPausePoll}
         onResumePoll={onResumePoll}
