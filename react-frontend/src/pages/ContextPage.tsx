@@ -5,6 +5,14 @@ import { useProjectSelection } from '../state/useProjectSelection'
 
 export function ContextPage() {
   const { projects, projectId, setProjectId } = useProjectSelection()
+  const getRunId = () => {
+    try {
+      const v = localStorage.getItem('aicomic.lastRunId') || ''
+      return (v || '').trim()
+    } catch {
+      return ''
+    }
+  }
 
   // Project Outline 状态
   const [outlineInput, setOutlineInput] = useState('')
@@ -33,10 +41,15 @@ export function ContextPage() {
   // Project Outline 操作
   async function loadProjectOutline() {
     if (!projectId) return
+    const runId = getRunId()
+    if (!runId) {
+      setOutlineError('缺少 run_id（请在剧本页发起一次 Chat）')
+      return
+    }
     setLoadingOutline(true)
     setOutlineError(null)
     try {
-      const res = await api.getProjectOutline(projectId, 'v1')
+      const res = await api.getProjectOutline(projectId, runId, 'v1')
       const data = res.data
       if (data?.exists && data.data) {
         setOutlineJson(JSON.stringify(data.data, null, 2))
@@ -52,6 +65,11 @@ export function ContextPage() {
 
   async function saveProjectOutline() {
     if (!projectId) return
+    const runId = getRunId()
+    if (!runId) {
+      setOutlineError('缺少 run_id（请在剧本页发起一次 Chat）')
+      return
+    }
     let parsed: Record<string, unknown>
     try {
       parsed = JSON.parse(outlineJson)
@@ -62,7 +80,7 @@ export function ContextPage() {
     setSavingOutline(true)
     setOutlineError(null)
     try {
-      await api.putProjectOutline(projectId, { data: parsed, version: 'v1' })
+      await api.putProjectOutline(projectId, { data: parsed, version: 'v1' }, runId)
       setOutlineError(null)
     } catch (e: any) {
       setOutlineError(e?.response?.data?.detail || e?.message || '保存失败')
@@ -76,6 +94,11 @@ export function ContextPage() {
       setOutlineError('请输入故事灵感/概要')
       return
     }
+    const runId = getRunId()
+    if (!runId) {
+      setOutlineError('缺少 run_id（请在剧本页发起一次 Chat）')
+      return
+    }
     setGeneratingOutline(true)
     setOutlineError(null)
     try {
@@ -83,6 +106,7 @@ export function ContextPage() {
         project_id: projectId,
         input_text: outlineInput,
         num_episodes: numEpisodes,
+        run_id: runId,
       })
       if (res.data?.project_outline) {
         setOutlineJson(JSON.stringify(res.data.project_outline, null, 2))
@@ -99,6 +123,11 @@ export function ContextPage() {
       setOutlineError('请先生成或加载大纲')
       return
     }
+    const runId = getRunId()
+    if (!runId) {
+      setOutlineError('缺少 run_id（请在剧本页发起一次 Chat）')
+      return
+    }
     setOptimizingOutline(true)
     setOutlineError(null)
     try {
@@ -106,6 +135,7 @@ export function ContextPage() {
         project_id: projectId,
         current_outline: outlineJson,
         optimization_instructions: optimizeInstructions,
+        run_id: runId,
       })
       if (res.data?.project_outline) {
         setOutlineJson(JSON.stringify(res.data.project_outline, null, 2))
@@ -122,10 +152,15 @@ export function ContextPage() {
 
   async function loadSeriesBible() {
     if (!projectId) return
+    const runId = getRunId()
+    if (!runId) {
+      setSeriesBibleError('缺少 run_id（请在剧本页发起一次 Chat）')
+      return
+    }
     setLoadingSeriesBible(true)
     setSeriesBibleError(null)
     try {
-      const res = await api.getSeriesBible(projectId, 'v1')
+      const res = await api.getSeriesBible(projectId, runId, 'v1')
       const data = res.data
       if (data?.exists && data.data) {
         setSeriesBibleJson(JSON.stringify(data.data, null, 2))
@@ -141,6 +176,11 @@ export function ContextPage() {
 
   async function saveSeriesBible() {
     if (!projectId) return
+    const runId = getRunId()
+    if (!runId) {
+      setSeriesBibleError('缺少 run_id（请在剧本页发起一次 Chat）')
+      return
+    }
     let parsed: Record<string, unknown>
     try {
       parsed = JSON.parse(seriesBibleJson)
@@ -151,7 +191,7 @@ export function ContextPage() {
     setSavingSeriesBible(true)
     setSeriesBibleError(null)
     try {
-      await api.putSeriesBible(projectId, { data: parsed, version: 'v1' })
+      await api.putSeriesBible(projectId, { data: parsed, version: 'v1' }, runId)
       setSeriesBibleError(null)
     } catch (e: any) {
       setSeriesBibleError(e?.response?.data?.detail || e?.message || '保存失败')
@@ -178,10 +218,15 @@ export function ContextPage() {
 
   async function loadVisualDna() {
     if (!projectId || !selectedItemId) return
+    const runId = getRunId()
+    if (!runId) {
+      setVisualDnaError('缺少 run_id（请在剧本页发起一次 Chat）')
+      return
+    }
     setLoadingVisualDna(true)
     setVisualDnaError(null)
     try {
-      const res = await api.getVisualDna(projectId, selectedItemId, 'v1')
+      const res = await api.getVisualDna(projectId, selectedItemId, runId, 'v1')
       const data = res.data
       if (data?.exists && data.data) {
         setVisualDnaJson(JSON.stringify(data.data, null, 2))
@@ -197,6 +242,11 @@ export function ContextPage() {
 
   async function saveVisualDna() {
     if (!projectId || !selectedItemId) return
+    const runId = getRunId()
+    if (!runId) {
+      setVisualDnaError('缺少 run_id（请在剧本页发起一次 Chat）')
+      return
+    }
     let parsed: Record<string, unknown>
     try {
       parsed = JSON.parse(visualDnaJson)
@@ -207,7 +257,7 @@ export function ContextPage() {
     setSavingVisualDna(true)
     setVisualDnaError(null)
     try {
-      await api.putVisualDna(projectId, selectedItemId, { data: parsed, version: 'v1' })
+      await api.putVisualDna(projectId, selectedItemId, { data: parsed, version: 'v1' }, runId)
       setVisualDnaError(null)
     } catch (e: any) {
       setVisualDnaError(e?.response?.data?.detail || e?.message || '保存失败')
@@ -408,11 +458,17 @@ export function ContextPage() {
                     const filePath = e.target.value
                     if (!filePath || !projectId || !selectedItemId) return
                     try {
+                      const runId = getRunId()
+                      if (!runId) {
+                        setVisualDnaError('缺少 run_id（请在剧本页发起一次 Chat）')
+                        return
+                      }
                       const res = await api.ingestVisualDna({
                         project_id: projectId,
                         item_id: selectedItemId,
                         asset_file_path: filePath,
                         version: 'v1',
+                        run_id: runId,
                       })
                       if (res.data?.visual_dna) {
                         setVisualDnaJson(JSON.stringify(res.data.visual_dna, null, 2))

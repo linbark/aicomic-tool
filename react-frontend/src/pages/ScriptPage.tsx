@@ -618,7 +618,9 @@ export function ScriptPage() {
         : (Math.random().toString(16).slice(2) + Date.now().toString(16)).slice(0, 32)
       try {
         localStorage.setItem('aicomic.lastRunId', runId)
-      } catch {}
+      } catch {
+        void 0
+      }
       const res = await api.aiChatActAsync({
         project_id: projectId,
         run_id: runId,
