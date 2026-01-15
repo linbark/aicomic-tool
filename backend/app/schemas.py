@@ -91,6 +91,10 @@ class EpisodeRead(BaseModel):
     description: Optional[str] = None
     action_text: Optional[str] = None
     prompt: Optional[str] = None
+    script_locked: bool = False
+    last_exec_run_id: Optional[str] = None
+    exec_status: str = "idle"
+    exec_artifacts: Optional[dict] = None
     scenes: List[SceneRead] = []
     class Config: from_attributes = True
 

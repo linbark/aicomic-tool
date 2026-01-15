@@ -118,7 +118,7 @@ export const ChatPanel = memo(function ChatPanel({
       <div style={{ fontSize: 12, fontWeight: 700, opacity: 0.85, marginBottom: 8 }}>Chat（唯一入口）</div>
       {chatError ? (
         <div style={{ color: '#f87171', fontSize: 12, marginBottom: 8 }} role="alert" aria-live="assertive">
-          {chatError}
+          {String(chatError)}
         </div>
       ) : null}
 

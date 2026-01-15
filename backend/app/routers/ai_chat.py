@@ -13,6 +13,7 @@ from ..database import SessionLocal, get_db
 from ..services.json_extract import extract_json_any
 from ..services.llm_client import LlmChatSettings
 from ..services.project_lookup import resolve_project_pk
+from ..services.chat_graph import run_chat_graph
 from .ai_shared import _build_memory_context, _chat_client, _context_store, _mask_settings, _read_settings_raw
 from .ai_helpers import safe_parse_json, log_ui
 from .ai_workflows import (
@@ -37,6 +38,8 @@ from .ai_writing import (
 import logging
 import os
 
+from .. import reset_run_id, set_run_id
+
 log_dir = os.path.join(os.path.dirname(__file__), "..", "logs")
 os.makedirs(log_dir, exist_ok=True)
 log_file = os.path.join(log_dir, "ai_chat.log")
@@ -45,7 +48,7 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 handler = logging.FileHandler(log_file)
 handler.setLevel(logging.DEBUG)
-formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - [run_id=%(run_id)s] - %(message)s')
 handler.setFormatter(formatter)
 logger.addHandler(handler)
 
@@ -161,6 +164,8 @@ async def _chat_act_core(
         "INFO",
         data={"episode_id": req.episode_id, "current_action_key": req.current_action_key},
     )
+    data = await run_chat_graph(req=req, db=db, emit_stages=emit_stages, run_id=run_id)
+    return ChatActResponse(**data)
     if emit_stages and run_id:
         _context_store.snapshot_stage(
             project_id=project_id_pk, run_id=run_id, stage_name="chat.status", data={"status": "running", "at_ms": _now_ms()}
@@ -825,9 +830,27 @@ async def _chat_act_core(
                     tags=["chat_act"],
                 )
                 evidence_ids: List[str] = []
-                for ev in evidences:
+                total_evs = int(len(evidences))
+                _log_chat_event(
+                    project_id_pk,
+                    str(run_id or ""),
+                    "chat.memory_extract.evidence.upsert.start",
+                    "开始写入 evidence",
+                    "INFO",
+                    data={"step_index": idx, "total": total_evs},
+                )
+                for i, ev in enumerate(evidences):
                     try:
                         evidence_ids.append(store.upsert_evidence(ev))
+                        if (i + 1) == 1 or (i + 1) % 10 == 0 or (i + 1) == total_evs:
+                            _log_chat_event(
+                                project_id_pk,
+                                str(run_id or ""),
+                                "chat.memory_extract.evidence.upsert.progress",
+                                "写入进度",
+                                "INFO",
+                                data={"step_index": idx, "done": int(i + 1), "total": total_evs},
+                            )
                     except Exception as e:
                         _log_chat_event(
                             project_id_pk,
@@ -1268,28 +1291,32 @@ async def chat_act(req: ChatActRequest, db: Session = Depends(get_db)):
     run_id = (req.run_id or "").strip()
     if not run_id:
         raise HTTPException(status_code=400, detail="run_id 不能为空")
+    _rid_token = set_run_id(run_id)
     project_id_pk = resolve_project_pk(db, req.project_id)
-    logger.info(f"[AI][chat_act] Request: {req.model_dump()}")
-    _log_chat_event(
-        project_id_pk,
-        str(run_id or ""),
-        "chat.request",
-        "收到 chat/act 请求",
-        "INFO",
-        data={"episode_id": req.episode_id, "current_action_key": req.current_action_key},
-    )
-    _log_chat_event(
-        project_id_pk,
-        run_id,
-        "chat.request.received",
-        "收到 chat/act 请求",
-        "INFO",
-        data={"episode_id": req.episode_id, "current_action_key": req.current_action_key},
-    )
-    resp = await _chat_act_core(req=req, db=db, emit_stages=False, run_id=run_id)
-    logger.info(f"[AI][chat_act] Response: {resp.model_dump()}")
-    _log_chat_event(project_id_pk, str(run_id or ""), "chat.response.sent", "响应已返回", "INFO")
-    return resp
+    try:
+        logger.info(f"[AI][chat_act] Request: {req.model_dump()}")
+        _log_chat_event(
+            project_id_pk,
+            str(run_id or ""),
+            "chat.request",
+            "收到 chat/act 请求",
+            "INFO",
+            data={"episode_id": req.episode_id, "current_action_key": req.current_action_key},
+        )
+        _log_chat_event(
+            project_id_pk,
+            run_id,
+            "chat.request.received",
+            "收到 chat/act 请求",
+            "INFO",
+            data={"episode_id": req.episode_id, "current_action_key": req.current_action_key},
+        )
+        resp = await _chat_act_core(req=req, db=db, emit_stages=False, run_id=run_id)
+        logger.info(f"[AI][chat_act] Response: {resp.model_dump()}")
+        _log_chat_event(project_id_pk, str(run_id or ""), "chat.response.sent", "响应已返回", "INFO")
+        return resp
+    finally:
+        reset_run_id(_rid_token)
 
 
 @router.post("/chat/act_async", response_model=ChatActAsyncResponse)
@@ -1297,10 +1324,11 @@ def chat_act_async(req: ChatActRequest, bg: BackgroundTasks):
     """
     异步版：返回 run_id；执行过程写入 runs-files stages，供前端轮询展示执行步骤。
     """
-    logger.info(f"[AI][chat_act_async] Request: {req.model_dump()}")
     run_id = (req.run_id or "").strip()
     if not run_id:
         raise HTTPException(status_code=400, detail="run_id 不能为空")
+    _rid_token = set_run_id(run_id)
+    logger.info(f"[AI][chat_act_async] Request: {req.model_dump()}")
     _db = SessionLocal()
     try:
         project_id_pk = resolve_project_pk(_db, req.project_id)
@@ -1329,6 +1357,7 @@ def chat_act_async(req: ChatActRequest, bg: BackgroundTasks):
     payload = req.model_dump()
 
     def _runner():
+        _tkn = set_run_id(run_id)
         db = SessionLocal()
         try:
             import anyio
@@ -1366,10 +1395,14 @@ def chat_act_async(req: ChatActRequest, bg: BackgroundTasks):
                 db.close()
             except Exception as e:
                 pass
+            reset_run_id(_tkn)
 
     # IMPORTANT: 不使用 BackgroundTasks（其执行在同一 worker 线程，可能阻塞事件循环，导致轮询接口也卡死）。
     # 这里用 daemon thread 真正后台执行，确保 /ai/runs-files 等轻量查询不会被长耗时 LLM 调用阻塞。
     import threading
 
     threading.Thread(target=_runner, daemon=True).start()
-    return ChatActAsyncResponse(run_id=run_id, status="queued")
+    try:
+        return ChatActAsyncResponse(run_id=run_id, status="queued")
+    finally:
+        reset_run_id(_rid_token)

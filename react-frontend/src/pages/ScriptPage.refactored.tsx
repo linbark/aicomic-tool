@@ -14,8 +14,8 @@ import { ShotEditor } from '../components/script/ShotEditor'
 import { DebugWindow } from '../components/script/DebugWindow'
 import { Button } from '../components/ui/Button'
 import { Input } from '../components/ui/Input'
-import type { Selected, ChatMsg, ChatRunUi, DebugLog, BusyState, DeletingState } from '../components/script/types'
-import { now, chatKey, lsGet, lsSet } from '../components/script/utils'
+import type { Selected, ChatRunUi, DebugLog, BusyState, DeletingState } from '../components/script/types'
+import { now, lsSet, extractErrorMessage } from '../components/script/utils'
 import { panelStyle } from '../styles/shared'
 
 export function ScriptPage() {
@@ -36,21 +36,22 @@ export function ScriptPage() {
   const [createProjectDesc, setCreateProjectDesc] = useState('')
   const [creatingProject, setCreatingProject] = useState(false)
 
-  // Chat (Episode only)
-  const [chatMsgs, setChatMsgs] = useState<ChatMsg[]>([])
-  const [chatInput, setChatInput] = useState('')
-  const [chatBusy, setChatBusy] = useState(false)
-  const [chatError, setChatError] = useState<string | null>(null)
-  const [chatDebug, setChatDebug] = useState(false)
-  const [cardBusy, setCardBusy] = useState<Record<string, boolean>>({})
-  const [chatRun, setChatRun] = useState<ChatRunUi | null>(null)
-  const [chatPollPaused, setChatPollPaused] = useState(false)
+  const [execRun, setExecRun] = useState<ChatRunUi | null>(null)
+  const [execPollPaused, setExecPollPaused] = useState(false)
+  const [execBusy, setExecBusy] = useState(false)
+  const [interruptKind, setInterruptKind] = useState<string | null>(null)
   const [uiNowMs, setUiNowMs] = useState(() => Date.now())
+  const [rawAssetsVisualDnaText, setRawAssetsVisualDnaText] = useState<string>('')
+  const [rawSplitEpisodesText, setRawSplitEpisodesText] = useState<string>('')
+  const lastAssetsRawTsRef = useRef(0)
+  const lastSplitRawTsRef = useRef(0)
 
   // Debug window
   const [debugLogs, setDebugLogs] = useState<DebugLog[]>([])
   const [showDebugWindow, setShowDebugWindow] = useState(false)
   const fetchedLogIdsRef = useRef<Set<string>>(new Set())
+  const lastFinalTsRef = useRef(0)
+  const lastInterruptTsRef = useRef(0)
   const [autoScrollEnabled, setAutoScrollEnabled] = useState(true)
   const [hasNewLogs, setHasNewLogs] = useState(false)
 
@@ -85,7 +86,7 @@ export function ScriptPage() {
         const res = await api.getScript(pid)
         setEpisodes(res.data || [])
       } catch (e: any) {
-        setError(e?.response?.data?.detail || e?.message || '加载失败')
+        setError(extractErrorMessage(e, '加载失败'))
       } finally {
         setBusy(null)
       }
@@ -105,77 +106,99 @@ export function ScriptPage() {
       setEpisodeText(String(ep?.description || ''))
       setSceneText('')
       setShotDraft(null)
-      // load chat
-      if (projectId) {
-        const raw = lsGet(chatKey(projectId, selected.episodeId))
-        if (raw) {
-          try {
-            const parsed = JSON.parse(raw)
-            if (Array.isArray(parsed)) setChatMsgs(parsed as any)
-          } catch {
-            setChatMsgs([])
-          }
-        } else {
-          setChatMsgs([])
-        }
+      setInterruptKind(null)
+      setRawAssetsVisualDnaText('')
+      setRawSplitEpisodesText('')
+      lastAssetsRawTsRef.current = 0
+      lastSplitRawTsRef.current = 0
+      if (ep?.last_exec_run_id) {
+        setExecRun({
+          runId: String(ep.last_exec_run_id),
+          status: (ep.exec_status as any) || 'queued',
+          steps: [],
+          startedAtMs: Date.now(),
+        })
+      } else {
+        setExecRun(null)
       }
       return
     }
     if (selected.kind === 'scene') {
       setEpisodeText('')
-      setChatMsgs([])
       const sc = selectedScene
       setSceneText(String(sc?.description || ''))
       setShotDraft(null)
+      setExecRun(null)
+      setInterruptKind(null)
       return
     }
     if (selected.kind === 'shot') {
       setEpisodeText('')
       setSceneText('')
-      setChatMsgs([])
       setShotDraft(selectedShot ? { ...selectedShot } : null)
+      setExecRun(null)
+      setInterruptKind(null)
       return
     }
     setEpisodeText('')
     setSceneText('')
-    setChatMsgs([])
     setShotDraft(null)
+    setExecRun(null)
+    setInterruptKind(null)
   }, [selected, episodes, projectId, selectedScene, selectedShot])
 
   useEffect(() => {
     if (!projectId) return
-    if (selected.kind !== 'episode') return
-    lsSet(chatKey(projectId, selected.episodeId), JSON.stringify(chatMsgs.slice(-80)))
-  }, [chatMsgs, projectId, selected])
-
-  // Poll run stages - 保持原有逻辑
-  useEffect(() => {
-    if (!projectId) return
-    if (!chatRun?.runId) return
-    if (chatPollPaused) return
+    if (!execRun?.runId) return
+    if (execPollPaused) return
     let alive = true
     const pid = projectId
-    const runId = chatRun.runId
+    const runId = execRun.runId
 
     async function tick() {
       if (!alive) return
       try {
         const stagesRes = await api.listRunStages(pid, runId)
-        const stages = (stagesRes.data as any)?.stages || []
-        const stageList: string[] = Array.isArray(stages)
-          ? stages.map((s: any) => (typeof s === 'string' ? s : s?.name || ''))
-          : []
-        
-        // 完整的轮询逻辑需要在这里实现
-        // 由于代码量很大，建议保持原有轮询逻辑不变
-        // 这里只是示例结构
+        const stageMetas = ((stagesRes.data as any)?.stages || []) as { name: string; timestamp: number }[]
+        const stageList = stageMetas.map((s) => s.name)
+        const stageSet = new Set(stageList)
+        const stageTs = new Map(stageMetas.map((s) => [s.name, s.timestamp]))
 
-        // 轮询 log.* 文件
+        if (stageSet.has('episode_assets_visual_dna.raw')) {
+          const ts = Number(stageTs.get('episode_assets_visual_dna.raw') || 0)
+          if (ts > lastAssetsRawTsRef.current) {
+            lastAssetsRawTsRef.current = ts
+            api
+              .getRunStage(pid, runId, 'episode_assets_visual_dna.raw')
+              .then((res) => {
+                if (!alive) return
+                const data = (res.data as any)?.data || {}
+                const text = typeof data?.text === 'string' ? data.text : ''
+                if (text) setRawAssetsVisualDnaText(text)
+              })
+              .catch(() => {})
+          }
+        }
+        if (stageSet.has('episode_split_episodes.raw')) {
+          const ts = Number(stageTs.get('episode_split_episodes.raw') || 0)
+          if (ts > lastSplitRawTsRef.current) {
+            lastSplitRawTsRef.current = ts
+            api
+              .getRunStage(pid, runId, 'episode_split_episodes.raw')
+              .then((res) => {
+                if (!alive) return
+                const data = (res.data as any)?.data || {}
+                const text = typeof data?.text === 'string' ? data.text : ''
+                if (text) setRawSplitEpisodesText(text)
+              })
+              .catch(() => {})
+          }
+        }
+
         const logStages = stageList.filter((s) => s.startsWith('log.'))
         for (const logName of logStages) {
           if (fetchedLogIdsRef.current.has(logName)) continue
           fetchedLogIdsRef.current.add(logName)
-
           api.getRunStage(pid, runId, logName)
             .then((res) => {
               if (!alive) return
@@ -203,8 +226,138 @@ export function ScriptPage() {
             })
         }
 
-        // status, plan, step start/end, final/error - 保持原有逻辑
-        // ... (保持原有轮询逻辑，代码太长，这里省略)
+        if (stageSet.has('chat.status')) {
+          const st = await api.getRunStage(pid, runId, 'chat.status')
+          const sd = (st.data as any)?.data || {}
+          const s = sd?.status
+          const atMs = typeof sd?.at_ms === 'number' ? Number(sd.at_ms) : null
+          const curIdx = typeof sd?.current_step_index === 'number' ? Number(sd.current_step_index) : null
+          const curAk = sd?.current_action_key ? String(sd.current_action_key) : null
+          if (s && alive) {
+            setExecRun((prev) => {
+              if (!prev) return prev
+              const next: any = {
+                ...prev,
+                status: s,
+                currentStepIndex: curIdx,
+                currentActionKey: curAk,
+                lastAtMs: atMs != null ? atMs : prev.lastAtMs,
+              }
+              if (curIdx != null && prev.steps.length) {
+                const steps = prev.steps.slice()
+                for (let i = 0; i < steps.length; i++) {
+                  const cur = steps[i]
+                  if (!cur) continue
+                  if (i < curIdx) steps[i] = { ...cur, status: 'done' }
+                  else if (i === curIdx) steps[i] = { ...cur, status: 'running', action_key: curAk || cur.action_key }
+                  else steps[i] = { ...cur, status: 'pending' }
+                }
+                next.steps = steps
+              }
+              return next
+            })
+          }
+        }
+
+        if (stageSet.has('chat.plan')) {
+          const pl = await api.getRunStage(pid, runId, 'chat.plan')
+          const plan = (pl.data as any)?.data?.plan
+          const stepsArr = Array.isArray(plan?.steps) ? plan.steps : []
+          if (alive && stepsArr.length) {
+            setExecRun((prev) => {
+              if (!prev) return prev
+              if (prev.steps && prev.steps.length) return prev
+              return {
+                ...prev,
+                steps: stepsArr.map((s: any, idx: number) => ({
+                  index: idx,
+                  action_key: String(s?.action_key || 'unknown'),
+                  why: s?.why ? String(s.why) : null,
+                  status: 'pending',
+                })),
+              }
+            })
+          }
+        }
+
+        const stepStartRe = /^chat\.step\.(\d+)\.start$/
+        const stepEndRe = /^chat\.step\.(\d+)\.end$/
+        for (const name of stageSet) {
+          let m = String(name).match(stepStartRe)
+          if (m) {
+            const idx = Number(m[1])
+            if (Number.isFinite(idx)) {
+              setExecRun((prev) => {
+                if (!prev) return prev
+                const steps = prev.steps.slice()
+                const cur = steps[idx]
+                if (cur && cur.status === 'pending') steps[idx] = { ...cur, status: 'running' }
+                return { ...prev, steps }
+              })
+            }
+            continue
+          }
+          m = String(name).match(stepEndRe)
+          if (m) {
+            const idx = Number(m[1])
+            if (!Number.isFinite(idx)) continue
+            const ed = await api.getRunStage(pid, runId, String(name))
+            const data = (ed.data as any)?.data || {}
+            const ms = Number(data?.ms || 0)
+            const outputPreview = data?.output_preview ? String(data.output_preview) : ''
+            if (!alive) return
+            setExecRun((prev) => {
+              if (!prev) return prev
+              const steps = prev.steps.slice()
+              const cur = steps[idx]
+              if (cur) steps[idx] = { ...cur, status: 'done', ms: Number.isFinite(ms) ? ms : undefined, output_preview: outputPreview }
+              return { ...prev, steps }
+            })
+          }
+        }
+
+        for (const n of stageSet) {
+          const name = String(n)
+          const m = name.match(/^chat\.step\.(\d+)\.error$/)
+          if (!m) continue
+          const idx = Number(m[1])
+          if (!Number.isFinite(idx)) continue
+          const erd = await api.getRunStage(pid, runId, name)
+          const msg = (erd.data as any)?.data?.error
+          if (alive) {
+            setExecRun((prev) => (prev ? { ...prev, status: 'error', error: String(msg || 'step_error') } : prev))
+          }
+        }
+        if (stageSet.has('chat.error')) {
+          const er = await api.getRunStage(pid, runId, 'chat.error')
+          const msg = (er.data as any)?.data?.error
+          if (alive) setExecRun((prev) => (prev ? { ...prev, status: 'error', error: String(msg || 'error') } : prev))
+        }
+
+        if (stageSet.has('chat.interrupt')) {
+          const ts = Number(stageTs.get('chat.interrupt') || 0)
+          if (ts > lastInterruptTsRef.current) {
+            lastInterruptTsRef.current = ts
+            const it = await api.getRunStage(pid, runId, 'chat.interrupt')
+            const d = (it.data as any)?.data || {}
+            const k = d?.kind ? String(d.kind) : null
+            if (alive) setInterruptKind(k)
+            refreshScript(pid).catch(() => {})
+          }
+        } else {
+          if (alive) setInterruptKind(null)
+        }
+
+        if (stageSet.has('chat.final')) {
+          const finalTs = Number(stageTs.get('chat.final') || 0)
+          if (finalTs > lastFinalTsRef.current) {
+            lastFinalTsRef.current = finalTs
+            if (alive) {
+              setExecRun((prev) => (prev ? { ...prev, status: 'done', steps: prev.steps.map((x) => ({ ...x, status: 'done' })) } : prev))
+              refreshScript(pid).catch(() => {})
+            }
+          }
+        }
       } catch (e: any) {
         console.warn('[poll tick error]', e?.message || e)
       }
@@ -218,16 +371,15 @@ export function ScriptPage() {
       alive = false
       window.clearInterval(timer)
     }
-  }, [projectId, chatRun?.runId, chatPollPaused])
+  }, [projectId, execRun?.runId, execPollPaused, refreshScript])
 
-  // Heartbeat
   useEffect(() => {
-    if (!chatRun?.runId) return
-    if (chatRun.status !== 'running' && chatRun.status !== 'queued') return
-    if (chatPollPaused) return
+    if (!execRun?.runId) return
+    if (execRun.status !== 'running' && execRun.status !== 'queued' && execRun.status !== 'paused') return
+    if (execPollPaused) return
     const timer = window.setInterval(() => setUiNowMs(Date.now()), 1000)
     return () => window.clearInterval(timer)
-  }, [chatRun?.runId, chatRun?.status, chatPollPaused])
+  }, [execRun?.runId, execRun?.status, execPollPaused])
 
 
   useEffect(() => {
@@ -249,7 +401,16 @@ export function ScriptPage() {
       await refreshScript(projectId)
       setSelected({ kind: 'episode', episodeId: selected.episodeId })
     } catch (e: any) {
-      setError(e?.response?.data?.detail || e?.message || '保存失败')
+      const isLocked =
+        (e as any)?.response?.status === 409 &&
+        String((e as any)?.response?.data?.detail || '').toLowerCase().includes('locked')
+      if (isLocked) {
+        setError('本集已锁定（执行后自动锁定），不能再修改剧本。')
+        await refreshScript(projectId)
+        setSelected({ kind: 'episode', episodeId: selected.episodeId })
+      } else {
+        setError(extractErrorMessage(e, '保存失败'))
+      }
     } finally {
       setBusy(null)
     }
@@ -265,7 +426,7 @@ export function ScriptPage() {
       await refreshScript(projectId)
       setSelected({ kind: 'scene', episodeId: selected.episodeId, sceneId: selectedScene.id })
     } catch (e: any) {
-      setError(e?.response?.data?.detail || e?.message || '保存失败')
+      setError(extractErrorMessage(e, '保存失败'))
     } finally {
       setBusy(null)
     }
@@ -285,7 +446,7 @@ export function ScriptPage() {
       await refreshScript(projectId)
       setSelected({ kind: 'shot', episodeId: selected.episodeId, sceneId: selected.sceneId, shotId: selectedShot.id })
     } catch (e: any) {
-      setError(e?.response?.data?.detail || e?.message || '保存失败')
+      setError(extractErrorMessage(e, '保存失败'))
     } finally {
       setBusy(null)
     }
@@ -299,7 +460,7 @@ export function ScriptPage() {
       await api.createEpisode(projectId, { title: `第${episodes.length + 1}集` })
       await refreshScript(projectId)
     } catch (e: any) {
-      setError(e?.response?.data?.detail || e?.message || '新建集失败')
+      setError(extractErrorMessage(e, '新建集失败'))
     } finally {
       setBusy(null)
     }
@@ -323,7 +484,7 @@ export function ScriptPage() {
       setCreateProjectName('')
       setCreateProjectDesc('')
     } catch (e: any) {
-      setError(e?.response?.data?.detail || e?.message || '新建项目失败')
+      setError(extractErrorMessage(e, '新建项目失败'))
     } finally {
       setCreatingProject(false)
     }
@@ -338,7 +499,7 @@ export function ScriptPage() {
       await api.deleteProject(projectId)
       await refreshProjects()
     } catch (e: any) {
-      setError(e?.response?.data?.detail || e?.message || '删除项目失败')
+      setError(extractErrorMessage(e, '删除项目失败'))
     } finally {
       setDeleting(null)
     }
@@ -356,7 +517,7 @@ export function ScriptPage() {
       await refreshScript(projectId)
       setSelected({ kind: 'none' })
     } catch (e: any) {
-      setError(e?.response?.data?.detail || e?.message || '删除集失败')
+      setError(extractErrorMessage(e, '删除集失败'))
     } finally {
       setDeleting(null)
     }
@@ -370,7 +531,7 @@ export function ScriptPage() {
       await api.createScene(selected.episodeId, { title: `场${(selectedEpisode?.scenes || []).length + 1}` })
       await refreshScript(projectId)
     } catch (e: any) {
-      setError(e?.response?.data?.detail || e?.message || '新建场失败')
+      setError(extractErrorMessage(e, '新建场失败'))
     } finally {
       setBusy(null)
     }
@@ -384,153 +545,130 @@ export function ScriptPage() {
       await api.createShot(selectedScene.id, { title: `镜头${(selectedScene.shots || []).length + 1}`, action_text: '' })
       await refreshScript(projectId)
     } catch (e: any) {
-      setError(e?.response?.data?.detail || e?.message || '新建镜头失败')
+      setError(extractErrorMessage(e, '新建镜头失败'))
     } finally {
       setBusy(null)
     }
   }, [projectId, selected, selectedScene, refreshScript])
 
-  const sendChat = useCallback(async () => {
+  const executeEpisode = useCallback(async () => {
     if (!projectId) return
-    if (selected.kind === 'none') return
-    const msg = (chatInput || '').trim()
-    if (!msg) return
-
-    const userMsg: ChatMsg = { id: `${now()}-u`, role: 'user', content: msg, ts: now() }
-    setChatMsgs((prev) => [...prev, userMsg])
-    setChatInput('')
-    setChatError(null)
-    setChatBusy(true)
-    setChatRun(null)
-    setDebugLogs([])
-    fetchedLogIdsRef.current.clear()
-    setChatPollPaused(false)
+    if (selected.kind !== 'episode') return
+    const text = String(episodeText || '').trim()
+    if (!text) return
+    if (selectedEpisode?.script_locked) {
+      setError('本集已锁定（执行后自动锁定），不能再次执行。')
+      return
+    }
+    setExecBusy(true)
+    setError(null)
     try {
-      const res = await api.aiChatActAsync({
+      try {
+        await api.updateEpisode(selected.episodeId, { description: episodeText })
+      } catch (e: any) {
+        const isLocked =
+          (e as any)?.response?.status === 409 &&
+          String((e as any)?.response?.data?.detail || '').toLowerCase().includes('locked')
+        if (isLocked) {
+          setError('本集已锁定（执行后自动锁定），不能再次执行。')
+          await refreshScript(projectId)
+          setSelected({ kind: 'episode', episodeId: selected.episodeId })
+          return
+        }
+        throw e
+      }
+      const runId =
+        typeof window !== 'undefined' && (window as any).crypto && (window as any).crypto.randomUUID
+          ? (window as any).crypto.randomUUID().replace(/-/g, '')
+          : (Math.random().toString(16).slice(2) + Date.now().toString(16)).slice(0, 32)
+      lsSet('aicomic.lastRunId', runId)
+      const res = await api.aiEpisodeExecuteActAsync({
         project_id: projectId,
         episode_id: selected.episodeId,
-        current_action_key: 'episode_chat',
-        message: msg,
-        debug: chatDebug,
-        ui_context: {
-          master_script: episodeText,
-          episode_meta: {
-            id: selectedEpisode?.id,
-            title: selectedEpisode?.title,
-            order: selectedEpisode?.order,
-          },
-        },
-      } as any)
-      const data = res.data as any
-      const runId = String(data?.run_id || '')
-      if (runId) {
-        setChatRun({
-          runId,
-          status: 'queued',
-          steps: [],
-          startedAtMs: now(),
-          lastAtMs: now(),
-          currentStepIndex: null,
-          currentActionKey: null,
-        })
-        setChatMsgs((prev) => [...prev, { id: `${now()}-a`, role: 'assistant', content: `已开始执行（run=${runId}）…`, ts: now() }])
+        script_text: episodeText,
+        run_id: runId,
+      })
+      const rid = String(res.data?.run_id || runId)
+      setExecRun({
+        runId: rid,
+        status: 'queued',
+        steps: [],
+        startedAtMs: now(),
+        lastAtMs: now(),
+        currentStepIndex: null,
+        currentActionKey: null,
+      })
+      setExecPollPaused(false)
+      setInterruptKind(null)
+      lastFinalTsRef.current = 0
+      lastInterruptTsRef.current = 0
+      setDebugLogs([])
+      fetchedLogIdsRef.current.clear()
+      await refreshScript(projectId)
+    } catch (e: any) {
+      const isLocked =
+        (e as any)?.response?.status === 409 &&
+        String((e as any)?.response?.data?.detail || '').toLowerCase().includes('locked')
+      if (isLocked) {
+        setError('本集已锁定（执行后自动锁定），不能再次执行。')
+        await refreshScript(projectId)
+        setSelected({ kind: 'episode', episodeId: selected.episodeId })
       } else {
-        setChatBusy(false)
-        setChatMsgs((prev) => [...prev, { id: `${now()}-a`, role: 'assistant', content: '启动失败：缺少 run_id', ts: now() }])
+        setError(extractErrorMessage(e, '执行失败'))
       }
-    } catch (e: any) {
-      setChatError(e?.response?.data?.detail || e?.message || '执行失败')
-      setChatBusy(false)
+    } finally {
+      setExecBusy(false)
     }
-  }, [projectId, selected, chatInput, chatDebug, episodeText, selectedEpisode])
+  }, [episodeText, projectId, refreshScript, selected, selectedEpisode])
 
-  const handleCardApproveChangeSet = useCallback(
-    async (changesetId: string) => {
-      if (!changesetId) return
-      setCardBusy((prev) => ({ ...prev, [`approve:${changesetId}`]: true }))
+  const confirmExec = useCallback(
+    async (decision: 'confirmed' | 'regenerate' | 'rejected', artifacts?: Record<string, unknown>) => {
+      if (!projectId) return
+      if (selected.kind !== 'episode') return
+      const runId = execRun?.runId || String(selectedEpisode?.last_exec_run_id || '')
+      if (!runId) return
+      setExecBusy(true)
+      setError(null)
       try {
-        await api.memoryApproveChangeSet(changesetId, { reviewer: 'human', note: null })
-        setChatMsgs((prev) => [
-          ...prev,
-          { id: `${now()}-a`, role: 'assistant', content: `已确认提交：${changesetId}（已落库 + materialize）`, ts: now() },
-        ])
+        await api.aiEpisodeExecuteConfirm(selected.episodeId, { decision, artifacts: artifacts || null, run_id: runId })
+        setExecPollPaused(false)
+        setInterruptKind(null)
+        await refreshScript(projectId)
       } catch (e: any) {
-        setChatMsgs((prev) => [
-          ...prev,
-          { id: `${now()}-a`, role: 'assistant', content: `提交失败：${changesetId}\n${e?.response?.data?.detail || e?.message || '未知错误'}`, ts: now() },
-        ])
+        setError(extractErrorMessage(e, '提交确认失败'))
       } finally {
-        setCardBusy((prev) => ({ ...prev, [`approve:${changesetId}`]: false }))
+        setExecBusy(false)
       }
     },
-    []
+    [execRun?.runId, projectId, refreshScript, selected, selectedEpisode?.last_exec_run_id, selectedEpisode?.id]
   )
 
-  const handleCardRejectChangeSet = useCallback(
-    async (changesetId: string) => {
-      if (!changesetId) return
-      setCardBusy((prev) => ({ ...prev, [`reject:${changesetId}`]: true }))
-      try {
-        await api.memoryRejectChangeSet(changesetId, { reviewer: 'human', note: 'rejected_in_chat' })
-        setChatMsgs((prev) => [...prev, { id: `${now()}-a`, role: 'assistant', content: `已驳回：${changesetId}`, ts: now() }])
-      } catch (e: any) {
-        setChatMsgs((prev) => [
-          ...prev,
-          { id: `${now()}-a`, role: 'assistant', content: `驳回失败：${changesetId}\n${e?.response?.data?.detail || e?.message || '未知错误'}`, ts: now() },
-        ])
-      } finally {
-        setCardBusy((prev) => ({ ...prev, [`reject:${changesetId}`]: false }))
-      }
-    },
-    []
-  )
-
-  const handleCardChooseIntent = useCallback((label: string) => {
-    const t = (label || '').trim()
-    if (!t) return
-    setChatInput(`我的意图：${t}`)
+  const handlePauseExecPoll = useCallback(() => {
+    setExecPollPaused(true)
   }, [])
 
-  const handlePausePoll = useCallback(() => {
-    setChatPollPaused(true)
-    setChatBusy(false)
-    setChatMsgs((prev) => [...prev, { id: `${now()}-a`, role: 'assistant', content: '已暂停轮询（后端仍在执行）。你可以稍后点击"继续轮询"。', ts: now() }])
+  const handleResumeExecPoll = useCallback(() => {
+    setExecPollPaused(false)
   }, [])
 
-  const handleResumePoll = useCallback(() => {
-    setChatPollPaused(false)
-    setChatBusy(true)
-  }, [])
-
-  const handleForceRefresh = useCallback(async () => {
-    if (!projectId || !chatRun?.runId) return
+  const handleForceRefreshExec = useCallback(async () => {
+    if (!projectId) return
+    const runId = execRun?.runId || ''
+    if (!runId) return
     try {
-      const stagesRes = await api.listRunStages(projectId, chatRun.runId)
-      const stages = (stagesRes.data as any)?.stages || []
-      const stageSet = new Set(Array.isArray(stages) ? stages.map((s: any) => String(s)) : [])
-      if (stageSet.has('chat.status')) {
-        const st = await api.getRunStage(projectId, chatRun.runId, 'chat.status')
-        const sd = (st.data as any)?.data || {}
-        const s = sd?.status
-        if (s === 'done') {
-          setChatMsgs((prev) => [...prev, { id: `${now()}-a`, role: 'assistant', content: '检测到任务已完成，正在读取结果...', ts: now() }])
-          if (stageSet.has('chat.final')) {
-            const fin = await api.getRunStage(projectId, chatRun.runId, 'chat.final')
-            const d = (fin.data as any)?.data || {}
-            const assistantText = String(d?.assistant_message || '完成')
-            const cards = Array.isArray(d?.cards) ? d.cards : undefined
-            setChatMsgs((prev) => [...prev, { id: `${now()}-a`, role: 'assistant', content: assistantText, ts: now(), cards }])
-          }
-          setChatRun((prev) => (prev ? { ...prev, status: 'done', steps: prev.steps.map((x) => ({ ...x, status: 'done' })) } : prev))
-          setChatBusy(false)
-        } else {
-          setChatMsgs((prev) => [...prev, { id: `${now()}-a`, role: 'assistant', content: `当前状态：${s}，继续等待...`, ts: now() }])
-        }
+      const stagesRes = await api.listRunStages(projectId, runId)
+      const stageMetas = ((stagesRes.data as any)?.stages || []) as { name: string }[]
+      const stageSet = new Set(stageMetas.map((s) => String(s?.name || '')).filter((x) => x))
+      if (stageSet.has('chat.interrupt')) {
+        const it = await api.getRunStage(projectId, runId, 'chat.interrupt')
+        const d = (it.data as any)?.data || {}
+        setInterruptKind(d?.kind ? String(d.kind) : null)
       }
+      await refreshScript(projectId)
     } catch (e: any) {
-      setChatMsgs((prev) => [...prev, { id: `${now()}-a`, role: 'assistant', content: `刷新失败：${e?.message || '网络错误'}`, ts: now() }])
+      setError(extractErrorMessage(e, '刷新失败'))
     }
-  }, [projectId, chatRun])
+  }, [execRun?.runId, projectId, refreshScript])
 
   return (
     <div style={styles.page}>
@@ -630,30 +768,24 @@ export function ScriptPage() {
             <EpisodeEditor
               episode={selectedEpisode}
               episodeText={episodeText}
-              chatMsgs={chatMsgs}
-              chatInput={chatInput}
-              chatBusy={chatBusy}
-              chatError={chatError}
-              chatDebug={chatDebug}
-              chatRun={chatRun}
               uiNowMs={uiNowMs}
-              chatPollPaused={chatPollPaused}
-              cardBusy={cardBusy}
+              execRun={execRun}
+              execPollPaused={execPollPaused}
+              interruptKind={interruptKind}
+              execBusy={execBusy}
               busy={busy === 'save_episode'}
               deleting={deleting === 'episode'}
               onEpisodeTextChange={setEpisodeText}
-              onChatInputChange={setChatInput}
-              onDebugChange={setChatDebug}
               onSave={saveEpisode}
               onCreateScene={createScene}
               onDelete={deleteCurrentEpisode}
-              onSendChat={sendChat}
-              onPausePoll={handlePausePoll}
-              onResumePoll={handleResumePoll}
-              onForceRefresh={handleForceRefresh}
-              onCardApproveChangeSet={handleCardApproveChangeSet}
-              onCardRejectChangeSet={handleCardRejectChangeSet}
-              onCardChooseIntent={handleCardChooseIntent}
+              onExecute={executeEpisode}
+              onPauseExecPoll={handlePauseExecPoll}
+              onResumeExecPoll={handleResumeExecPoll}
+              onForceRefreshExec={handleForceRefreshExec}
+              onConfirmExec={confirmExec}
+              rawAssetsVisualDnaText={rawAssetsVisualDnaText}
+              rawSplitEpisodesText={rawSplitEpisodesText}
             />
           ) : null}
 
@@ -679,7 +811,7 @@ export function ScriptPage() {
       <DebugWindow
         show={showDebugWindow}
         debugLogs={debugLogs}
-        chatRun={chatRun}
+        chatRun={execRun}
         autoScrollEnabled={autoScrollEnabled}
         hasNewLogs={hasNewLogs}
         onToggle={() => setShowDebugWindow(!showDebugWindow)}

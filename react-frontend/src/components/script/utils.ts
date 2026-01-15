@@ -30,3 +30,15 @@ export function lsSet(key: string, value: string) {
 export function chatKey(projectId: string, episodeId: number) {
   return `aicomic.episode_chat.${projectId}.${episodeId}`
 }
+
+export function extractErrorMessage(e: any, defaultMsg: string = '未知错误'): string {
+  if (e?.response?.data?.detail) {
+    return typeof e.response.data.detail === 'object'
+      ? JSON.stringify(e.response.data.detail)
+      : String(e.response.data.detail)
+  }
+  if (e?.message) {
+    return String(e.message)
+  }
+  return defaultMsg
+}

@@ -1,3 +1,4 @@
+import { extractErrorMessage } from '../components/script/utils'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import api from '../api/client'
 import type { EpisodeRead, ShotRead } from '../api/types'
@@ -15,7 +16,7 @@ type ChatMsg = { id: string; role: ChatRole; content: string; ts: number; cards?
 type StepUi = { index: number; action_key: string; why?: string | null; status: 'pending' | 'running' | 'done'; ms?: number; output_preview?: string }
 type ChatRunUi = {
   runId: string
-  status: 'queued' | 'running' | 'done' | 'error'
+  status: 'queued' | 'running' | 'paused' | 'done' | 'error'
   steps: StepUi[]
   error?: string | null
   startedAtMs?: number
@@ -125,6 +126,9 @@ export function ScriptPage() {
   const [debugLogs, setDebugLogs] = useState<DebugLog[]>([])
   const [showDebugWindow, setShowDebugWindow] = useState(false) // 控制窗口显示
   const fetchedLogIdsRef = useRef<Set<string>>(new Set()) // 防止重复读取
+  const lastFinalTsRef = useRef<number>(0)
+  const waitingReviewRef = useRef<boolean>(false)
+  const [evidenceUpsertStats, setEvidenceUpsertStats] = useState<{ total: number; done: number } | null>(null)
   
   async function refreshScript(pid = projectId) {
     if (!pid) return
@@ -134,7 +138,7 @@ export function ScriptPage() {
       const res = await api.getScript(pid)
     setEpisodes(res.data || [])
     } catch (e: any) {
-      setError(e?.response?.data?.detail || e?.message || '加载失败')
+      setError(extractErrorMessage(e, '加载失败'))
     } finally {
       setBusy(null)
     }
@@ -205,17 +209,18 @@ export function ScriptPage() {
     let alive = true
     const pid = projectId
     const runId = chatRun.runId
-    let finalConsumed = false
+    lastFinalTsRef.current = 0
+    waitingReviewRef.current = false
+    setEvidenceUpsertStats(null)
 
     async function tick() {
       if (!alive) return
       try {
         const stagesRes = await api.listRunStages(pid, runId)
-        const stages = (stagesRes.data as any)?.stages || []
-        const stageList: string[] = Array.isArray(stages) 
-          ? stages.map((s: any) => (typeof s === 'string' ? s : s?.name || '')) 
-          : []
+        const stageMetas = ((stagesRes.data as any)?.stages || []) as { name: string; timestamp: number }[]
+        const stageList = stageMetas.map((s) => s.name)
         const stageSet = new Set(stageList)
+        const stageTs = new Map(stageMetas.map((s) => [s.name, s.timestamp]))
 
         // 轮询 log.* 文件并写入 debugLogs
         const logStages = stageList.filter((s) => s.startsWith('log.'))
@@ -251,6 +256,19 @@ export function ScriptPage() {
                 next.sort((a, b) => a.ts - b.ts)
                 return next
               })
+              {
+                const stg = typeof d?.stage === 'string' ? String(d.stage) : ''
+                if (stg === 'chat.memory_extract.evidence.upsert.start') {
+                  const dat = (d || {}).data || {}
+                  const tot = Number(dat.total || 0)
+                  if (Number.isFinite(tot) && tot > 0) setEvidenceUpsertStats({ total: tot, done: 0 })
+                } else if (stg === 'chat.memory_extract.evidence.upsert.progress') {
+                  const dat = (d || {}).data || {}
+                  const tot = Number(dat.total || 0)
+                  const dn = Number(dat.done || 0)
+                  if (Number.isFinite(tot) && tot > 0 && Number.isFinite(dn)) setEvidenceUpsertStats({ total: tot, done: Math.max(0, dn) })
+                }
+              }
             })
             .catch(() => {
               // 获取失败（如文件还没写完），可以稍后重试，或者简单地在下一次 tick 仍然因为 has(logName) 而跳过
@@ -288,13 +306,12 @@ export function ScriptPage() {
                 }
                 next.steps = steps
               }
-              // 如果后端已经标记 done，则所有 steps 直接 done
-              if (String(s) === 'done' && prev.steps.length) {
-                next.steps = prev.steps.map((x) => ({ ...x, status: 'done' }))
-              }
               return next
             })
           }
+        }
+        if (waitingReviewRef.current && alive) {
+          setChatRun((prev) => (prev ? { ...prev, status: 'paused' } : prev))
         }
 
         // plan
@@ -379,17 +396,23 @@ export function ScriptPage() {
           if (alive) setChatBusy(false)
         }
         if (stageSet.has('chat.final')) {
-          if (!finalConsumed) {
-            finalConsumed = true
+          const finalTs = Number(stageTs.get('chat.final') || 0)
+          if (finalTs > lastFinalTsRef.current) {
+            lastFinalTsRef.current = finalTs
             const fin = await api.getRunStage(pid, runId, 'chat.final')
             const d = (fin.data as any)?.data || {}
             const assistantText = String(d?.assistant_message || '完成')
             const cards = Array.isArray(d?.cards) ? d.cards : undefined
+            const hasReviewCard =
+              Array.isArray(cards) && cards.some((c: any) => c && String(c?.type || '') === 'review_changeset' && c?.changeset_id)
+            const waitingReview = stageSet.has('chat.interrupt') && hasReviewCard
+            waitingReviewRef.current = waitingReview
             if (alive) {
               setChatMsgs((prev) => [...prev, { id: `${_now()}-a`, role: 'assistant', content: assistantText, ts: _now(), cards }])
               setChatBusy(false)
               setChatRun((prev) => {
                 if (!prev) return prev
+                if (waitingReview) return { ...prev, status: 'paused' }
                 return { ...prev, status: 'done', steps: prev.steps.map((x) => ({ ...x, status: 'done' })) }
               })
             }
@@ -423,7 +446,7 @@ export function ScriptPage() {
   // Heartbeat re-render (elapsed timers) even if polling stalls
   useEffect(() => {
     if (!chatRun?.runId) return
-    if (chatRun.status !== 'running' && chatRun.status !== 'queued') return
+    if (chatRun.status !== 'running' && chatRun.status !== 'queued' && chatRun.status !== 'paused') return
     if (chatPollPaused) return
     const timer = window.setInterval(() => setUiNowMs(Date.now()), 1000)
     return () => window.clearInterval(timer)
@@ -492,7 +515,7 @@ export function ScriptPage() {
       await refreshScript(projectId)
       setSelected({ kind: 'episode', episodeId: selected.episodeId })
     } catch (e: any) {
-      setError(e?.response?.data?.detail || e?.message || '保存失败')
+      setError(extractErrorMessage(e, '保存失败'))
     } finally {
       setBusy(null)
     }
@@ -508,7 +531,7 @@ export function ScriptPage() {
       await refreshScript(projectId)
       setSelected({ kind: 'scene', episodeId: selected.episodeId, sceneId: selectedScene.id })
     } catch (e: any) {
-      setError(e?.response?.data?.detail || e?.message || '保存失败')
+      setError(extractErrorMessage(e, '保存失败'))
     } finally {
       setBusy(null)
     }
@@ -528,7 +551,7 @@ export function ScriptPage() {
     await refreshScript(projectId)
       setSelected({ kind: 'shot', episodeId: selected.episodeId, sceneId: selected.sceneId, shotId: selectedShot.id })
     } catch (e: any) {
-      setError(e?.response?.data?.detail || e?.message || '保存失败')
+      setError(extractErrorMessage(e, '保存失败'))
     } finally {
       setBusy(null)
     }
@@ -542,7 +565,7 @@ export function ScriptPage() {
       await api.createEpisode(projectId, { title: `第${episodes.length + 1}集` })
       await refreshScript(projectId)
     } catch (e: any) {
-      setError(e?.response?.data?.detail || e?.message || '新建集失败')
+      setError(extractErrorMessage(e, '新建集失败'))
     } finally {
       setBusy(null)
     }
@@ -566,7 +589,7 @@ export function ScriptPage() {
       setCreateProjectName(name || '')
       setCreateProjectDesc(desc || '')
     } catch (e: any) {
-      setError(e?.response?.data?.detail || e?.message || '新建项目失败')
+      setError(extractErrorMessage(e, '新建项目失败'))
     } finally {
       setCreatingProject(false)
     }
@@ -582,7 +605,7 @@ export function ScriptPage() {
       // 重新加载项目列表（useProjectSelection 会自动选择第一个或置空）
       await refreshProjects()
     } catch (e: any) {
-      setError(e?.response?.data?.detail || e?.message || '删除项目失败')
+      setError(extractErrorMessage(e, '删除项目失败'))
     } finally {
       setDeleting(null)
     }
@@ -600,7 +623,7 @@ export function ScriptPage() {
       await refreshScript(projectId)
       setSelected({ kind: 'none' })
     } catch (e: any) {
-      setError(e?.response?.data?.detail || e?.message || '删除集失败')
+      setError(extractErrorMessage(e, '删除集失败'))
     } finally {
       setDeleting(null)
     }
@@ -614,7 +637,7 @@ export function ScriptPage() {
       await api.createScene(selected.episodeId, { title: `场${(selectedEpisode?.scenes || []).length + 1}` })
       await refreshScript(projectId)
     } catch (e: any) {
-      setError(e?.response?.data?.detail || e?.message || '新建场失败')
+      setError(extractErrorMessage(e, '新建场失败'))
     } finally {
       setBusy(null)
     }
@@ -628,7 +651,7 @@ export function ScriptPage() {
       await api.createShot(selectedScene.id, { title: `镜头${(selectedScene.shots || []).length + 1}`, action_text: '' })
       await refreshScript(projectId)
     } catch (e: any) {
-      setError(e?.response?.data?.detail || e?.message || '新建镜头失败')
+      setError(extractErrorMessage(e, '新建镜头失败'))
     } finally {
       setBusy(null)
     }
@@ -684,7 +707,7 @@ export function ScriptPage() {
         setChatMsgs((prev) => [...prev, { id: `${_now()}-a`, role: 'assistant', content: '启动失败：缺少 run_id', ts: _now() }])
       }
     } catch (e: any) {
-      setChatError(e?.response?.data?.detail || e?.message || '执行失败')
+      setChatError(extractErrorMessage(e, '执行失败'))
     } finally {
       // busy 在轮询完成时关闭
     }
@@ -692,17 +715,19 @@ export function ScriptPage() {
 
   async function handleCardApproveChangeSet(changesetId: string) {
     if (!changesetId) return
+    const runId = chatRun?.runId || ''
+    if (!runId) return
     setCardBusy((prev) => ({ ...prev, [`approve:${changesetId}`]: true }))
     try {
-      await api.memoryApproveChangeSet(changesetId, { reviewer: 'human', note: null })
+      await api.memoryApproveChangeSet(changesetId, { run_id: runId, reviewer: 'human', note: null })
       setChatMsgs((prev) => [
         ...prev,
-        { id: `${_now()}-a`, role: 'assistant', content: `已确认提交：${changesetId}（已落库 + materialize）`, ts: _now() },
+        { id: `${_now()}-a`, role: 'assistant', content: `已确认提交：${changesetId}（正在继续执行…）`, ts: _now() },
       ])
     } catch (e: any) {
       setChatMsgs((prev) => [
         ...prev,
-        { id: `${_now()}-a`, role: 'assistant', content: `提交失败：${changesetId}\n${e?.response?.data?.detail || e?.message || '未知错误'}`, ts: _now() },
+        { id: `${_now()}-a`, role: 'assistant', content: `提交失败：${changesetId}\n${extractErrorMessage(e, '未知错误')}`, ts: _now() },
       ])
     } finally {
       setCardBusy((prev) => ({ ...prev, [`approve:${changesetId}`]: false }))
@@ -711,14 +736,16 @@ export function ScriptPage() {
 
   async function handleCardRejectChangeSet(changesetId: string) {
     if (!changesetId) return
+    const runId = chatRun?.runId || ''
+    if (!runId) return
     setCardBusy((prev) => ({ ...prev, [`reject:${changesetId}`]: true }))
     try {
-      await api.memoryRejectChangeSet(changesetId, { reviewer: 'human', note: 'rejected_in_chat' })
-      setChatMsgs((prev) => [...prev, { id: `${_now()}-a`, role: 'assistant', content: `已驳回：${changesetId}`, ts: _now() }])
+      await api.memoryRejectChangeSet(changesetId, { run_id: runId, reviewer: 'human', note: 'rejected_in_chat' })
+      setChatMsgs((prev) => [...prev, { id: `${_now()}-a`, role: 'assistant', content: `已驳回：${changesetId}（正在继续执行…）`, ts: _now() }])
     } catch (e: any) {
       setChatMsgs((prev) => [
         ...prev,
-        { id: `${_now()}-a`, role: 'assistant', content: `驳回失败：${changesetId}\n${e?.response?.data?.detail || e?.message || '未知错误'}`, ts: _now() },
+        { id: `${_now()}-a`, role: 'assistant', content: `驳回失败：${changesetId}\n${extractErrorMessage(e, '未知错误')}`, ts: _now() },
       ])
     } finally {
       setCardBusy((prev) => ({ ...prev, [`reject:${changesetId}`]: false }))
@@ -985,6 +1012,16 @@ export function ScriptPage() {
                     </div>
                   </div>
                   {(() => {
+                    const st = evidenceUpsertStats
+                    if (!st) return null
+                    const remain = Math.max(0, (st.total || 0) - (st.done || 0))
+                    return (
+                      <div style={{ marginTop: 6, fontSize: 12, opacity: 0.8 }}>
+                        嵌入进度：剩余 {remain} / {st.total}（已完成 {st.done}）
+                      </div>
+                    )
+                  })()}
+                  {(() => {
                     const last = typeof chatRun.lastAtMs === 'number' ? chatRun.lastAtMs : null
                     if (!last) return null
                     const idleMs = uiNowMs - last
@@ -1003,8 +1040,8 @@ export function ScriptPage() {
                             if (!projectId || !chatRun?.runId) return
                             try {
                               const stagesRes = await api.listRunStages(projectId, chatRun.runId)
-                              const stages = (stagesRes.data as any)?.stages || []
-                              const stageSet = new Set(Array.isArray(stages) ? stages.map((s: any) => String(s)) : [])
+                              const stageMetas = ((stagesRes.data as any)?.stages || []) as { name: string; timestamp: number }[]
+                              const stageSet = new Set(stageMetas.map((s) => s.name))
                               if (stageSet.has('chat.status')) {
                                 const st = await api.getRunStage(projectId, chatRun.runId, 'chat.status')
                                 const sd = (st.data as any)?.data || {}
@@ -1231,6 +1268,12 @@ export function ScriptPage() {
                 <div style={{display:'flex', gap:10}}>
                    <span>后端实时日志</span>
                    <span style={{opacity:0.5}}>Run: {chatRun?.runId ? chatRun.runId.slice(0,8) : '-'}</span>
+                   {(() => {
+                     const st = evidenceUpsertStats
+                     if (!st) return null
+                     const remain = Math.max(0, (st.total || 0) - (st.done || 0))
+                     return <span style={{ opacity: 0.85 }}>嵌入剩余 {remain}/{st.total}</span>
+                   })()}
                 </div>
                 <div style={{display:'flex', gap:10}}>
                   {/* [新增] 手动开关 */}

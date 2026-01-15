@@ -21,6 +21,20 @@ export const EpisodeList = memo(function EpisodeList({
   onSelectEpisode,
   onSelectScene,
 }: EpisodeListProps) {
+  const getBadge = (ep: EpisodeRead) => {
+    const st = String((ep as any)?.exec_status || 'idle')
+    const locked = !!(ep as any)?.script_locked
+    if (st === 'running' || st === 'queued') return { text: '执行中', tone: 'info' as const }
+    if (st === 'waiting_outline_confirm') return { text: '待确认·大纲', tone: 'warn' as const }
+    if (st === 'waiting_assets_confirm') return { text: '待确认·资产', tone: 'warn' as const }
+    if (st === 'waiting_split_confirm') return { text: '待确认·分割', tone: 'warn' as const }
+    if (st === 'waiting_ingest_confirm') return { text: '待确认·入库', tone: 'warn' as const }
+    if (st === 'done') return { text: '已完成', tone: 'ok' as const }
+    if (st === 'error') return { text: '失败', tone: 'bad' as const }
+    if (locked) return { text: '已锁定', tone: 'muted' as const }
+    return null
+  }
+
   return (
     <div style={panelStyle}>
       <div style={styles.sidebarSection}>
@@ -46,6 +60,21 @@ export const EpisodeList = memo(function EpisodeList({
               >
                 <div style={styles.cardTitle}>
                   <span style={styles.mono}>EP{ep.order}</span> {ep.title}
+                  {(() => {
+                    const b = getBadge(ep)
+                    if (!b) return null
+                    const toneStyle =
+                      b.tone === 'ok'
+                        ? styles.badgeOk
+                        : b.tone === 'warn'
+                          ? styles.badgeWarn
+                          : b.tone === 'bad'
+                            ? styles.badgeBad
+                            : b.tone === 'info'
+                              ? styles.badgeInfo
+                              : styles.badgeMuted
+                    return <span style={{ ...styles.badge, ...toneStyle }}>{b.text}</span>
+                  })()}
                 </div>
                 {ep.description ? <div style={styles.cardSub}>{trim(ep.description, 80)}</div> : null}
               </button>
@@ -116,6 +145,20 @@ const styles: Record<string, React.CSSProperties> = {
   },
   cardTitle: { fontWeight: 700, fontSize: 12, marginBottom: 4 },
   cardSub: { fontSize: 11, opacity: 0.7, whiteSpace: 'pre-wrap' as const },
+  badge: {
+    marginLeft: 8,
+    fontSize: 10,
+    padding: '2px 6px',
+    borderRadius: 999,
+    border: '1px solid rgba(255,255,255,0.12)',
+    opacity: 0.9,
+    whiteSpace: 'nowrap' as const,
+  },
+  badgeOk: { background: 'rgba(34,197,94,0.14)', color: 'rgba(187,247,208,0.92)' },
+  badgeWarn: { background: 'rgba(245,158,11,0.16)', color: 'rgba(253,230,138,0.95)' },
+  badgeBad: { background: 'rgba(239,68,68,0.16)', color: 'rgba(254,202,202,0.95)' },
+  badgeInfo: { background: 'rgba(99,102,241,0.18)', color: 'rgba(224,231,255,0.95)' },
+  badgeMuted: { background: 'rgba(255,255,255,0.06)', color: 'rgba(255,255,255,0.65)' },
   smallListBtn: {
     width: '100%',
     textAlign: 'left',

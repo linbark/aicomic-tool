@@ -77,15 +77,7 @@ export function RunInspectorPage() {
     try {
       const res = await api.listRunStages(projectId, selectedRunId)
       console.log('[RunInspector] Stages loaded:', res.data)
-      // 后端现在返回的是对象列表，但也可能还没更新，做个兼容处理
-      const rawStages = (res.data as any)?.stages || []
-      const formatted: StageItem[] = rawStages.map((item: any) => {
-        if (typeof item === 'string') {
-          return { name: item, preview: '' }
-        }
-        return item
-      })
-      setStages(formatted)
+      setStages(((res.data as any)?.stages || []) as StageItem[])
     } catch (e: any) {
       console.error('[RunInspector] Failed to load stages:', e)
     } finally {

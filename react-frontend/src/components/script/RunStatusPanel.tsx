@@ -41,7 +41,7 @@ export const RunStatusPanel = memo(function RunStatusPanel({
           {last ? `｜最近更新 ${(Math.max(0, uiNowMs - last) / 1000).toFixed(0)}s 前` : ''}
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
-          {chatRun.status === 'running' || chatRun.status === 'queued' ? (
+          {chatRun.status === 'running' || chatRun.status === 'queued' || chatRun.status === 'paused' ? (
             chatPollPaused ? (
               <Button onClick={onResumePoll}>继续轮询</Button>
             ) : (

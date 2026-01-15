@@ -1,67 +1,55 @@
 import { memo } from 'react'
 import type { EpisodeRead } from '../../api/types'
-import type { ChatMsg, ChatRunUi } from './types'
 import { Button } from '../ui/Button'
 import { Textarea } from '../ui/Textarea'
-import { ChatPanel } from './ChatPanel'
 import { panelStyle } from '../../styles/shared'
+import type { ChatRunUi } from './types'
+import { ExecutionPanel } from './ExecutionPanel'
 
 type EpisodeEditorProps = {
   episode: EpisodeRead
   episodeText: string
-  chatMsgs: ChatMsg[]
-  chatInput: string
-  chatBusy: boolean
-  chatError: string | null
-  chatDebug: boolean
-  chatRun: ChatRunUi | null
   uiNowMs: number
-  chatPollPaused: boolean
-  cardBusy: Record<string, boolean>
+  execRun: ChatRunUi | null
+  execPollPaused: boolean
+  interruptKind: string | null
+  execBusy: boolean
   busy: boolean
   deleting: boolean
+  rawAssetsVisualDnaText?: string
+  rawSplitEpisodesText?: string
   onEpisodeTextChange: (value: string) => void
-  onChatInputChange: (value: string) => void
-  onDebugChange: (value: boolean) => void
   onSave: () => void
   onCreateScene: () => void
   onDelete: () => void
-  onSendChat: () => void
-  onPausePoll: () => void
-  onResumePoll: () => void
-  onForceRefresh: () => void
-  onCardApproveChangeSet: (changesetId: string) => void
-  onCardRejectChangeSet: (changesetId: string) => void
-  onCardChooseIntent: (label: string) => void
+  onExecute: () => void
+  onPauseExecPoll: () => void
+  onResumeExecPoll: () => void
+  onForceRefreshExec: () => void
+  onConfirmExec: (decision: 'confirmed' | 'regenerate' | 'rejected', artifacts?: Record<string, unknown>) => void
 }
 
 export const EpisodeEditor = memo(function EpisodeEditor({
   episode,
   episodeText,
-  chatMsgs,
-  chatInput,
-  chatBusy,
-  chatError,
-  chatDebug,
-  chatRun,
   uiNowMs,
-  chatPollPaused,
-  cardBusy,
+  execRun,
+  execPollPaused,
+  interruptKind,
+  execBusy,
   busy,
   deleting,
+  rawAssetsVisualDnaText,
+  rawSplitEpisodesText,
   onEpisodeTextChange,
-  onChatInputChange,
-  onDebugChange,
   onSave,
   onCreateScene,
   onDelete,
-  onSendChat,
-  onPausePoll,
-  onResumePoll,
-  onForceRefresh,
-  onCardApproveChangeSet,
-  onCardRejectChangeSet,
-  onCardChooseIntent,
+  onExecute,
+  onPauseExecPoll,
+  onResumeExecPoll,
+  onForceRefreshExec,
+  onConfirmExec,
 }: EpisodeEditorProps) {
   return (
     <section style={panelStyle}>
@@ -73,7 +61,7 @@ export const EpisodeEditor = memo(function EpisodeEditor({
           <Button onClick={onCreateScene} disabled={busy}>
             + 新建场
           </Button>
-          <Button variant="primary" onClick={onSave} disabled={busy}>
+          <Button variant="primary" onClick={onSave} disabled={busy || !!episode.script_locked}>
             保存本集
           </Button>
           <Button onClick={onDelete} disabled={deleting}>
@@ -82,44 +70,33 @@ export const EpisodeEditor = memo(function EpisodeEditor({
         </div>
       </div>
 
-      <div style={{ marginBottom: 10, fontSize: 12, opacity: 0.7 }}>
-        Episode-详情已改为 Chat 驱动：请直接对话提出意图（生成/优化/分镜/入库审阅），系统会自动规划执行路径。
-      </div>
-
       <div style={styles.labelRow}>
-        <div style={styles.label}>当前剧本（可选：直接编辑）</div>
-        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, opacity: 0.75, cursor: 'pointer' }}>
-          <input type="checkbox" checked={chatDebug} onChange={(e) => onDebugChange(e.target.checked)} />
-          Debug
-        </label>
+        <div style={styles.label}>当前剧本</div>
       </div>
       <Textarea
         value={episodeText}
         onChange={(e) => onEpisodeTextChange(e.target.value)}
         style={{ height: 220 }}
         placeholder="本集剧本内容…"
+        disabled={!!episode.script_locked}
       />
 
       <div style={{ borderTop: '1px solid rgba(255,255,255,0.1)', margin: '12px 0' }} />
 
-      <ChatPanel
-        chatMsgs={chatMsgs}
-        chatInput={chatInput}
-        chatBusy={chatBusy}
-        chatError={chatError}
-        chatDebug={chatDebug}
-        chatRun={chatRun}
+      <ExecutionPanel
+        episode={episode}
+        execRun={execRun}
         uiNowMs={uiNowMs}
-        chatPollPaused={chatPollPaused}
-        cardBusy={cardBusy}
-        onInputChange={onChatInputChange}
-        onSend={onSendChat}
-        onPausePoll={onPausePoll}
-        onResumePoll={onResumePoll}
-        onForceRefresh={onForceRefresh}
-        onCardApproveChangeSet={onCardApproveChangeSet}
-        onCardRejectChangeSet={onCardRejectChangeSet}
-        onCardChooseIntent={onCardChooseIntent}
+        execPollPaused={execPollPaused}
+        interruptKind={interruptKind}
+        busy={busy || execBusy}
+        rawAssetsVisualDnaText={rawAssetsVisualDnaText || ''}
+        rawSplitEpisodesText={rawSplitEpisodesText || ''}
+        onExecute={onExecute}
+        onPausePoll={onPauseExecPoll}
+        onResumePoll={onResumeExecPoll}
+        onForceRefresh={onForceRefreshExec}
+        onConfirm={onConfirmExec}
       />
     </section>
   )

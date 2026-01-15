@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 handler = logging.FileHandler(log_file)
 handler.setLevel(logging.DEBUG)
-formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - [run_id=%(run_id)s] - %(message)s')
 handler.setFormatter(formatter)
 logger.addHandler(handler)
 
@@ -197,7 +197,7 @@ class ContextStore:
         try:
             # 获取所有 json 文件
             files = [f for f in os.listdir(stages_dir) if f.endswith(".json")]
-        except Exception:
+        except Exception as e:
             logger.error(f"[ContextStore] Error listing stages: {e}")
             return []
 
@@ -260,5 +260,3 @@ class ContextStore:
         except Exception:
             logger.error(f"[ContextStore] Error reading stage {path}: {e}")
             return None
-
-

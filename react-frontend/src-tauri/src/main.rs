@@ -202,7 +202,7 @@ fn main() {
       let resource_dir = app.path_resolver().resource_dir();
       let backend_root = find_backend_root(resource_dir).expect("backend root not found");
 
-      let port = 8000;
+      let port = pick_free_port();
       eprintln!("[Tauri] Picked port: {}", port);
       eprintln!("[Tauri] Backend root: {:?}", backend_root);
       eprintln!("[Tauri] App data dir: {:?}", app_data_dir);
@@ -288,5 +288,4 @@ fn main() {
 }
 
 struct BackendChild(std::sync::Mutex<Option<Child>>);
-
 

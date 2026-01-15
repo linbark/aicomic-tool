@@ -25,6 +25,19 @@ class LlmChatSettings:
     max_tokens: Optional[int]  # None 表示使用默认较大 max_tokens
     timeout_seconds: float
 
+    def __repr__(self) -> str:
+        masked = "***" if (self.api_key or "").strip() else ""
+        return (
+            "LlmChatSettings("
+            f"base_url={self.base_url!r}, "
+            f"api_key={masked!r}, "
+            f"model={self.model!r}, "
+            f"temperature={self.temperature!r}, "
+            f"max_tokens={self.max_tokens!r}, "
+            f"timeout_seconds={self.timeout_seconds!r}"
+            ")"
+        )
+
 
 class DeepSeekChatClient:
     """

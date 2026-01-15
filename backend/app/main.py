@@ -122,8 +122,27 @@ CREATE TABLE IF NOT EXISTS ai_action_runs (
     except Exception as e:
         print(f"[Migration][Warning] ensure_ai_action_runs_table failed: {e}")
 
+def ensure_episodes_execute_columns():
+    try:
+        with engine.begin() as conn:
+            ep_cols = conn.execute(text("PRAGMA table_info(episodes)")).fetchall()
+            ep_col_names = {row[1] for row in ep_cols}
+            if "script_locked" not in ep_col_names:
+                conn.execute(text("ALTER TABLE episodes ADD COLUMN script_locked BOOLEAN NOT NULL DEFAULT 0"))
+            if "script_locked_at" not in ep_col_names:
+                conn.execute(text("ALTER TABLE episodes ADD COLUMN script_locked_at DATETIME"))
+            if "last_exec_run_id" not in ep_col_names:
+                conn.execute(text("ALTER TABLE episodes ADD COLUMN last_exec_run_id TEXT"))
+            if "exec_status" not in ep_col_names:
+                conn.execute(text("ALTER TABLE episodes ADD COLUMN exec_status TEXT NOT NULL DEFAULT 'idle'"))
+            if "exec_artifacts" not in ep_col_names:
+                conn.execute(text("ALTER TABLE episodes ADD COLUMN exec_artifacts JSON"))
+    except Exception as e:
+        print(f"[Migration][Warning] ensure_episodes_execute_columns failed: {e}")
+
 ensure_characters_category_column()
 ensure_episode_scene_description_columns()
+ensure_episodes_execute_columns()
 ensure_ai_action_runs_table()
 ensure_projects_uuid_column()
 

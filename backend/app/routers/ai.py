@@ -12,6 +12,7 @@ from . import (
     ai_basic,
     ai_chat,
     ai_context,
+    ai_episode_execute,
     ai_prompts,
     ai_runs_files,
     ai_visual_dna,
@@ -29,11 +30,11 @@ router.include_router(ai_prompts.router)
 # 2. 写作与编排 (/chat, /outline, /script, /workflows)
 router.include_router(ai_writing.router)
 router.include_router(ai_chat.router)
+router.include_router(ai_episode_execute.router)
 router.include_router(ai_workflows.router)
 
 # 3. 上下文与产物 (/context, /runs-files, /visual-dna)
 router.include_router(ai_context.router)
 router.include_router(ai_runs_files.router)
 router.include_router(ai_visual_dna.router)
-
 

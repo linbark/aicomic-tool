@@ -48,6 +48,10 @@ def update_episode(episode_id: int, episode_update: schemas.EpisodeUpdate, db: S
     db_ep = db.query(models.Episode).filter(models.Episode.id == episode_id).first()
     if not db_ep:
         raise HTTPException(status_code=404, detail="Episode not found")
+
+    if getattr(db_ep, "script_locked", False):
+        if episode_update.description is not None or episode_update.action_text is not None or episode_update.prompt is not None:
+            raise HTTPException(status_code=409, detail="Episode script is locked")
     
     if episode_update.title is not None:
         db_ep.title = episode_update.title

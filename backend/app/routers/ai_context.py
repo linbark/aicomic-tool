@@ -57,7 +57,6 @@ def get_series_bible(project_id: str, run_id: str, version: str = "v1", db: Sess
         run_id=run_id,
     )
 
-
 @router.put("/context/series-bible", response_model=ContextWriteResponse)
 def put_series_bible(project_id: str, payload: ContextWriteRequest, db: Session = Depends(get_db)):
     # 校验 version 格式（允许 v1, v2, ...）

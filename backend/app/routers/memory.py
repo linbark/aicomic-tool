@@ -15,6 +15,7 @@ from ..services.llm_client import LlmChatSettings
  
 from ..services.app_paths import ai_settings_path
 from ..services.project_lookup import resolve_project_pk
+from ..services.chat_graph import resume_chat_graph_in_thread
 from ..workflows.memory_schemas import TimeBlock, TimeConstraint
 
 import logging
@@ -224,7 +225,14 @@ class ApplyChangeSetRequest(BaseModel):
 def approve_changeset(changeset_id: str, req: ApplyChangeSetRequest):
     store = get_memory_store()
     try:
+        run_id = (req.run_id or "").strip()
+        if not run_id:
+            raise HTTPException(status_code=400, detail="run_id 不能为空")
         store.apply_changeset(changeset_id=changeset_id, reviewer=req.reviewer, note=req.note)
+        cs = store.get_changeset(changeset_id)
+        project_id_pk = int(cs.get("project_id")) if isinstance(cs, dict) and cs.get("project_id") is not None else None
+        if project_id_pk is not None:
+            resume_chat_graph_in_thread(project_id_pk=project_id_pk, run_id=run_id, decision="approved")
         return {"message": "approved"}
     except ValueError:
         logger.error(f"[Memory] Change Set Not Found: {changeset_id}")
@@ -238,7 +246,14 @@ def approve_changeset(changeset_id: str, req: ApplyChangeSetRequest):
 def reject_changeset(changeset_id: str, req: ApplyChangeSetRequest):
     store = get_memory_store()
     try:
+        run_id = (req.run_id or "").strip()
+        if not run_id:
+            raise HTTPException(status_code=400, detail="run_id 不能为空")
         store.reject_changeset(changeset_id=changeset_id, reviewer=req.reviewer, note=req.note)
+        cs = store.get_changeset(changeset_id)
+        project_id_pk = int(cs.get("project_id")) if isinstance(cs, dict) and cs.get("project_id") is not None else None
+        if project_id_pk is not None:
+            resume_chat_graph_in_thread(project_id_pk=project_id_pk, run_id=run_id, decision="rejected")
         return {"message": "rejected"}
     except Exception as e:
         logger.error(f"[Memory] Reject Change Set Error: {e}")

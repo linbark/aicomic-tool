@@ -1,8 +1,8 @@
 {
   "build": {
-    "beforeDevCommand": "npm run dev -- --host 0.0.0.0 --port 5173 --strictPort",
+    "beforeDevCommand": "npm run dev -- --host 0.0.0.0 --port 5183 --strictPort",
     "beforeBuildCommand": "npm run build",
-    "devPath": "http://127.0.0.1:5173",
+    "devPath": "http://127.0.0.1:5183",
     "distDir": "../dist"
   },
   "package": {

@@ -15,6 +15,9 @@ import type {
   OutlineGenerateRequest,
   OutlineOptimizeRequest,
   OutlineOptimizeResponse,
+  EpisodeExecuteStartRequest,
+  EpisodeExecuteStartResponse,
+  EpisodeExecuteConfirmRequest,
   PromptTemplateCreate,
   PromptTemplateRead,
   PromptTemplateUpsert,
@@ -164,6 +167,10 @@ export const api = {
   aiWorkflowStoryboard: (data: WorkflowStoryboardRequest) => apiClient.post<WorkflowStoryboardResponse>(`/ai/workflows/storyboard`, data),
   aiApplyWorkflowScript: (data: ApplyScriptWorkflowRequest) => apiClient.post(`/ai/workflows/script/apply`, data),
   aiApplyWorkflowStoryboard: (data: ApplyStoryboardWorkflowRequest) => apiClient.post(`/ai/workflows/storyboard/apply`, data),
+  aiEpisodeExecuteActAsync: (data: EpisodeExecuteStartRequest) =>
+    apiClient.post<EpisodeExecuteStartResponse>(`/ai/episode-execute/act_async`, data),
+  aiEpisodeExecuteConfirm: (episodeId: number, data: EpisodeExecuteConfirmRequest) =>
+    apiClient.post(`/ai/episode-execute/${episodeId}/confirm`, data),
   getPromptTemplates: () => apiClient.get<PromptTemplateRead[]>(`/ai/prompts`),
   createPromptTemplate: (data: PromptTemplateCreate) => apiClient.post<PromptTemplateRead>(`/ai/prompts`, data),
   upsertPromptTemplate: (key: string, data: PromptTemplateUpsert) => apiClient.put<PromptTemplateRead>(`/ai/prompts/${encodeURIComponent(key)}`, data),
@@ -269,10 +276,16 @@ export const api = {
   getRunFile: (projectId: string, runId: string) =>
     apiClient.get(`/ai/runs-files/${encodeURIComponent(runId)}?project_id=${encodeURIComponent(projectId)}`),
   listRunStages: (projectId: string, runId: string) =>
-    apiClient.get(`/ai/runs-files/${encodeURIComponent(runId)}/stages?project_id=${encodeURIComponent(projectId)}`),
+    apiClient.get(`/ai/runs-files/${encodeURIComponent(runId)}/stages?project_id=${encodeURIComponent(projectId)}`, {
+      // 前端轮询应快速失败，避免受全局 310s 影响
+      timeout: 15_000,
+    }),
   getRunStage: (projectId: string, runId: string, stageName: string) =>
     apiClient.get(
-      `/ai/runs-files/${encodeURIComponent(runId)}/stages/${encodeURIComponent(stageName)}?project_id=${encodeURIComponent(projectId)}`
+      `/ai/runs-files/${encodeURIComponent(runId)}/stages/${encodeURIComponent(stageName)}?project_id=${encodeURIComponent(projectId)}`,
+      {
+        timeout: 15_000,
+      }
     ),
 
   // Visual DNA 摄取
@@ -296,10 +309,10 @@ export const api = {
     payload: Record<string, unknown>
     default_materialize_static_bible?: boolean
   }) => apiClient.post<{ changeset_id: string }>(`/memory/changeset/from-payload`, data),
-  memoryApproveChangeSet: (changesetId: string, data?: { reviewer?: string; note?: string | null }) =>
-    apiClient.post(`/memory/changeset/${encodeURIComponent(changesetId)}/approve`, data || {}),
-  memoryRejectChangeSet: (changesetId: string, data?: { reviewer?: string; note?: string | null }) =>
-    apiClient.post(`/memory/changeset/${encodeURIComponent(changesetId)}/reject`, data || {}),
+  memoryApproveChangeSet: (changesetId: string, data: { run_id: string; reviewer?: string; note?: string | null }) =>
+    apiClient.post(`/memory/changeset/${encodeURIComponent(changesetId)}/approve`, data),
+  memoryRejectChangeSet: (changesetId: string, data: { run_id: string; reviewer?: string; note?: string | null }) =>
+    apiClient.post(`/memory/changeset/${encodeURIComponent(changesetId)}/reject`, data),
   memoryExtractChangeSet: (data: {
     project_id: string
     episode_id?: number

@@ -193,6 +193,52 @@ def default_prompt_templates() -> Dict[str, Dict[str, Any]]:
             ),
             "variables": [],
         },
+        "episode_assets_visual_dna_system": {
+            "title": "按剧本抽离资产并生成视觉DNA（system）",
+            "category": "workflow",
+            "prompt": (
+                "你是一位“资产标注与视觉设定”助手。你将从用户提供的本集剧本与大纲中：\n"
+                "1) 抽离资产：人物、物品、场景。\n"
+                "2) 生成视觉DNA：整体风格与每个角色的可复用视觉特征。\n"
+                "\n"
+                "输出必须是严格 JSON object，不要 markdown/代码块，不要额外文字。\n"
+                "\n"
+                "JSON Schema:\n"
+                "{\n"
+                '  "characters": [{"name": "...", "description": "...", "visual_dna": {"face": "...", "body_type": "...", "hair_style": "...", "attire": "...", "distinguishing_marks": "..."}, "stable_diffusion_tags": "..."}],\n'
+                '  "props": [{"name": "...", "description": "...", "stable_diffusion_tags": "..."}],\n'
+                '  "locations": [{"name": "...", "description": "...", "stable_diffusion_tags": "..."}],\n'
+                '  "series_style": {"lighting_style": "...", "camera_language": "...", "composition": "...", "color_palette": ["#RRGGBB"], "stable_diffusion_tags": "..."}\n'
+                "}\n"
+                "\n"
+                "约束：\n"
+                "- name 必须短且唯一（尽量用剧本常用称呼）。\n"
+                "- 如果信息不足，description 可留空，但必须保留字段。\n"
+                "- stable_diffusion_tags 用英文逗号分隔标签串。\n"
+            ),
+            "variables": [],
+        },
+        "episode_split_episodes_system": {
+            "title": "按长度分割剧集并生成每集大纲（system）",
+            "category": "workflow",
+            "prompt": (
+                "你是一位资深剧集统筹。你将把输入的单段长剧本按“剧集”进行分割，并为每一集生成大纲。\n"
+                "输出必须是严格 JSON object，不要 markdown/代码块，不要额外文字。\n"
+                "\n"
+                "JSON Schema:\n"
+                "{\n"
+                '  "episodes": [\n'
+                '    {"title": "第1集：...", "script": "...", "outline": "..."}\n'
+                "  ]\n"
+                "}\n"
+                "\n"
+                "约束：\n"
+                "- episodes 至少 1 集；如内容很长，合理拆为多集。\n"
+                "- script 必须是该集对应的剧本片段（保持原文为主，可轻微整理但不改剧情）。\n"
+                "- outline 用中文，结构化分段（如：开端/发展/高潮/结尾/关键转折）。\n"
+            ),
+            "variables": [],
+        },
     }
 
 
@@ -326,5 +372,4 @@ def list_templates_read() -> List[Dict[str, Any]]:
     for key in sorted(effective.keys()):
         out.append(template_to_read(key=key, tpl=effective[key], defaults=defaults, raw_templates=raw_templates))
     return out
-
 

@@ -4,7 +4,7 @@ import { AppLayout } from './components/AppLayout'
 import { PlaceholderPage } from './pages/PlaceholderPage'
 
 // 代码分割：使用 React.lazy 进行路由级别的懒加载
-const ScriptPage = lazy(() => import('./pages/ScriptPage').then(m => ({ default: m.ScriptPage })))
+const ScriptPage = lazy(() => import('./pages/ScriptPage.refactored').then(m => ({ default: m.ScriptPage })))
 const AiSettingsPage = lazy(() => import('./pages/AiSettingsPage').then(m => ({ default: m.AiSettingsPage })))
 const EventMatrixPage = lazy(() => import('./pages/EventMatrixPage').then(m => ({ default: m.EventMatrixPage })))
 const EventFlowPage = lazy(() => import('./pages/EventFlowPage').then(m => ({ default: m.EventFlowPage })))

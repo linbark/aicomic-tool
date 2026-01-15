@@ -51,6 +51,11 @@ class Episode(Base):
     description = Column(Text, nullable=True) # 集的剧本描述/内容
     action_text = Column(Text, nullable=True) # 画面描述（类似 Shot/Scene）
     prompt = Column(Text, nullable=True) # Stable Diffusion Prompt（类似 Shot/Scene）
+    script_locked = Column(Boolean, default=False)
+    script_locked_at = Column(DateTime(timezone=True), nullable=True)
+    last_exec_run_id = Column(String, nullable=True)
+    exec_status = Column(String, default="idle")
+    exec_artifacts = Column(JSON, nullable=True)
     
     project = relationship("Project", back_populates="episodes")
     scenes = relationship("Scene", back_populates="episode", cascade="all, delete-orphan")

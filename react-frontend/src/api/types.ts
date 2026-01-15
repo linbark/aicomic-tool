@@ -64,6 +64,24 @@ export interface ScriptOptimizeResponse {
   text: string
 }
 
+export interface EpisodeExecuteStartRequest {
+  project_id: ProjectID
+  episode_id: ID
+  script_text: string
+  run_id?: string | null
+}
+
+export interface EpisodeExecuteStartResponse {
+  run_id: string
+  status: string
+}
+
+export interface EpisodeExecuteConfirmRequest {
+  decision: 'confirmed' | 'regenerate' | 'rejected'
+  artifacts?: Record<string, unknown> | null
+  run_id: string
+}
+
 export interface WorkflowScriptOptions {
   qc_loops?: number
   max_scenes?: number
@@ -214,6 +232,10 @@ export interface EpisodeRead {
   description?: string | null
   action_text?: string | null
   prompt?: string | null
+  script_locked?: boolean
+  last_exec_run_id?: string | null
+  exec_status?: string
+  exec_artifacts?: Record<string, unknown> | null
   scenes?: SceneRead[]
 }
 

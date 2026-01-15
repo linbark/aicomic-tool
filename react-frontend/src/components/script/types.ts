@@ -30,7 +30,7 @@ export type StepUi = {
 
 export type ChatRunUi = {
   runId: string
-  status: 'queued' | 'running' | 'done' | 'error'
+  status: 'queued' | 'running' | 'paused' | 'done' | 'error'
   steps: StepUi[]
   error?: string | null
   startedAtMs?: number

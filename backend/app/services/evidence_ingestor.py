@@ -134,4 +134,3 @@ def chunk_text_to_evidences(
             )
 
     return evidences
-

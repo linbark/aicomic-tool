@@ -34,7 +34,7 @@ def get_run_file(project_id: str, run_id: str, db: Session = Depends(get_db)):
 @router.get("/runs-files/{run_id}/stages")
 def list_run_stages(project_id: str, run_id: str, db: Session = Depends(get_db)):
     """
-    列出该 run 的所有 stage 名称。
+    列出该 run 的所有 stage（包含预览与时间戳）。
     """
     pid = resolve_project_pk(db, project_id)
     stages = _context_store.list_stages(project_id=pid, run_id=run_id)
@@ -51,4 +51,3 @@ def get_run_stage(project_id: str, run_id: str, stage_name: str, db: Session = D
     if stage_data is None:
         raise HTTPException(status_code=404, detail="Stage not found")
     return {"project_id": str(project_id), "run_id": run_id, "stage_name": stage_name, "data": stage_data}
-
