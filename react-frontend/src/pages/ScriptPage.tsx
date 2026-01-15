@@ -90,6 +90,17 @@ export function ScriptPage() {
 
   const episodeDirtyForIdRef = useRef<number | null>(null)
   const sceneDirtyForIdRef = useRef<number | null>(null)
+  const [expandedEpisodes, setExpandedEpisodes] = useState<Record<number, boolean>>({})
+  const expandAll = () => {
+    const next: Record<number, boolean> = {}
+    for (const ep of episodes) next[ep.id] = true
+    setExpandedEpisodes(next)
+  }
+  const collapseAll = () => {
+    const next: Record<number, boolean> = {}
+    for (const ep of episodes) next[ep.id] = false
+    setExpandedEpisodes(next)
+  }
 
   const selectedEpisode = useMemo(() => {
     if (selected.kind === 'episode') return episodes.find((e) => e.id === selected.episodeId) || null
@@ -444,6 +455,32 @@ export function ScriptPage() {
       setHasNewLogs(true)
     }
   }, [debugLogs]) // 依赖 debugLogs 变化
+
+  useEffect(() => {
+    if (selected.kind !== 'none') {
+      setExpandedEpisodes((prev) => ({ ...prev, [selected.episodeId]: true }))
+    }
+  }, [selected])
+
+  useEffect(() => {
+    if (!projectId) return
+    const raw = _lsGet(`aicomic.expanded_episodes.${projectId}`)
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw)
+        if (parsed && typeof parsed === 'object') setExpandedEpisodes(parsed)
+      } catch {
+        setExpandedEpisodes({})
+      }
+    } else {
+      setExpandedEpisodes({})
+    }
+  }, [projectId])
+
+  useEffect(() => {
+    if (!projectId) return
+    _lsSet(`aicomic.expanded_episodes.${projectId}`, JSON.stringify(expandedEpisodes))
+  }, [expandedEpisodes, projectId])
 
   async function saveEpisode() {
     if (!projectId || selected.kind !== 'episode') return
@@ -806,42 +843,59 @@ export function ScriptPage() {
         <div style={styles.sidebar}>
           <div style={styles.sidebarSection}>
             <div style={styles.colHeader}>
-              <div style={styles.colTitle}>Episodes</div>
+              <div style={styles.colTitle}>剧本目录</div>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button style={styles.btn} onClick={expandAll}>展开全部</button>
+                <button style={styles.btn} onClick={collapseAll}>收起全部</button>
+              </div>
             </div>
             <div style={styles.colScroll} className="aicomic-scroll">
-              {episodes.map((ep) => (
-                <div key={ep.id} style={styles.card}>
-                  <button
-                  style={{
-                      ...styles.cardBtn,
-                    ...(selected.kind !== 'none' && selectedEpisode?.id === ep.id ? styles.cardActive : null),
-                  }}
-                  onClick={() => setSelected({ kind: 'episode', episodeId: ep.id })}
-                >
-                      <div style={styles.cardTitle}>
-                        <span style={styles.mono}>EP{ep.order}</span> {ep.title}
-                      </div>
-                    {ep.description ? <div style={styles.cardSub}>{_trim(ep.description, 80)}</div> : null}
-                    </button>
-
-                  {(ep.scenes || []).length ? (
-                    <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 6, paddingLeft: 10 }}>
-                      {(ep.scenes || []).map((sc) => (
-                        <button
-                      key={sc.id}
+              {episodes.map((ep) => {
+                const expanded = !!expandedEpisodes[ep.id]
+                return (
+                  <div key={ep.id}>
+                    <div
                       style={{
-                            ...styles.smallListBtn,
-                            ...(selected.kind !== 'none' && selectedScene?.id === sc.id ? styles.smallListBtnActive : null),
-                          }}
-                          onClick={() => setSelected({ kind: 'scene', episodeId: ep.id, sceneId: sc.id })}
-                        >
-                          <span style={styles.mono}>SC{sc.sequence_number ?? ''}</span> {sc.title || '未命名场景'}
-                    </button>
-                      ))}
+                        ...styles.treeRow,
+                        ...(selected.kind !== 'none' && selectedEpisode?.id === ep.id ? styles.treeRowActive : null),
+                      }}
+                    >
+                      <button
+                        style={styles.treeToggle}
+                        onClick={() =>
+                          setExpandedEpisodes((prev) => ({ ...prev, [ep.id]: !prev[ep.id] }))
+                        }
+                        aria-label={expanded ? '收起' : '展开'}
+                      >
+                        {expanded ? '▼' : '▶'}
+                      </button>
+                      <button
+                        style={styles.treeLabel}
+                        onClick={() => setSelected({ kind: 'episode', episodeId: ep.id })}
+                      >
+                        <span style={styles.mono}>EP{ep.order}</span> {ep.title}
+                      </button>
                     </div>
-              ) : null}
-                    </div>
-                  ))}
+                    {expanded && (ep.scenes || []).length ? (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, paddingLeft: 22 }}>
+                        {(ep.scenes || []).map((sc) => (
+                          <button
+                            key={sc.id}
+                            style={{
+                              ...styles.treeSceneRow,
+                              ...(selected.kind !== 'none' && selectedScene?.id === sc.id ? styles.treeSceneRowActive : null),
+                            }}
+                            onClick={() => setSelected({ kind: 'scene', episodeId: ep.id, sceneId: sc.id })}
+                          >
+                            <span style={{ marginRight: 6 }}>📄</span>
+                            <span style={styles.mono}>SC{sc.sequence_number ?? ''}</span> {sc.title || '未命名场景'}
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                )
+              })}
             </div>
           </div>
         </div>
@@ -1282,7 +1336,7 @@ const styles: Record<string, any> = {
   },
   body: {
     display: 'grid',
-    gridTemplateColumns: '320px 1fr',
+    gridTemplateColumns: '260px 1fr',
     gap: 12,
     alignItems: 'start',
   },
@@ -1399,4 +1453,54 @@ const styles: Record<string, any> = {
     background: 'rgba(99,102,241,0.10)',
   },
   mono: { fontFamily: 'monospace', fontSize: 11, opacity: 0.85 },
+  treeRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    padding: '6px 8px',
+    borderRadius: 8,
+    cursor: 'pointer',
+    background: 'rgba(0,0,0,0.12)',
+    border: '1px solid rgba(255,255,255,0.08)',
+    marginBottom: 6,
+  },
+  treeRowActive: {
+    border: '1px solid rgba(99,102,241,0.7)',
+    background: 'rgba(99,102,241,0.12)',
+  },
+  treeToggle: {
+    width: 24,
+    height: 24,
+    borderRadius: 6,
+    border: '1px solid rgba(255,255,255,0.10)',
+    background: 'rgba(0,0,0,0.16)',
+    color: 'rgba(255,255,255,0.92)',
+    cursor: 'pointer',
+  },
+  treeLabel: {
+    flex: 1,
+    textAlign: 'left',
+    background: 'transparent',
+    border: 'none',
+    color: 'rgba(255,255,255,0.92)',
+    cursor: 'pointer',
+    fontSize: 12,
+  },
+  treeSceneRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
+    padding: '6px 8px',
+    borderRadius: 8,
+    textAlign: 'left',
+    background: 'rgba(0,0,0,0.10)',
+    border: '1px solid rgba(255,255,255,0.06)',
+    color: 'rgba(255,255,255,0.9)',
+    cursor: 'pointer',
+    fontSize: 12,
+  },
+  treeSceneRowActive: {
+    border: '1px solid rgba(99,102,241,0.6)',
+    background: 'rgba(99,102,241,0.10)',
+  },
 }

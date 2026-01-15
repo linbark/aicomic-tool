@@ -78,7 +78,7 @@ def _build_system_prompt() -> str:
 
 【关键】输出格式要求：
 - 必须输出一个完整的 JSON 对象（JSON object），以 { 开头，以 } 结尾
-- 不要输出数组（array），不要只输出 evidence_ids 列表
+- 严禁输出数组（array），严禁输出 evidence_ids 列表，严禁在 JSON 前后输出任何中间思考过程
 - 不要使用 Markdown 代码块（不要用 ```json 包裹）
 - 不要添加任何解释文字，只输出纯 JSON
 - 必须包含 output_skeleton 中定义的所有字段（entities、snapshots、events、state_changes 等）
@@ -511,10 +511,10 @@ async def extract_changeset_v0_with_llm_with_trace(
     if isinstance(parsed, list):
         logger.error(f"[extract_changeset] Parsed result is a list (length={len(parsed)}), expected dict")
         logger.error(f"[extract_changeset] List content preview: {parsed[:20] if len(parsed) > 20 else parsed}")
-        logger.error(f"[extract_changeset] Full LLM response:\n{content}")
+        logger.error(f"[extract_changeset] parse:\n{parsed}")
         raise HTTPException(
             status_code=502, 
-            detail=f"LLM 返回了数组而不是 JSON 对象。LLM 可能误解了任务，只返回了部分数据（如 evidence_ids 列表）。请检查 prompt 和 LLM 响应。返回的数组长度: {len(parsed)},  配置: {llm_settings}"
+            detail=f"LLM 返回了数组而不是 JSON 对象（通常是因为 max_tokens 限制导致 JSON 被截断，或者 LLM 输出了中间过程）。请尝试在 AI 设置中增大 max_tokens，或检查 Prompt。返回数组预览: {str(parsed)[:100]}..."
         )
     if not isinstance(parsed, dict):
         logger.error(f"[extract_changeset] Parsed result is not a dict: type={type(parsed)}, value={str(parsed)[:500]}")

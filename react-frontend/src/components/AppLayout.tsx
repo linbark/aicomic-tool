@@ -8,7 +8,7 @@ type Props = {
 export const AppLayout = memo(function AppLayout({ children }: Props) {
   return (
     <div style={styles.shell}>
-      <aside style={styles.sidebar} role="navigation" aria-label="主导航">
+      <header style={styles.header} role="banner" aria-label="主导航">
         <div style={styles.brand}>星晴</div>
         <nav style={styles.nav}>
           <NavItem to="/script" label="剧本" />
@@ -17,7 +17,7 @@ export const AppLayout = memo(function AppLayout({ children }: Props) {
           <NavItem to="/settings/ai" label="AI 设置" />
           <NavItem to="/settings/prompts" label="Prompt 模板" />
         </nav>
-      </aside>
+      </header>
       <main style={styles.main} role="main">{children}</main>
     </div>
   )
@@ -57,6 +57,7 @@ const NavItem = memo(function NavItem({ to, label }: { to: string; label: string
 const styles: Record<string, React.CSSProperties> = {
   shell: {
     display: 'flex',
+    flexDirection: 'column',
     height: '100vh',
     width: '100vw',
     overflow: 'hidden',
@@ -65,41 +66,52 @@ const styles: Record<string, React.CSSProperties> = {
     fontFamily:
       'ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, "Apple Color Emoji", "Segoe UI Emoji"',
   },
-  sidebar: {
-    width: 220,
-    borderRight: '1px solid rgba(255,255,255,0.08)',
-    padding: 14,
+  header: {
+    height: 56,
+    borderBottom: '1px solid rgba(255,255,255,0.08)',
+    padding: '0 20px',
     boxSizing: 'border-box',
+    display: 'flex',
+    alignItems: 'center',
+    gap: 32,
+    background: 'rgba(11, 18, 32, 0.95)',
   },
   brand: {
     fontWeight: 700,
-    marginBottom: 12,
-    letterSpacing: 0.2,
+    fontSize: 18,
+    letterSpacing: 0.5,
+    color: '#fff',
   },
   nav: {
     display: 'flex',
-    flexDirection: 'column',
-    gap: 6,
+    flexDirection: 'row',
+    gap: 8,
+    height: '100%',
+    alignItems: 'center',
   },
   navItem: {
-    padding: '10px 10px',
-    borderRadius: 10,
+    padding: '6px 14px',
+    borderRadius: 8,
     textDecoration: 'none',
-    color: '#e5e7eb',
+    color: 'rgba(255,255,255,0.75)',
     background: 'transparent',
     cursor: 'pointer',
     transition: 'all 200ms ease',
     display: 'block',
+    fontSize: 14,
+    fontWeight: 500,
   },
   navItemActive: {
-    background: 'rgba(99,102,241,0.25)',
-    border: '1px solid rgba(99,102,241,0.35)',
+    background: 'rgba(99,102,241,0.2)',
+    border: '1px solid rgba(99,102,241,0.3)',
+    color: '#fff',
   },
   main: {
     flex: 1,
     overflow: 'auto',
     padding: 16,
     boxSizing: 'border-box',
+    position: 'relative',
   },
 }
 

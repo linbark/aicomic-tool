@@ -2,11 +2,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import asyncio
+import json
 import random
+import re
 from typing import Dict, List, Optional
 
 import httpx
 from fastapi import HTTPException
+import logging
+
+
+logger = logging.getLogger(__name__)
+_MAX_TOKENS_UPPER_BOUND = 8192
 
 
 @dataclass(frozen=True)
@@ -15,7 +22,7 @@ class LlmChatSettings:
     api_key: str
     model: str
     temperature: float
-    max_tokens: Optional[int]  # None 表示不限制输出长度
+    max_tokens: Optional[int]  # None 表示使用默认较大 max_tokens
     timeout_seconds: float
 
 
@@ -42,10 +49,7 @@ class DeepSeekChatClient:
             "messages": messages,
             "temperature": settings.temperature,
         }
-        # 只有当 max_tokens 不为 None 时才添加到 payload 中
-        # None 表示不限制输出长度，让 API 自己决定
-        if settings.max_tokens is not None:
-            payload["max_tokens"] = settings.max_tokens
+        payload["max_tokens"] = int(_normalize_max_tokens(settings.max_tokens))
 
         timeout = httpx.Timeout(
             connect=min(10.0, settings.timeout_seconds),
@@ -53,6 +57,44 @@ class DeepSeekChatClient:
             write=min(30.0, settings.timeout_seconds),
             pool=min(10.0, settings.timeout_seconds),
         )
+
+        def _is_likely_truncated_json(text: str) -> bool:
+            stripped = (text or "").strip()
+            if not stripped:
+                return False
+            if stripped[0] not in {"{", "["}:
+                return False
+            if stripped[0] == "{" and not stripped.endswith("}"):
+                return True
+            if stripped[0] == "[" and not stripped.endswith("]"):
+                return True
+            return False
+
+        def _extract_content_and_meta(response_json: Dict) -> tuple[str, Optional[str], Optional[Dict]]:
+            choices = response_json.get("choices") or []
+            if not choices or not isinstance(choices, list):
+                raise ValueError("missing choices")
+
+            choice0 = choices[0] or {}
+            if not isinstance(choice0, dict):
+                raise ValueError("invalid choices[0]")
+
+            finish_reason = choice0.get("finish_reason")
+            message = choice0.get("message") or {}
+            if not isinstance(message, dict):
+                raise ValueError("invalid message")
+
+            content = message.get("content")
+            if content is None:
+                content = ""
+            if not isinstance(content, str):
+                content = str(content)
+
+            usage = response_json.get("usage")
+            if usage is not None and not isinstance(usage, dict):
+                usage = {"raw": str(usage)}
+
+            return content, (str(finish_reason) if finish_reason is not None else None), usage
 
         async def _sleep_backoff(attempt: int) -> None:
             # 0.35s, 0.7s, 1.4s... + 抖动，避免同时重试“撞车”
@@ -86,7 +128,13 @@ class DeepSeekChatClient:
                     last_exc = e
                     error_name = type(e).__name__
                     error_msg = str(e)
-                    print(f"[AI][Error] Request failed (attempt {attempt+1}/{max_attempts}): {error_name}: {error_msg}")
+                    logger.warning(
+                        "[AI] Request failed (attempt %s/%s): %s: %s",
+                        attempt + 1,
+                        max_attempts,
+                        error_name,
+                        error_msg,
+                    )
 
                     # 非可重试错误：直接抛出
                     if not _is_retryable_httpx_error(e) or attempt == max_attempts - 1:
@@ -118,7 +166,21 @@ class DeepSeekChatClient:
 
         try:
             data = resp.json()
-            return data["choices"][0]["message"]["content"]
+            content, finish_reason, usage = _extract_content_and_meta(data)
+
+            is_truncated = finish_reason in {"length", "max_tokens"} or _is_likely_truncated_json(content)
+            if is_truncated:
+                raise HTTPException(
+                    status_code=502,
+                    detail={
+                        "error": "LLM 输出被截断",
+                        "finish_reason": finish_reason,
+                        "usage": usage,
+                        "hint": "这通常是模型/服务端的输出 token 上限导致（不等同于 httpx timeout）。建议：在 AI 设置里显式把 max_tokens 调大，或减少一次输入的 evidences/输出字段。",
+                    },
+                )
+
+            return content
         except Exception as e:
             # 尽可能给出可读信息（避免把超长响应塞进错误里）
             preview = ""
@@ -128,4 +190,123 @@ class DeepSeekChatClient:
                 preview = ""
             raise HTTPException(status_code=502, detail=f"AI response parse failed: {e}. preview={preview!r}")
 
+    async def reason_qa_json(self, *, settings: LlmChatSettings, question: str) -> Dict[str, str]:
+        base_url = settings.base_url or "https://api.deepseek.com"
+        url = base_url.rstrip("/") + "/v1/chat/completions"
 
+        headers = {
+            "Authorization": f"Bearer {settings.api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+
+        system_prompt = (
+            "你处于推理模式（reason）。只输出一个 JSON 对象，且仅包含字段：question, answer。"
+            "不要输出 Markdown，不要输出代码块，不要输出额外解释。"
+        )
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": str(question or "").strip()},
+        ]
+
+        payload = {
+            "model": "deepseek-reasoner",
+            "messages": messages,
+            "response_format": {"type": "json_object"},
+            "max_tokens": int(_normalize_max_tokens(settings.max_tokens)),
+        }
+
+        timeout = httpx.Timeout(
+            connect=min(10.0, settings.timeout_seconds),
+            read=settings.timeout_seconds,
+            write=min(30.0, settings.timeout_seconds),
+            pool=min(10.0, settings.timeout_seconds),
+        )
+
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.post(url, headers=headers, json=payload)
+        except Exception as e:
+            logger.exception("[AI][reason_qa_json] request failed: %s", type(e).__name__)
+            raise HTTPException(status_code=502, detail=f"AI request failed: {type(e).__name__} - {e}")
+
+        if resp.status_code >= 400:
+            try:
+                err = resp.json()
+            except Exception:
+                err = resp.text
+            logger.error("[AI][reason_qa_json] bad status=%s err=%s", resp.status_code, str(err)[:1000])
+            raise HTTPException(status_code=502, detail={"status": resp.status_code, "error": err})
+
+        try:
+            data = resp.json()
+            choice0 = (data.get("choices") or [{}])[0] or {}
+            message = choice0.get("message") or {}
+            content = message.get("content") or ""
+            parsed = parse_question_answer_json(question=str(question or "").strip(), content=str(content))
+            if not (parsed.get("answer") or "").strip():
+                raise ValueError("empty answer")
+            return parsed
+        except HTTPException:
+            raise
+        except Exception as e:
+            preview = ""
+            try:
+                preview = (resp.text or "")[:800]
+            except Exception:
+                preview = ""
+            logger.exception("[AI][reason_qa_json] parse failed: %s", type(e).__name__)
+            raise HTTPException(status_code=502, detail=f"AI response parse failed: {type(e).__name__}: {e}. preview={preview!r}")
+
+
+def _normalize_max_tokens(v: Optional[int]) -> int:
+    try:
+        if v is None:
+            return _MAX_TOKENS_UPPER_BOUND
+        n = int(v)
+        if n <= 0:
+            return _MAX_TOKENS_UPPER_BOUND
+        return min(n, _MAX_TOKENS_UPPER_BOUND)
+    except Exception:
+        return _MAX_TOKENS_UPPER_BOUND
+
+
+def parse_question_answer_json(*, question: str, content: str) -> Dict[str, str]:
+    q = str(question or "").strip()
+    text = str(content or "").strip()
+
+    obj: Optional[Dict] = None
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            obj = parsed
+    except Exception:
+        obj = None
+
+    if obj is None:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            candidate = text[start : end + 1]
+            candidate = re.sub(r",\s*}", "}", candidate)
+            candidate = re.sub(r",\s*]", "]", candidate)
+            parsed = json.loads(candidate)
+            if isinstance(parsed, dict):
+                obj = parsed
+
+    if obj is None:
+        raise ValueError("not a json object")
+
+    ans = obj.get("answer")
+    if ans is None:
+        raise ValueError("missing answer")
+    answer = str(ans).strip()
+    if not answer:
+        raise ValueError("empty answer")
+
+    out_q = str(obj.get("question") or q).strip()
+    if not out_q:
+        out_q = q
+
+    return {"question": out_q, "answer": answer}
