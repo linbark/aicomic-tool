@@ -12,6 +12,7 @@ from ..services.evidence_ingestor import chunk_text_to_evidences
 from ..services.changeset_extractor import extract_changeset_v0_with_llm_with_trace
 from ..services.entity_resolver import resolve_changeset_entities_with_trace
 from ..services.llm_client import LlmChatSettings
+from ..routers.ai_helpers import log_ui
  
 from ..services.app_paths import ai_settings_path
 from ..services.project_lookup import resolve_project_pk
@@ -377,6 +378,10 @@ def ingest_evidence(req: EvidenceIngestRequest, db: Session = Depends(get_db)):
         run_id = (req.run_id or "").strip()
         if not run_id:
             raise HTTPException(status_code=400, detail="run_id 不能为空")
+            
+        logger.info(f"[Memory] Start Ingest Evidence: project_id={pid}, text_len={len(req.text)}")
+        log_ui(pid, run_id, {"stage": "memory.ingest.start", "summary": "开始处理原文入库", "data": {"text_len": len(req.text)}}, "INFO")
+        
         evidences = chunk_text_to_evidences(
             project_id=pid,
             run_id=run_id,
@@ -386,12 +391,25 @@ def ingest_evidence(req: EvidenceIngestRequest, db: Session = Depends(get_db)):
             max_quote_chars=int(req.max_quote_chars or 600),
             tags=req.tags or [],
         )
+        
+        logger.info(f"[Memory] Chunking done. Generated {len(evidences)} evidences.")
+        
         ids: List[str] = []
-        for ev in evidences:
+        for i, ev in enumerate(evidences):
             ids.append(store.upsert_evidence(ev))
+            if (i + 1) % 10 == 0:
+                logger.debug(f"[Memory] Upserted {i + 1}/{len(evidences)} evidences")
+        
+        logger.info(f"[Memory] Ingest Success. Total {len(ids)} evidences stored.")
+        log_ui(pid, run_id, {"stage": "memory.ingest.done", "summary": "原文入库完成", "data": {"count": len(ids)}}, "SUCCESS")
+        
         return EvidenceIngestResponse(evidence_ids=ids, count=len(ids), run_id=run_id)
     except Exception as e:
         logger.error(f"[Memory] Ingest Evidence Error: {e}")
+        try:
+            log_ui(req.project_id, req.run_id, {"stage": "memory.ingest.error", "summary": "入库失败", "data": {"error": str(e)}}, "ERROR")
+        except:
+            pass
         raise HTTPException(status_code=500, detail=f"ingest_evidence failed: {e}")
 
 

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import os
+import threading
 import time
 from typing import Any, Dict, List, Optional
 
@@ -65,17 +66,20 @@ class VectorStore:
 
         # 初始化 Qdrant 客户端（若不可用则降级为进程内 fallback）
         self._fallback_points: Dict[str, Dict[str, Any]] = {}
+        self.qdrant_init_error: Optional[str] = None
+        self.client = None
         if _QDRANT_AVAILABLE and QdrantClient is not None:
-            if qdrant_url:
-                self.client = QdrantClient(url=qdrant_url, api_key=qdrant_api_key)
-            else:
-                # 本地模式：使用文件存储
-                qdrant_path = os.path.join(app_data_dir(), "qdrant_db")
-                os.makedirs(qdrant_path, exist_ok=True)
-                self.client = QdrantClient(path=qdrant_path)
-            self._ensure_collection()
-        else:
-            self.client = None
+            try:
+                if qdrant_url:
+                    self.client = QdrantClient(url=qdrant_url, api_key=qdrant_api_key)
+                else:
+                    qdrant_path = os.path.join(app_data_dir(), "qdrant_db")
+                    os.makedirs(qdrant_path, exist_ok=True)
+                    self.client = QdrantClient(path=qdrant_path)
+                self._ensure_collection()
+            except Exception as e:
+                self.client = None
+                self.qdrant_init_error = str(e)
 
     def _ensure_collection(self) -> None:
         """确保 collection 存在，不存在则创建"""
@@ -456,6 +460,7 @@ class VectorStore:
 
 # 全局单例
 _global_vector_store: Optional[VectorStore] = None
+_global_vector_store_lock = threading.Lock()
 
 
 def get_vector_store(
@@ -467,13 +472,15 @@ def get_vector_store(
 ) -> VectorStore:
     """获取全局向量存储（单例模式）"""
     global _global_vector_store
-    if _global_vector_store is None:
-        _global_vector_store = VectorStore(
-            collection_name=collection_name,
-            qdrant_url=qdrant_url,
-            qdrant_api_key=qdrant_api_key,
-            embedding_model=embedding_model,
-            embedding_device=embedding_device,
-        )
+    if _global_vector_store is not None:
+        return _global_vector_store
+    with _global_vector_store_lock:
+        if _global_vector_store is None:
+            _global_vector_store = VectorStore(
+                collection_name=collection_name,
+                qdrant_url=qdrant_url,
+                qdrant_api_key=qdrant_api_key,
+                embedding_model=embedding_model,
+                embedding_device=embedding_device,
+            )
     return _global_vector_store
-

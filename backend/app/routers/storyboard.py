@@ -5,6 +5,9 @@ import shutil
 import os
 import uuid
 from sqlalchemy.orm import joinedload
+from sqlalchemy import text
+import logging
+import time
 
 
 
@@ -13,10 +16,13 @@ from .. import models, schemas
 from ..database import get_db # 假设你有一个 get_db 依赖项
 from ..services.project_lookup import resolve_project_pk
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(
     prefix="/storyboard",  # 👈 修改这里：从 "/script" 改为 "/storyboard"
     tags=["Script Backbone (剧本骨架)"]
 )
+
 
 VIDEO_DIR = "user_projects/videos"
 
@@ -138,12 +144,51 @@ def create_shot(scene_id: int, shot: schemas.ShotCreate, db: Session = Depends(g
 
 @router.delete("/episode/{episode_id}")
 def delete_episode(episode_id: int, db: Session = Depends(get_db)):
-    db_ep = db.query(models.Episode).filter(models.Episode.id == episode_id).first()
+    t0 = time.time()
+    db_ep = db.query(models.Episode).filter(models.Episode.id == int(episode_id)).first()
     if not db_ep:
         raise HTTPException(status_code=404, detail="Episode not found")
-    db.delete(db_ep)
-    db.commit()
-    return {"message": "Episode deleted"}
+    try:
+        logger.info(f"[Storyboard] delete_episode start: episode_id={int(episode_id)}")
+        db.execute(
+            text(
+                """
+                DELETE FROM assets
+                WHERE shot_id IN (
+                    SELECT shots.id
+                    FROM shots
+                    JOIN scenes ON scenes.id = shots.scene_id
+                    WHERE scenes.episode_id = :episode_id
+                )
+                """
+            ),
+            {"episode_id": int(episode_id)},
+        )
+        db.execute(
+            text(
+                """
+                DELETE FROM shots
+                WHERE scene_id IN (
+                    SELECT id FROM scenes WHERE episode_id = :episode_id
+                )
+                """
+            ),
+            {"episode_id": int(episode_id)},
+        )
+        db.execute(text("DELETE FROM scenes WHERE episode_id = :episode_id"), {"episode_id": int(episode_id)})
+        db.execute(text("DELETE FROM episodes WHERE id = :episode_id"), {"episode_id": int(episode_id)})
+        db.commit()
+        dt_ms = int((time.time() - t0) * 1000)
+        logger.info(f"[Storyboard] delete_episode done: episode_id={int(episode_id)} ms={dt_ms}")
+        return {"message": "Episode deleted", "ms": dt_ms}
+    except Exception as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        dt_ms = int((time.time() - t0) * 1000)
+        logger.error(f"[Storyboard] delete_episode failed: episode_id={int(episode_id)} ms={dt_ms} err={e}")
+        raise HTTPException(status_code=500, detail=f"Delete episode failed: {e}")
 
 @router.delete("/scene/{scene_id}")
 def delete_scene(scene_id: int, db: Session = Depends(get_db)):

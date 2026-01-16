@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import api from '../api/client'
 import type { ProjectBase } from '../api/types'
 
@@ -12,6 +12,11 @@ export function useProjectSelection() {
     return v ? v : null
   })
 
+  const projectIdRef = useRef<string | null>(projectId)
+  useEffect(() => {
+    projectIdRef.current = projectId
+  }, [projectId])
+
   function setProjectId(next: string | null) {
     setProjectIdState(next)
     if (typeof window === 'undefined') return
@@ -19,40 +24,53 @@ export function useProjectSelection() {
     else window.localStorage.setItem(LS_KEY, String(next))
   }
 
-  async function refreshProjects() {
+  const refreshProjects = useCallback(async () => {
     const res = await api.getProjects()
     const list = res.data || []
     setProjects(list)
-    // 若当前 projectId 不存在（或为空），自动选择第一个，并同步到 localStorage
-    const next =
-      projectId != null && list.some((p) => p.id === projectId) ? projectId : list.length > 0 ? list[0].id : null
+    const cur = projectIdRef.current
+    const next = cur != null && list.some((p) => p.id === cur) ? cur : list.length > 0 ? list[0].id : null
     setProjectId(next)
-  }
+  }, [])
 
   useEffect(() => {
+    if (typeof window === 'undefined') return
     let alive = true
-    ;(async () => {
+    let attempt = 0
+    let timer: number | null = null
+
+    const load = async () => {
+      if (!alive) return
       try {
-        const res = await api.getProjects()
-        if (!alive) return
-        const list = res.data || []
-        setProjects(list)
-        // 初次加载：若 localStorage 里无有效值，选择第一个（并持久化）
-        const next =
-          projectId != null && list.some((p) => p.id === projectId) ? projectId : list.length > 0 ? list[0].id : null
-        setProjectId(next)
+        await refreshProjects()
+        attempt = 0
       } catch {
-        // ignore
+        attempt++
+        timer = window.setTimeout(() => {
+          load().catch(() => {})
+        }, Math.min(1500, 200 + attempt * 100))
       }
-    })().catch(() => {
-      // ignore
-    })
+    }
+
+    const trigger = () => {
+      attempt = 0
+      if (timer != null) {
+        window.clearTimeout(timer)
+        timer = null
+      }
+      load().catch(() => {})
+    }
+
+    trigger()
+    window.addEventListener('aicomic-api-base-url', trigger)
+    window.addEventListener('focus', trigger)
     return () => {
       alive = false
+      if (timer != null) window.clearTimeout(timer)
+      window.removeEventListener('aicomic-api-base-url', trigger)
+      window.removeEventListener('focus', trigger)
     }
-  }, [])
+  }, [refreshProjects])
 
   return { projects, projectId, setProjectId, refreshProjects }
 }
-
-

@@ -32,7 +32,9 @@ fn python_can_import(python: &str, backend_root: &Path, pythonpath: &str) -> boo
   let mut cmd = Command::new(python);
   cmd.current_dir(backend_root);
   cmd.env("PYTHONPATH", pythonpath);
-  cmd.arg("-c").arg("import sys; import uvicorn; import httpx; print(sys.executable)");
+  cmd.arg("-c").arg(
+    "import sys; import uvicorn; import httpx; import backend.app; import langgraph; import langchain_core; print(sys.executable)",
+  );
   match cmd.output() {
     Ok(out) => {
       if out.status.success() {
@@ -62,8 +64,19 @@ fn pick_python_executable(backend_root: &Path, pythonpath: &str) -> String {
     }
   }
 
+  let mut conda_candidates: Vec<String> = vec![];
+  if let Ok(home) = std::env::var("HOME") {
+    let home = home.trim();
+    if !home.is_empty() {
+      let roots = vec!["anaconda3", "miniconda3", "miniforge3", "mambaforge"];
+      for r in roots {
+        conda_candidates.push(format!("{home}/{r}/envs/py312/bin/python"));
+      }
+    }
+  }
+
   // 2) 常见候选：优先 python3.12
-  let candidates = vec![
+  let mut candidates = vec![
     "python3.12",
     "python3",
     "python",
@@ -73,6 +86,9 @@ fn pick_python_executable(backend_root: &Path, pythonpath: &str) -> String {
     "/opt/homebrew/bin/python3",
     "/usr/local/bin/python3",
   ];
+  for c in conda_candidates.iter() {
+    candidates.insert(0, c);
+  }
 
   for c in candidates {
     if python_can_import(c, backend_root, pythonpath) {
@@ -288,4 +304,3 @@ fn main() {
 }
 
 struct BackendChild(std::sync::Mutex<Option<Child>>);
-

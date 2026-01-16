@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import threading
 import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -1960,6 +1961,7 @@ class MemoryStore:
 
 # 全局单例
 _global_memory_store: Optional[MemoryStore] = None
+_global_memory_store_lock = threading.Lock()
 
 
 def get_memory_store(
@@ -1970,16 +1972,18 @@ def get_memory_store(
     """获取全局记忆存储（单例模式）"""
     
     global _global_memory_store
-    if _global_memory_store is None:
-        t_start = time.time()
-        logger.info("[MemoryStore] Creating new MemoryStore instance...")
-        _global_memory_store = MemoryStore(
-            vector_store=vector_store,
-            embedding_provider=embedding_provider,
-            db_path=db_path,
-        )
-        t_end = time.time()
-        logger.info(f"[MemoryStore] MemoryStore instance created in {t_end - t_start:.2f}s")
-    else:
+    if _global_memory_store is not None:
         logger.debug("[MemoryStore] Returning existing MemoryStore instance")
+        return _global_memory_store
+    with _global_memory_store_lock:
+        if _global_memory_store is None:
+            t_start = time.time()
+            logger.info("[MemoryStore] Creating new MemoryStore instance...")
+            _global_memory_store = MemoryStore(
+                vector_store=vector_store,
+                embedding_provider=embedding_provider,
+                db_path=db_path,
+            )
+            t_end = time.time()
+            logger.info(f"[MemoryStore] MemoryStore instance created in {t_end - t_start:.2f}s")
     return _global_memory_store

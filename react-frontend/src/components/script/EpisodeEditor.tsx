@@ -84,12 +84,14 @@ export const EpisodeEditor = memo(function EpisodeEditor({
       <div style={{ borderTop: '1px solid rgba(255,255,255,0.1)', margin: '12px 0' }} />
 
       <ExecutionPanel
+        key={episode.id}
         episode={episode}
         execRun={execRun}
         uiNowMs={uiNowMs}
         execPollPaused={execPollPaused}
         interruptKind={interruptKind}
-        busy={busy || execBusy}
+        execBusy={execBusy}
+        disableExecute={busy}
         rawAssetsVisualDnaText={rawAssetsVisualDnaText || ''}
         rawSplitEpisodesText={rawSplitEpisodesText || ''}
         onExecute={onExecute}

@@ -56,6 +56,13 @@ class FakeMemoryStore:
         self.changesets = {}
         self.conflicts = {}
         self.evidences = {}
+    
+    def upsert_evidence(self, evidence):
+        eid = str(getattr(evidence, "evidence_id", "") or "").strip()
+        if not eid:
+            eid = f"ev_{len(self.evidences)+1}"
+        self.evidences[eid] = evidence
+        return eid
 
     def upsert_time_constraint(self, constraint):
         self.time_constraints[constraint.id] = constraint

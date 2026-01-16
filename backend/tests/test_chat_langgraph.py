@@ -109,3 +109,157 @@ def test_chat_graph_interrupt_and_resume(monkeypatch, project_ids, test_paths):
     finally:
         db.close()
 
+
+def test_episode_execute_asset_ingest_plan_and_apply(project_ids):
+    from app import models
+    from app.database import SessionLocal
+    from app.routers.ai_episode_execute import _apply_asset_ingest_plan, _build_asset_ingest_plan
+    from app.services.context_store import ContextStore
+
+    db = SessionLocal()
+    try:
+        pid = int(project_ids["pk"])
+        existing = models.Character(
+            project_id=pid,
+            name="张三",
+            description="old",
+            base_prompt="old",
+            category="persona_visual",
+        )
+        db.add(existing)
+        db.commit()
+        db.refresh(existing)
+
+        assets_visual_dna = {
+            "characters": [
+                {"name": "张三", "description": "new", "visual_dna": {"face": "x"}, "stable_diffusion_tags": "a,b"},
+                {"name": "李四", "description": "", "visual_dna": {"hair_style": "y"}, "stable_diffusion_tags": "c,d"},
+            ],
+            "props": [{"name": "玉佩", "description": "old jade", "stable_diffusion_tags": "jade,pendant"}],
+            "locations": [{"name": "青云山", "description": "", "stable_diffusion_tags": "mountain,cloud"}],
+            "series_style": {"lighting_style": "soft", "stable_diffusion_tags": "cinematic"},
+        }
+
+        plan = _build_asset_ingest_plan(db=db, project_id_pk=pid, assets_visual_dna=assets_visual_dna)
+        preview = plan.get("preview") or {}
+        assert preview.get("create_count") == 3
+        assert preview.get("update_count") == 1
+        assert preview.get("visual_dna_count") == 2
+        assert preview.get("series_style") is True
+
+        apply_res = _apply_asset_ingest_plan(
+            db=db,
+            project_id_pk=pid,
+            plan={"items": plan.get("items") or [], "series_style": plan.get("series_style")},
+        )
+        assert apply_res.get("created") == 3
+        assert apply_res.get("updated") == 1
+        assert apply_res.get("visual_dna_written") == 2
+        assert apply_res.get("series_style") is True
+
+        zhang = db.query(models.Character).filter(models.Character.project_id == pid, models.Character.name == "张三").first()
+        li = db.query(models.Character).filter(models.Character.project_id == pid, models.Character.name == "李四").first()
+        prop = db.query(models.Character).filter(models.Character.project_id == pid, models.Character.name == "玉佩").first()
+        loc = db.query(models.Character).filter(models.Character.project_id == pid, models.Character.name == "青云山").first()
+        assert zhang and zhang.description == "new" and zhang.base_prompt == "a,b"
+        assert li and li.category == "persona_visual"
+        assert prop and prop.category == "prop"
+        assert loc and loc.category == "background"
+
+        store = ContextStore()
+        vd1 = store.get_visual_dna(project_id=pid, item_id=int(zhang.id), version="v1")
+        vd2 = store.get_visual_dna(project_id=pid, item_id=int(li.id), version="v1")
+        assert isinstance(vd1, dict) and vd1.get("stable_diffusion_tags") == "a,b"
+        assert isinstance(vd2, dict) and vd2.get("stable_diffusion_tags") == "c,d"
+        sb = store.get_series_bible(project_id=pid, version="v1") or {}
+        assert isinstance(sb, dict) and isinstance(sb.get("series_style"), dict)
+    finally:
+        db.close()
+
+
+def test_episode_execute_step4_creates_changeset_and_interrupt(monkeypatch, project_ids):
+    import json
+    from pathlib import Path
+
+    import anyio
+
+    import conftest
+    from app import models
+    from app.database import SessionLocal
+    from app.services.chat_graph import StageEmitter
+    from app.services.context_store import ContextStore
+
+    import app.routers.ai_episode_execute as exe
+
+    store = conftest.FakeMemoryStore()
+    monkeypatch.setattr(exe, "get_memory_store", lambda: store, raising=True)
+
+    db = SessionLocal()
+    try:
+        pid = int(project_ids["pk"])
+        ep = models.Episode(project_id=pid, title="E1", order=1, description="S")
+        db.add(ep)
+        db.commit()
+        db.refresh(ep)
+
+        run_id = "run_test_ep_execute_ingest_1"
+        emitter = StageEmitter(project_id=pid, run_id=run_id, emit_stages=False)
+        artifacts = {
+            "script_text": "第一段。\n\n第二段。",
+            "assets_visual_dna": {
+                "characters": [{"name": "张三", "description": "d", "visual_dna": {"face": "x"}, "stable_diffusion_tags": "a,b"}],
+                "props": [{"name": "玉佩", "description": "p", "stable_diffusion_tags": "jade"}],
+                "locations": [{"name": "青云山", "description": "l", "stable_diffusion_tags": "mountain"}],
+            },
+            "split_episodes": {},
+            "outline": "",
+        }
+
+        anyio.run(
+            lambda: exe._run_until_interrupt(
+                project_id_pk=pid,
+                project_uuid=str(project_ids["uuid"]),
+                episode_id=int(ep.id),
+                run_id=run_id,
+                script_text=str(artifacts["script_text"]),
+                start_step_index=3,
+                artifacts=artifacts,
+                emitter=emitter,
+                db=db,
+            )
+        )
+
+        csid = str(artifacts.get("changeset_id") or "").strip()
+        assert csid
+        payload = store.get_changeset(csid)["payload"]
+        assert payload.get("schema_version") == "changeset.v0"
+        for k in [
+            "project_id",
+            "episode_id",
+            "story_order_base",
+            "evidences",
+            "entities",
+            "snapshots",
+            "events",
+            "state_changes",
+            "time_constraints",
+            "time_blocks",
+            "conflicts",
+            "materialize",
+        ]:
+            assert k in payload
+
+        ctx = ContextStore()
+        interrupt_path = ctx.stage_path(project_id=pid, run_id=run_id, stage_name="chat.interrupt")
+        assert interrupt_path
+        data = json.loads(Path(interrupt_path).read_text(encoding="utf-8"))
+        assert data.get("kind") == "confirm_ingest"
+        assert str(data.get("changeset_id") or "").strip() == csid
+        rs = data.get("resume_state") or {}
+        assert isinstance(rs, dict)
+        ra = rs.get("artifacts") or {}
+        assert isinstance(ra, dict)
+        assert str(ra.get("changeset_id") or "").strip() == csid
+        assert isinstance(ra.get("asset_ingest_plan"), dict)
+    finally:
+        db.close()

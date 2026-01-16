@@ -1,8 +1,9 @@
 import asyncio
+import hashlib
 import json
 import threading
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -10,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from .. import models
 from ..database import SessionLocal, get_db
+from ..services.evidence_ingestor import chunk_text_to_evidences
 from ..services import prompt_registry
 from ..services.json_extract import extract_json_any
 from ..services.llm_client import LlmChatSettings
@@ -350,62 +352,40 @@ async def _run_until_interrupt(
             ).strip()
             emitter.step_start(step_index=step_index, action_key=ak, why=why or None, input_preview=in_text)
             t0 = _now_ms()
-            raw = _read_settings_raw()
-            settings = _mask_settings(raw)
-            if not settings.has_api_key:
-                raise HTTPException(status_code=400, detail="AI API Key 未配置")
-            store = get_memory_store()
-            from ..services.changeset_extractor import extract_changeset_v0_with_llm_with_trace
-            from ..services.entity_resolver import resolve_changeset_entities_with_trace
-            from ..services.evidence_ingestor import chunk_text_to_evidences
+            avd = artifacts.get("assets_visual_dna")
+            if not isinstance(avd, dict):
+                raise HTTPException(status_code=409, detail="缺少 assets_visual_dna，无法入库")
+            plan = _build_asset_ingest_plan(db=db, project_id_pk=project_id_pk, assets_visual_dna=avd)
+            artifacts["asset_ingest_plan"] = {"items": plan.get("items") or [], "series_style": plan.get("series_style")}
+            artifacts["ingest_preview"] = plan.get("preview") or {}
 
+            store = get_memory_store()
             evidences = chunk_text_to_evidences(
-                project_id=project_id_pk,
-                run_id=run_id,
+                project_id=int(project_id_pk),
+                run_id=str(run_id),
+                text=str(script_text),
                 episode_id=int(episode_id),
-                text=in_text,
-                max_quote_chars=600,
-                tags=["episode_execute"],
+                tags=["episode_execute", "asset_ingest"],
             )
-            evidence_ids = []
+            evidence_ids: List[str] = []
             for ev in evidences:
-                evidence_ids.append(store.upsert_evidence(ev))
-            payload, extractor_trace = await extract_changeset_v0_with_llm_with_trace(
-                llm_settings=LlmChatSettings(
-                    base_url=settings.base_url,
-                    api_key=raw.get("api_key") or "",
-                    model=settings.model,
-                    temperature=min(float(settings.temperature or 0.2), 0.3),
-                    max_tokens=settings.max_tokens,
-                    timeout_seconds=settings.timeout_seconds,
-                ),
-                project_id=project_id_pk,
+                try:
+                    store.upsert_evidence(ev)
+                    eid = str(getattr(ev, "evidence_id", "") or "").strip()
+                    if eid:
+                        evidence_ids.append(eid)
+                except Exception:
+                    continue
+
+            payload = _build_changeset_v0_from_assets_visual_dna(
+                project_id_pk=int(project_id_pk),
                 episode_id=int(episode_id),
-                story_order_base=f"CH{str(episode_id).zfill(2)}",
-                evidences=[e.model_dump() for e in evidences],
+                assets_visual_dna=avd,
+                evidence_ids=evidence_ids,
             )
-            payload, resolver_trace = resolve_changeset_entities_with_trace(store=store, project_id=project_id_pk, payload=payload)
-            changeset_id = store.create_changeset(project_id=project_id_pk, payload=payload, episode_id=int(episode_id))
-            try:
-                store.append_changeset_review_entry(changeset_id=changeset_id, entry={"at_ms": _now_ms(), "action": "extractor_trace", "data": extractor_trace})
-            except Exception:
-                pass
-            try:
-                store.append_changeset_review_entry(changeset_id=changeset_id, entry={"at_ms": _now_ms(), "action": "resolver_trace", "data": resolver_trace})
-            except Exception:
-                pass
+            changeset_id = store.create_changeset(project_id=int(project_id_pk), payload=payload, episode_id=int(episode_id))
             artifacts["changeset_id"] = changeset_id
-            artifacts["ingest_preview"] = {
-                "changeset_id": changeset_id,
-                "evidence_count": len(evidence_ids),
-                "counts": {
-                    "entities": len(payload.get("entities") or []) if isinstance(payload.get("entities"), list) else 0,
-                    "events": len(payload.get("events") or []) if isinstance(payload.get("events"), list) else 0,
-                    "state_changes": len(payload.get("state_changes") or []) if isinstance(payload.get("state_changes"), list) else 0,
-                    "snapshots": len(payload.get("snapshots") or []) if isinstance(payload.get("snapshots"), list) else 0,
-                    "conflicts": len(payload.get("conflicts") or []) if isinstance(payload.get("conflicts"), list) else 0,
-                },
-            }
+
             out_preview = json.dumps(artifacts["ingest_preview"], ensure_ascii=False)
             emitter.step_end(step_index=step_index, action_key=ak, ms=_now_ms() - t0, output_preview=out_preview)
             _set_episode_exec_state(
@@ -460,6 +440,326 @@ def _apply_split_to_db(*, db: Session, project_id_pk: int, split_payload: Dict[s
 def _apply_changeset(*, project_id_pk: int, changeset_id: str) -> None:
     store = get_memory_store()
     store.apply_changeset(changeset_id=changeset_id, reviewer="human", note="episode_execute")
+
+
+def _stable_hex_id(*parts: str) -> str:
+    raw = "|".join([str(p or "").strip() for p in parts if str(p or "").strip()])
+    if not raw:
+        return hashlib.sha1(b"").hexdigest()
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
+def _build_changeset_v0_from_assets_visual_dna(
+    *,
+    project_id_pk: int,
+    episode_id: int,
+    assets_visual_dna: Dict[str, Any],
+    evidence_ids: List[str],
+) -> Dict[str, Any]:
+    def _s(v: Any) -> str:
+        return str(v or "").strip()
+
+    def _is_dict(v: Any) -> bool:
+        return isinstance(v, dict)
+
+    def _is_list(v: Any) -> bool:
+        return isinstance(v, list)
+
+    def _take_eids(limit: int = 20) -> List[str]:
+        out: List[str] = []
+        for x in evidence_ids or []:
+            s = _s(x)
+            if not s:
+                continue
+            out.append(s)
+            if len(out) >= limit:
+                break
+        return out
+
+    created_from_evidence_id = _s(evidence_ids[0]) if evidence_ids else None
+    snapshot_eids = _take_eids()
+
+    entities: List[Dict[str, Any]] = []
+    snapshots: List[Dict[str, Any]] = []
+
+    def _push_entity(*, entity_type: str, canonical_name: str) -> str:
+        entity_id = _stable_hex_id("entity", str(project_id_pk), entity_type, canonical_name)
+        entities.append(
+            {
+                "entity_id": entity_id,
+                "project_id": int(project_id_pk),
+                "entity_type": entity_type,
+                "canonical_name": canonical_name,
+                "aliases": [],
+                "status": "confirmed",
+                "confidence": 1.0,
+                "source_kind": "system",
+                "created_from_evidence_id": created_from_evidence_id,
+            }
+        )
+        return entity_id
+
+    def _iter_named(kind: str) -> List[Dict[str, Any]]:
+        v = assets_visual_dna.get(kind)
+        if not _is_list(v):
+            return []
+        out: List[Dict[str, Any]] = []
+        for it in v:
+            if not _is_dict(it):
+                continue
+            name = _s(it.get("name"))
+            if not name:
+                continue
+            out.append(it)
+        return out
+
+    for it in _iter_named("characters"):
+        name = _s(it.get("name"))
+        desc = _s(it.get("description"))
+        tags = _s(it.get("stable_diffusion_tags"))
+        vd = it.get("visual_dna") if _is_dict(it.get("visual_dna")) else {}
+
+        entity_id = _push_entity(entity_type="character", canonical_name=name)
+        snapshot_id = _stable_hex_id("snapshot", entity_id, "visual_v1")
+        snapshots.append(
+            {
+                "snapshot_id": snapshot_id,
+                "project_id": int(project_id_pk),
+                "entity_id": entity_id,
+                "valid_from_story_order": f"episode:{int(episode_id)}:asset_ingest",
+                "fields": {"visual": {"description": desc, "stable_diffusion_tags": tags, "visual_dna": vd}},
+                "why": "assets_visual_dna",
+                "evidence_ids": snapshot_eids,
+                "status": "confirmed",
+                "confidence": 1.0,
+                "source_kind": "system",
+            }
+        )
+
+    for it in _iter_named("locations"):
+        name = _s(it.get("name"))
+        _push_entity(entity_type="location", canonical_name=name)
+
+    for it in _iter_named("props"):
+        name = _s(it.get("name"))
+        _push_entity(entity_type="prop", canonical_name=name)
+
+    return {
+        "schema_version": "changeset.v0",
+        "project_id": int(project_id_pk),
+        "episode_id": int(episode_id),
+        "story_order_base": f"episode:{int(episode_id)}:asset_ingest",
+        "evidences": [],
+        "entities": entities,
+        "snapshots": snapshots,
+        "events": [],
+        "state_changes": [],
+        "time_constraints": [],
+        "time_blocks": [],
+        "conflicts": [],
+        "materialize": {"write_static_bible": True},
+    }
+
+
+def _build_asset_ingest_plan(*, db: Session, project_id_pk: int, assets_visual_dna: Dict[str, Any]) -> Dict[str, Any]:
+    def _s(v: Any) -> str:
+        return str(v or "").strip()
+
+    def _is_dict(v: Any) -> bool:
+        return isinstance(v, dict)
+
+    def _is_list(v: Any) -> bool:
+        return isinstance(v, list)
+
+    def _cat(kind: str) -> str:
+        if kind == "character":
+            return "persona_visual"
+        if kind == "location":
+            return "background"
+        if kind == "prop":
+            return "prop"
+        return "element"
+
+    items: List[Dict[str, Any]] = []
+    creates: List[Dict[str, Any]] = []
+    updates: List[Dict[str, Any]] = []
+    visual_dna_targets: List[Dict[str, Any]] = []
+
+    existing_by_name: Dict[str, models.Character] = {
+        str(r.name): r
+        for r in db.query(models.Character).filter(models.Character.project_id == int(project_id_pk)).all()
+        if (getattr(r, "name", None) or "").strip()
+    }
+
+    chars = assets_visual_dna.get("characters")
+    if _is_list(chars):
+        for it in chars:
+            if not _is_dict(it):
+                continue
+            name = _s(it.get("name"))
+            if not name:
+                continue
+            desc = _s(it.get("description"))
+            tags = _s(it.get("stable_diffusion_tags"))
+            vd = it.get("visual_dna") if _is_dict(it.get("visual_dna")) else {}
+            items.append(
+                {
+                    "kind": "character",
+                    "name": name,
+                    "category": _cat("character"),
+                    "description": desc,
+                    "base_prompt": tags,
+                    "stable_diffusion_tags": tags,
+                    "visual_dna": vd,
+                }
+            )
+
+    props = assets_visual_dna.get("props")
+    if _is_list(props):
+        for it in props:
+            if not _is_dict(it):
+                continue
+            name = _s(it.get("name"))
+            if not name:
+                continue
+            desc = _s(it.get("description"))
+            tags = _s(it.get("stable_diffusion_tags"))
+            items.append(
+                {
+                    "kind": "prop",
+                    "name": name,
+                    "category": _cat("prop"),
+                    "description": desc,
+                    "base_prompt": tags,
+                    "stable_diffusion_tags": tags,
+                }
+            )
+
+    locs = assets_visual_dna.get("locations")
+    if _is_list(locs):
+        for it in locs:
+            if not _is_dict(it):
+                continue
+            name = _s(it.get("name"))
+            if not name:
+                continue
+            desc = _s(it.get("description"))
+            tags = _s(it.get("stable_diffusion_tags"))
+            items.append(
+                {
+                    "kind": "location",
+                    "name": name,
+                    "category": _cat("location"),
+                    "description": desc,
+                    "base_prompt": tags,
+                    "stable_diffusion_tags": tags,
+                }
+            )
+
+    plan_items: List[Dict[str, Any]] = []
+    for it in items:
+        name = _s(it.get("name"))
+        if not name:
+            continue
+        existing = existing_by_name.get(name)
+        action = "update" if existing else "create"
+        if action == "create":
+            creates.append({"name": name, "category": it.get("category"), "kind": it.get("kind")})
+        else:
+            updates.append({"name": name, "category": it.get("category"), "kind": it.get("kind"), "id": int(existing.id)})
+        plan_items.append({**it, "action": action, "existing_id": int(existing.id) if existing else None})
+
+        if it.get("kind") == "character":
+            visual_dna_targets.append({"name": name, "existing_id": int(existing.id) if existing else None})
+
+    series_style = assets_visual_dna.get("series_style") if _is_dict(assets_visual_dna.get("series_style")) else None
+
+    preview = {
+        "create_count": len(creates),
+        "update_count": len(updates),
+        "create": creates[:30],
+        "update": updates[:30],
+        "visual_dna_count": len(visual_dna_targets),
+        "series_style": bool(series_style),
+    }
+
+    return {"items": plan_items, "series_style": series_style, "preview": preview}
+
+
+def _apply_asset_ingest_plan(*, db: Session, project_id_pk: int, plan: Dict[str, Any]) -> Dict[str, Any]:
+    def _s(v: Any) -> str:
+        return str(v or "").strip()
+
+    def _is_dict(v: Any) -> bool:
+        return isinstance(v, dict)
+
+    def _is_list(v: Any) -> bool:
+        return isinstance(v, list)
+
+    items = plan.get("items")
+    if not _is_list(items):
+        items = []
+
+    existing_by_name: Dict[str, models.Character] = {
+        str(r.name): r
+        for r in db.query(models.Character).filter(models.Character.project_id == int(project_id_pk)).all()
+        if (getattr(r, "name", None) or "").strip()
+    }
+
+    created = 0
+    updated = 0
+    visual_dna_written = 0
+
+    for it in items:
+        if not _is_dict(it):
+            continue
+        name = _s(it.get("name"))
+        if not name:
+            continue
+        category = _s(it.get("category")) or "element"
+        desc = _s(it.get("description"))
+        base_prompt = _s(it.get("base_prompt"))
+
+        obj = existing_by_name.get(name)
+        if not obj:
+            obj = models.Character(
+                project_id=int(project_id_pk),
+                name=name,
+                description=desc,
+                base_prompt=base_prompt,
+                category=category,
+            )
+            db.add(obj)
+            db.flush()
+            existing_by_name[name] = obj
+            created += 1
+        else:
+            obj.description = desc
+            obj.base_prompt = base_prompt
+            obj.category = category
+            updated += 1
+
+        kind = _s(it.get("kind"))
+        if kind == "character":
+            vd = it.get("visual_dna") if _is_dict(it.get("visual_dna")) else {}
+            tags = _s(it.get("stable_diffusion_tags"))
+            _context_store.put_visual_dna(
+                project_id=int(project_id_pk),
+                item_id=int(obj.id),
+                data={"name": name, "visual_dna": vd, "stable_diffusion_tags": tags},
+                version="v1",
+            )
+            visual_dna_written += 1
+
+    series_style = plan.get("series_style") if _is_dict(plan.get("series_style")) else None
+    if series_style is not None:
+        cur = _context_store.get_series_bible(project_id=int(project_id_pk), version="v1") or {}
+        if isinstance(cur, dict):
+            cur["series_style"] = series_style
+            _context_store.put_series_bible(project_id=int(project_id_pk), data=cur, version="v1")
+
+    db.commit()
+    return {"created": created, "updated": updated, "visual_dna_written": visual_dna_written, "series_style": bool(series_style)}
 
 
 @router.post("/episode-execute/act_async", response_model=EpisodeExecuteStartResponse)
@@ -569,6 +869,14 @@ def episode_execute_confirm(episode_id: int, req: EpisodeExecuteConfirmRequest, 
     resume_state["artifacts"] = artifacts
 
     if decision == "rejected":
+        if kind == "confirm_ingest":
+            csid = str(artifacts.get("changeset_id") or interrupt.get("changeset_id") or "").strip()
+            if csid:
+                try:
+                    store = get_memory_store()
+                    store.reject_changeset(changeset_id=csid, reviewer="human", note="episode_execute")
+                except Exception:
+                    pass
         _context_store.snapshot_stage(project_id=project_id_pk, run_id=run_id, stage_name="chat.status", data={"status": "done", "at_ms": _now_ms()})
         _context_store.snapshot_stage(
             project_id=project_id_pk,
@@ -587,12 +895,18 @@ def episode_execute_confirm(episode_id: int, req: EpisodeExecuteConfirmRequest, 
             exec_status="running",
             exec_artifacts=artifacts,
         )
-    except Exception:
-        pass
-    try:
-        _write_interrupt_state(project_id_pk=project_id_pk, run_id=run_id, interrupt={"kind": None, "cleared": True, "at_ms": _now_ms()})
-    except Exception:
-        pass
+    except Exception as e:
+        _context_store.snapshot_stage(
+            project_id=project_id_pk,
+            run_id=run_id,
+            stage_name="chat.error",
+            data={"error": "episode_execute_confirm_failed", "message": str(e), "at_ms": _now_ms()},
+        )
+        _context_store.snapshot_stage(project_id=project_id_pk, run_id=run_id, stage_name="chat.status", data={"status": "error", "at_ms": _now_ms()})
+        raise HTTPException(status_code=500, detail=f"Failed to update episode execute state: {e}")
+
+    _context_store.snapshot_stage(project_id=project_id_pk, run_id=run_id, stage_name="chat.status", data={"status": "queued", "at_ms": _now_ms()})
+    _write_interrupt_state(project_id_pk=project_id_pk, run_id=run_id, interrupt={"kind": None, "cleared": True, "at_ms": _now_ms()})
 
     def _runner():
         db2 = SessionLocal()
@@ -614,7 +928,10 @@ def episode_execute_confirm(episode_id: int, req: EpisodeExecuteConfirmRequest, 
                     if isinstance(split_payload, dict):
                         _apply_split_to_db(db=db2, project_id_pk=project_id_pk, split_payload=split_payload)
                 if kind == "confirm_ingest" and decision == "confirmed":
-                    csid = str(artifacts.get("changeset_id") or interrupt.get("changeset_id") or "")
+                    plan = artifacts.get("asset_ingest_plan")
+                    if isinstance(plan, dict):
+                        _apply_asset_ingest_plan(db=db2, project_id_pk=project_id_pk, plan=plan)
+                    csid = str(artifacts.get("changeset_id") or interrupt.get("changeset_id") or "").strip()
                     if csid:
                         _apply_changeset(project_id_pk=project_id_pk, changeset_id=csid)
                     emitter.status("done")

@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useState } from 'react'
+import { memo, useMemo, useRef } from 'react'
 import type { EpisodeRead } from '../../api/types'
 import type { ChatRunUi } from './types'
 import { Button } from '../ui/Button'
@@ -11,7 +11,8 @@ type ExecutionPanelProps = {
   execPollPaused: boolean
   uiNowMs: number
   interruptKind: string | null
-  busy: boolean
+  execBusy: boolean
+  disableExecute?: boolean
   rawAssetsVisualDnaText?: string
   rawSplitEpisodesText?: string
   onExecute: () => void
@@ -27,7 +28,8 @@ export const ExecutionPanel = memo(function ExecutionPanel({
   execPollPaused,
   uiNowMs,
   interruptKind,
-  busy,
+  execBusy,
+  disableExecute,
   rawAssetsVisualDnaText,
   rawSplitEpisodesText,
   onExecute,
@@ -52,31 +54,17 @@ export const ExecutionPanel = memo(function ExecutionPanel({
     return null
   }, [episode.exec_status, interruptKind])
 
-  const [assetsJson, setAssetsJson] = useState(() =>
-    assetsVisualDna ? JSON.stringify(assetsVisualDna, null, 2) : ''
-  )
-  const [splitJson, setSplitJson] = useState(() => (splitEpisodes ? JSON.stringify(splitEpisodes, null, 2) : ''))
+  const assetsTextareaRef = useRef<HTMLTextAreaElement>(null)
+  const splitTextareaRef = useRef<HTMLTextAreaElement>(null)
 
-  useEffect(() => {
-    setAssetsJson(assetsVisualDna ? JSON.stringify(assetsVisualDna, null, 2) : '')
-  }, [assetsVisualDna])
-
-  useEffect(() => {
-    const raw = String(rawAssetsVisualDnaText || '').trim()
-    if (assetsVisualDna) return
-    if (!raw) return
-    setAssetsJson((prev) => (String(prev || '').trim() ? prev : raw))
+  const assetsText = useMemo(() => {
+    if (assetsVisualDna) return JSON.stringify(assetsVisualDna, null, 2)
+    return String(rawAssetsVisualDnaText || '').trim()
   }, [assetsVisualDna, rawAssetsVisualDnaText])
 
-  useEffect(() => {
-    setSplitJson(splitEpisodes ? JSON.stringify(splitEpisodes, null, 2) : '')
-  }, [splitEpisodes])
-
-  useEffect(() => {
-    const raw = String(rawSplitEpisodesText || '').trim()
-    if (splitEpisodes) return
-    if (!raw) return
-    setSplitJson((prev) => (String(prev || '').trim() ? prev : raw))
+  const splitText = useMemo(() => {
+    if (splitEpisodes) return JSON.stringify(splitEpisodes, null, 2)
+    return String(rawSplitEpisodesText || '').trim()
   }, [rawSplitEpisodesText, splitEpisodes])
 
   const confirmControls = useMemo(() => {
@@ -84,10 +72,10 @@ export const ExecutionPanel = memo(function ExecutionPanel({
     if (effectiveInterruptKind === 'confirm_outline') {
       return (
         <div style={{ display: 'flex', gap: 8 }}>
-          <Button variant="primary" disabled={busy} onClick={() => onConfirm('confirmed')}>
+          <Button variant="primary" disabled={execBusy} onClick={() => onConfirm('confirmed')}>
             确认继续
           </Button>
-          <Button disabled={busy} onClick={() => onConfirm('regenerate')}>
+          <Button disabled={execBusy} onClick={() => onConfirm('regenerate')}>
             重新生成大纲
           </Button>
         </div>
@@ -98,10 +86,11 @@ export const ExecutionPanel = memo(function ExecutionPanel({
         <div style={{ display: 'flex', gap: 8 }}>
           <Button
             variant="primary"
-            disabled={busy}
+            disabled={execBusy}
             onClick={() => {
               try {
-                const parsed = assetsJson.trim() ? JSON.parse(assetsJson) : null
+                const text = assetsTextareaRef.current?.value ?? assetsText
+                const parsed = text.trim() ? JSON.parse(text) : null
                 onConfirm('confirmed', parsed ? { assets_visual_dna: parsed } : undefined)
               } catch {
                 onConfirm('confirmed')
@@ -110,7 +99,7 @@ export const ExecutionPanel = memo(function ExecutionPanel({
           >
             确认继续
           </Button>
-          <Button disabled={busy} onClick={() => onConfirm('regenerate')}>
+          <Button disabled={execBusy} onClick={() => onConfirm('regenerate')}>
             重新生成资产/视觉DNA
           </Button>
         </div>
@@ -121,10 +110,11 @@ export const ExecutionPanel = memo(function ExecutionPanel({
         <div style={{ display: 'flex', gap: 8 }}>
           <Button
             variant="primary"
-            disabled={busy}
+            disabled={execBusy}
             onClick={() => {
               try {
-                const parsed = splitJson.trim() ? JSON.parse(splitJson) : null
+                const text = splitTextareaRef.current?.value ?? splitText
+                const parsed = text.trim() ? JSON.parse(text) : null
                 onConfirm('confirmed', parsed ? { split_episodes: parsed } : undefined)
               } catch {
                 onConfirm('confirmed')
@@ -133,7 +123,7 @@ export const ExecutionPanel = memo(function ExecutionPanel({
           >
             确认并写入剧集
           </Button>
-          <Button disabled={busy} onClick={() => onConfirm('regenerate')}>
+          <Button disabled={execBusy} onClick={() => onConfirm('regenerate')}>
             重新分割
           </Button>
         </div>
@@ -142,17 +132,17 @@ export const ExecutionPanel = memo(function ExecutionPanel({
     if (effectiveInterruptKind === 'confirm_ingest') {
       return (
         <div style={{ display: 'flex', gap: 8 }}>
-          <Button variant="primary" disabled={busy} onClick={() => onConfirm('confirmed')}>
+          <Button variant="primary" disabled={execBusy} onClick={() => onConfirm('confirmed')}>
             确认入库
           </Button>
-          <Button disabled={busy} onClick={() => onConfirm('rejected')}>
+          <Button disabled={execBusy} onClick={() => onConfirm('rejected')}>
             驳回结束
           </Button>
         </div>
       )
     }
     return null
-  }, [assetsJson, busy, effectiveInterruptKind, onConfirm, splitJson])
+  }, [assetsText, execBusy, effectiveInterruptKind, onConfirm, splitText])
 
   const headerStatus = useMemo(() => {
     const locked = episode.script_locked ? '已锁定' : '未锁定'
@@ -164,9 +154,13 @@ export const ExecutionPanel = memo(function ExecutionPanel({
     <div style={{ marginTop: 12 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10 }}>
         <div style={{ fontSize: 12, fontWeight: 700, opacity: 0.85 }}>执行流程</div>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10 }}>
           <div style={{ fontSize: 11, opacity: 0.65 }}>{headerStatus}</div>
-          <Button variant="primary" disabled={busy || !!episode.script_locked || !String(episode.description || '').trim()} onClick={onExecute}>
+          <Button
+            variant="primary"
+            disabled={execBusy || !!disableExecute || !!episode.script_locked || !String(episode.description || '').trim()}
+            onClick={onExecute}
+          >
             执行
           </Button>
         </div>
@@ -200,44 +194,50 @@ export const ExecutionPanel = memo(function ExecutionPanel({
 
         <div>
           <div style={{ fontSize: 12, fontWeight: 700, opacity: 0.85, marginBottom: 6 }}>Step 2：资产抽离 + 视觉DNA</div>
-          <Textarea
-            value={
-              effectiveInterruptKind === 'confirm_assets'
-                ? assetsJson
-                : assetsVisualDna
-                  ? JSON.stringify(assetsVisualDna, null, 2)
-                  : assetsJson
-            }
-            onChange={(e) => setAssetsJson(e.target.value)}
-            style={{ height: 200 }}
-            placeholder={
-              execRun?.currentActionKey === 'episode_assets_visual_dna'
-                ? 'Step2 生成中…（可在上方“执行步骤”里看进度/错误）'
-                : '等待生成资产/视觉DNA（JSON）…'
-            }
-            readOnly={effectiveInterruptKind !== 'confirm_assets'}
-          />
+          {effectiveInterruptKind === 'confirm_assets' ? (
+            <Textarea
+              ref={assetsTextareaRef}
+              defaultValue={assetsText}
+              style={{ height: 200 }}
+              placeholder="等待生成资产/视觉DNA（JSON）…"
+              readOnly={false}
+            />
+          ) : (
+            <Textarea
+              value={assetsText}
+              style={{ height: 200 }}
+              placeholder={
+                execRun?.currentActionKey === 'episode_assets_visual_dna'
+                  ? 'Step2 生成中…（可在上方“执行步骤”里看进度/错误）'
+                  : '等待生成资产/视觉DNA（JSON）…'
+              }
+              readOnly
+            />
+          )}
         </div>
 
         <div>
           <div style={{ fontSize: 12, fontWeight: 700, opacity: 0.85, marginBottom: 6 }}>Step 3：剧集分割 + 各集大纲</div>
-          <Textarea
-            value={
-              effectiveInterruptKind === 'confirm_split'
-                ? splitJson
-                : splitEpisodes
-                  ? JSON.stringify(splitEpisodes, null, 2)
-                  : splitJson
-            }
-            onChange={(e) => setSplitJson(e.target.value)}
-            style={{ height: 200 }}
-            placeholder={
-              execRun?.currentActionKey === 'episode_split_episodes'
-                ? 'Step3 生成中…（可在上方“执行步骤”里看进度/错误）'
-                : '等待分割结果（JSON）…'
-            }
-            readOnly={effectiveInterruptKind !== 'confirm_split'}
-          />
+          {effectiveInterruptKind === 'confirm_split' ? (
+            <Textarea
+              ref={splitTextareaRef}
+              defaultValue={splitText}
+              style={{ height: 200 }}
+              placeholder="等待分割结果（JSON）…"
+              readOnly={false}
+            />
+          ) : (
+            <Textarea
+              value={splitText}
+              style={{ height: 200 }}
+              placeholder={
+                execRun?.currentActionKey === 'episode_split_episodes'
+                  ? 'Step3 生成中…（可在上方“执行步骤”里看进度/错误）'
+                  : '等待分割结果（JSON）…'
+              }
+              readOnly
+            />
+          )}
         </div>
 
         <div>

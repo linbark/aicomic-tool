@@ -57,6 +57,7 @@ export function ScriptPage() {
 
   const episodeDirtyForIdRef = useRef<number | null>(null)
   const sceneDirtyForIdRef = useRef<number | null>(null)
+  const lastSelectionKeyRef = useRef<string>('')
 
   const selectedEpisode = useMemo(() => {
     if (selected.kind === 'episode') return episodes.find((e) => e.id === selected.episodeId) || null
@@ -101,50 +102,81 @@ export function ScriptPage() {
 
   // Sync editors when selection changes
   useEffect(() => {
+    const key =
+      selected.kind === 'episode'
+        ? `episode:${selected.episodeId}`
+        : selected.kind === 'scene'
+          ? `scene:${selected.episodeId}:${selected.sceneId}`
+          : selected.kind === 'shot'
+            ? `shot:${selected.episodeId}:${selected.sceneId}:${selected.shotId}`
+            : 'none'
+    const selectionChanged = key !== lastSelectionKeyRef.current
+    if (selectionChanged) lastSelectionKeyRef.current = key
+
     if (selected.kind === 'episode') {
       const ep = episodes.find((e) => e.id === selected.episodeId)
-      setEpisodeText(String(ep?.description || ''))
-      setSceneText('')
-      setShotDraft(null)
-      setInterruptKind(null)
-      setRawAssetsVisualDnaText('')
-      setRawSplitEpisodesText('')
-      lastAssetsRawTsRef.current = 0
-      lastSplitRawTsRef.current = 0
-      if (ep?.last_exec_run_id) {
-        setExecRun({
-          runId: String(ep.last_exec_run_id),
-          status: (ep.exec_status as any) || 'queued',
-          steps: [],
-          startedAtMs: Date.now(),
-        })
+      if (selectionChanged) {
+        setEpisodeText(String(ep?.description || ''))
+        setSceneText('')
+        setShotDraft(null)
+        setInterruptKind(null)
+        setRawAssetsVisualDnaText('')
+        setRawSplitEpisodesText('')
+        lastAssetsRawTsRef.current = 0
+        lastSplitRawTsRef.current = 0
+        lastFinalTsRef.current = 0
+        lastInterruptTsRef.current = 0
+        fetchedLogIdsRef.current.clear()
+        setDebugLogs([])
+        if (ep?.last_exec_run_id) {
+          setExecRun({
+            runId: String(ep.last_exec_run_id),
+            status: (ep.exec_status as any) || 'queued',
+            steps: [],
+            startedAtMs: Date.now(),
+          })
+        } else {
+          setExecRun(null)
+        }
       } else {
-        setExecRun(null)
+        if (ep?.last_exec_run_id) {
+          const runId = String(ep.last_exec_run_id)
+          setExecRun((prev) => {
+            if (prev?.runId) return prev
+            return { runId, status: (ep.exec_status as any) || 'queued', steps: [], startedAtMs: Date.now() }
+          })
+        }
       }
       return
     }
     if (selected.kind === 'scene') {
-      setEpisodeText('')
-      const sc = selectedScene
-      setSceneText(String(sc?.description || ''))
-      setShotDraft(null)
-      setExecRun(null)
-      setInterruptKind(null)
+      if (selectionChanged) {
+        setEpisodeText('')
+        const sc = selectedScene
+        setSceneText(String(sc?.description || ''))
+        setShotDraft(null)
+        setExecRun(null)
+        setInterruptKind(null)
+      }
       return
     }
     if (selected.kind === 'shot') {
-      setEpisodeText('')
-      setSceneText('')
-      setShotDraft(selectedShot ? { ...selectedShot } : null)
-      setExecRun(null)
-      setInterruptKind(null)
+      if (selectionChanged) {
+        setEpisodeText('')
+        setSceneText('')
+        setShotDraft(selectedShot ? { ...selectedShot } : null)
+        setExecRun(null)
+        setInterruptKind(null)
+      }
       return
     }
-    setEpisodeText('')
-    setSceneText('')
-    setShotDraft(null)
-    setExecRun(null)
-    setInterruptKind(null)
+    if (selectionChanged) {
+      setEpisodeText('')
+      setSceneText('')
+      setShotDraft(null)
+      setExecRun(null)
+      setInterruptKind(null)
+    }
   }, [selected, episodes, projectId, selectedScene, selectedShot])
 
   useEffect(() => {
@@ -604,6 +636,7 @@ export function ScriptPage() {
       lastInterruptTsRef.current = 0
       setDebugLogs([])
       fetchedLogIdsRef.current.clear()
+      setExecBusy(false)
       await refreshScript(projectId)
     } catch (e: any) {
       const isLocked =
@@ -626,13 +659,40 @@ export function ScriptPage() {
       if (!projectId) return
       if (selected.kind !== 'episode') return
       const runId = execRun?.runId || String(selectedEpisode?.last_exec_run_id || '')
-      if (!runId) return
+      if (!runId) {
+        setError('缺少 run_id，无法继续（请刷新页面或重新执行一次）。')
+        return
+      }
       setExecBusy(true)
       setError(null)
       try {
         await api.aiEpisodeExecuteConfirm(selected.episodeId, { decision, artifacts: artifacts || null, run_id: runId })
         setExecPollPaused(false)
         setInterruptKind(null)
+        setExecRun((prev) => {
+          const t = now()
+          if (!prev || prev.runId !== runId) {
+            return {
+              runId,
+              status: 'queued',
+              steps: [],
+              startedAtMs: t,
+              lastAtMs: t,
+              currentStepIndex: null,
+              currentActionKey: null,
+              error: null,
+            }
+          }
+          return {
+            ...prev,
+            status: 'queued',
+            steps: [],
+            lastAtMs: t,
+            currentStepIndex: null,
+            currentActionKey: null,
+            error: null,
+          }
+        })
         await refreshScript(projectId)
       } catch (e: any) {
         setError(extractErrorMessage(e, '提交确认失败'))

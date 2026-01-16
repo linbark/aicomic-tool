@@ -17,6 +17,9 @@ from typing import List, Optional
 from ..workflows.memory_schemas import EvidenceRecordPayload, EvidenceSpan
 
 from ..routers.ai_helpers import log_ui
+import logging
+
+logger = logging.getLogger(__name__)
 
 def _split_by_blank_lines(text: str) -> List[str]:
     lines = (text or "").splitlines()
@@ -68,6 +71,8 @@ def chunk_text_to_evidences(
     - start/end_offset：暂不计算（保留接口以便后续升级为字符级定位）
     """
     tags = tags or []
+    
+    logger.info(f"Chunking text for project {project_id}, length: {len(text)}")
     paras = _split_by_blank_lines(text)
     evidences: List[EvidenceRecordPayload] = []
 
@@ -86,6 +91,7 @@ def chunk_text_to_evidences(
             "INFO",
         )
         chunks = _chunk_by_chars(para, max_quote_chars)
+        logger.debug(f"Paragraph {p_idx} split into {len(chunks)} chunks")
         for c_idx, chunk in enumerate(chunks):
             chunk_preview = (chunk or "").strip()
             if len(chunk_preview) > 200:
@@ -133,4 +139,5 @@ def chunk_text_to_evidences(
                 )
             )
 
+    logger.info(f"Chunking finished. Total evidences generated: {len(evidences)}")
     return evidences
