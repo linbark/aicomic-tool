@@ -106,6 +106,7 @@ class StageEmitter:
         self.project_id = int(project_id)
         self.run_id = str(run_id)
         self.emit_stages = bool(emit_stages)
+        self._log_seq = 0
 
     def _write(self, stage_name: str, data: Any) -> None:
         if not self.emit_stages:
@@ -118,6 +119,14 @@ class StageEmitter:
 
     def plan(self, plan: Dict[str, Any]) -> None:
         self._write("chat.plan", {"plan": plan})
+
+    def log(self, *, stage: str, summary: str, level: str = "INFO", data: Optional[Dict[str, Any]] = None) -> None:
+        self._log_seq += 1
+        ts_ms = _now_ms()
+        self._write(
+            f"log.{ts_ms}.{self._log_seq:03d}",
+            {"ts_ms": ts_ms, "at_ms": ts_ms, "level": str(level or "INFO"), "stage": str(stage or ""), "summary": str(summary or ""), "data": data or {}},
+        )
 
     def step_start(self, *, step_index: int, action_key: str, why: Optional[str], input_preview: str) -> None:
         self._write(

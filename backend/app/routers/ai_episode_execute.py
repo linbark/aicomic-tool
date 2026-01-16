@@ -182,14 +182,35 @@ async def _run_until_interrupt(
         why = str(steps[step_index].get("why") or "")
 
         if ak == "episode_outline_generate":
+            emitter.log(stage="episode_execute.outline.start", summary="开始生成大纲", data={"step_index": int(step_index), "action_key": ak})
             emitter.step_start(step_index=step_index, action_key=ak, why=why or None, input_preview=script_text)
             t0 = _now_ms()
-            system_prompt = prompt_registry.get_template_prompt("outline_generate_system")
+            system_prompt = (
+                "你是一位专业的漫剧编剧和故事架构师。\n"
+                "你的任务是根据用户提供的本集剧本，生成可用于后续自动化处理的结构化大纲。\n"
+                "\n"
+                "输出必须是严格 JSON object（不要 markdown，不要代码块，不要任何额外文字）。\n"
+                "JSON Schema:\n"
+                "{\n"
+                '  "logline": "一句话故事概要",\n'
+                '  "characters": [\n'
+                '    {"name": "角色名", "role": "主角/配角/反派", "description": "角色简介"}\n'
+                "  ],\n"
+                '  "act_1": "开端",\n'
+                '  "act_2": "发展",\n'
+                '  "act_3": "高潮与结局",\n'
+                '  "key_beats": ["关键转折1", "关键转折2", "关键转折3"]\n'
+                "}\n"
+                "\n"
+                "约束：\n"
+                "- 所有字段必须存在；如果信息不足，用空字符串/空数组补齐。\n"
+                "- 中文输出。\n"
+            )
             raw = _read_settings_raw()
             settings = _mask_settings(raw)
             if not settings.has_api_key:
                 raise HTTPException(status_code=400, detail="AI API Key 未配置")
-            outline_text = await _chat_client.chat(
+            outline_raw = await _chat_client.chat(
                 settings=LlmChatSettings(
                     base_url=settings.base_url,
                     api_key=raw.get("api_key") or "",
@@ -203,8 +224,19 @@ async def _run_until_interrupt(
                     {"role": "user", "content": script_text},
                 ],
             )
-            outline_text = (outline_text or "").strip()
-            artifacts["outline"] = outline_text
+            outline_raw = (outline_raw or "").strip()
+            try:
+                outline_obj = extract_json_any(outline_raw)
+                if not isinstance(outline_obj, dict):
+                    outline_obj = {"outline": outline_obj}
+                outline_text = json.dumps(outline_obj, ensure_ascii=False, indent=2)
+            except Exception:
+                outline_text = outline_raw
+                outline_obj = None
+
+            artifacts["outline"] = outline_obj if outline_obj is not None else outline_text
+            emitter._write("episode_outline_generate.raw", {"text": outline_text, "at_ms": _now_ms()})
+            emitter.log(stage="episode_execute.outline.done", summary="大纲生成完成", data={"step_index": int(step_index), "action_key": ak, "len": len(outline_text or "")})
             emitter.step_end(step_index=step_index, action_key=ak, ms=_now_ms() - t0, output_preview=outline_text)
             _set_episode_exec_state(
                 db=db,
@@ -779,7 +811,7 @@ def episode_execute_act_async(req: EpisodeExecuteStartRequest):
             db=db,
             project_id_pk=project_id_pk,
             episode_id=int(req.episode_id),
-            script_locked=True,
+            script_locked=False, # Changed from True to False per user request
             last_exec_run_id=run_id,
             exec_status="running",
             exec_artifacts={"script_text": script_text},
@@ -800,6 +832,7 @@ def episode_execute_act_async(req: EpisodeExecuteStartRequest):
             emitter = StageEmitter(project_id=project_id_pk, run_id=run_id, emit_stages=True)
 
             async def _go():
+                emitter.log(stage="episode_execute.runner.start", summary="后台执行线程已启动", data={"episode_id": int(req.episode_id), "project_id_pk": int(project_id_pk)})
                 emitter.status("running")
                 await _run_until_interrupt(
                     project_id_pk=project_id_pk,
@@ -817,6 +850,10 @@ def episode_execute_act_async(req: EpisodeExecuteStartRequest):
 
             anyio.run(_go)
         except Exception as e:
+            try:
+                emitter.log(stage="episode_execute.runner.error", summary="后台执行异常", level="ERROR", data={"error": f"{type(e).__name__}: {e}"})
+            except Exception:
+                pass
             _context_store.snapshot_stage(project_id=project_id_pk, run_id=run_id, stage_name="chat.error", data={"error": str(e), "at_ms": _now_ms()})
             _context_store.snapshot_stage(project_id=project_id_pk, run_id=run_id, stage_name="chat.status", data={"status": "error", "at_ms": _now_ms()})
             try:

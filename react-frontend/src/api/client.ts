@@ -66,7 +66,7 @@ const apiClient = axios.create({
   baseURL: _apiBaseUrl,
   // 某些 WebView/XHR 环境可能存在默认超时，显式设置为较长时间以适配 workflow（多次 LLM 调用）
   // 注意：单位是毫秒
-  timeout: 310_000,
+  timeout: 600_000,
   headers: {
     'Content-Type': 'application/json',
   },
@@ -168,7 +168,7 @@ export const api = {
   aiApplyWorkflowScript: (data: ApplyScriptWorkflowRequest) => apiClient.post(`/ai/workflows/script/apply`, data),
   aiApplyWorkflowStoryboard: (data: ApplyStoryboardWorkflowRequest) => apiClient.post(`/ai/workflows/storyboard/apply`, data),
   aiEpisodeExecuteActAsync: (data: EpisodeExecuteStartRequest) =>
-    apiClient.post<EpisodeExecuteStartResponse>(`/ai/episode-execute/act_async`, data),
+    apiClient.post<EpisodeExecuteStartResponse>(`/ai/episode-execute/act_async`, data, { timeout: 20_000 }),
   aiEpisodeExecuteConfirm: (episodeId: number, data: EpisodeExecuteConfirmRequest) =>
     apiClient.post(`/ai/episode-execute/${episodeId}/confirm`, data),
   getPromptTemplates: () => apiClient.get<PromptTemplateRead[]>(`/ai/prompts`),

@@ -2,10 +2,10 @@
  * ScriptPage 相关类型定义
  */
 
+export type ScriptStep = 0 | 1 | 2 | 3
+
 export type Selected =
-  | { kind: 'episode'; episodeId: number }
-  | { kind: 'scene'; episodeId: number; sceneId: number }
-  | { kind: 'shot'; episodeId: number; sceneId: number; shotId: number }
+  | { kind: 'episode'; episodeId: number; step: ScriptStep }
   | { kind: 'none' }
 
 export type ChatRole = 'user' | 'assistant'

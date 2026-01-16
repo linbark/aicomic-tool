@@ -5,12 +5,12 @@
 
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import api from '../api/client'
-import type { EpisodeRead, ShotRead } from '../api/types'
+import type { EpisodeRead } from '../api/types'
 import { useProjectSelection } from '../state/useProjectSelection'
-import { EpisodeList } from '../components/script/EpisodeList'
-import { EpisodeEditor } from '../components/script/EpisodeEditor'
-import { SceneEditor } from '../components/script/SceneEditor'
-import { ShotEditor } from '../components/script/ShotEditor'
+import { ScriptSidebar } from '../components/script/ScriptSidebar'
+import { Step0_Script } from '../components/script/steps/Step0_Script'
+import { Step1_Structure } from '../components/script/steps/Step1_Structure'
+import { Step2_Assets } from '../components/script/steps/Step2_Assets'
 import { DebugWindow } from '../components/script/DebugWindow'
 import { Button } from '../components/ui/Button'
 import { Input } from '../components/ui/Input'
@@ -25,8 +25,6 @@ export function ScriptPage() {
 
   // Editor states
   const [episodeText, setEpisodeText] = useState('')
-  const [sceneText, setSceneText] = useState('')
-  const [shotDraft, setShotDraft] = useState<Partial<ShotRead> | null>(null)
 
   const [busy, setBusy] = useState<BusyState>(null)
   const [error, setError] = useState<string | null>(null)
@@ -39,12 +37,10 @@ export function ScriptPage() {
   const [execRun, setExecRun] = useState<ChatRunUi | null>(null)
   const [execPollPaused, setExecPollPaused] = useState(false)
   const [execBusy, setExecBusy] = useState(false)
-  const [interruptKind, setInterruptKind] = useState<string | null>(null)
-  const [uiNowMs, setUiNowMs] = useState(() => Date.now())
   const [rawAssetsVisualDnaText, setRawAssetsVisualDnaText] = useState<string>('')
-  const [rawSplitEpisodesText, setRawSplitEpisodesText] = useState<string>('')
+  const [rawOutlineText, setRawOutlineText] = useState<string>('')
   const lastAssetsRawTsRef = useRef(0)
-  const lastSplitRawTsRef = useRef(0)
+  const lastOutlineRawTsRef = useRef(0)
 
   // Debug window
   const [debugLogs, setDebugLogs] = useState<DebugLog[]>([])
@@ -56,26 +52,11 @@ export function ScriptPage() {
   const [hasNewLogs, setHasNewLogs] = useState(false)
 
   const episodeDirtyForIdRef = useRef<number | null>(null)
-  const sceneDirtyForIdRef = useRef<number | null>(null)
   const lastSelectionKeyRef = useRef<string>('')
 
   const selectedEpisode = useMemo(() => {
     if (selected.kind === 'episode') return episodes.find((e) => e.id === selected.episodeId) || null
-    if (selected.kind === 'scene' || selected.kind === 'shot') return episodes.find((e) => e.id === selected.episodeId) || null
     return null
-  }, [episodes, selected])
-
-  const selectedScene = useMemo(() => {
-    if (selected.kind !== 'scene' && selected.kind !== 'shot') return null
-    const ep = episodes.find((e) => e.id === selected.episodeId)
-    return ep?.scenes?.find((s) => s.id === selected.sceneId) || null
-  }, [episodes, selected])
-
-  const selectedShot = useMemo(() => {
-    if (selected.kind !== 'shot') return null
-    const ep = episodes.find((e) => e.id === selected.episodeId)
-    const sc = ep?.scenes?.find((s) => s.id === selected.sceneId)
-    return sc?.shots?.find((sh) => sh.id === selected.shotId) || null
   }, [episodes, selected])
 
   const refreshScript = useCallback(
@@ -100,16 +81,37 @@ export function ScriptPage() {
     else setEpisodes([])
   }, [projectId, refreshScript])
 
+  // Initial data fetch when selecting an episode
+  useEffect(() => {
+    if (selected.kind === 'episode' && projectId) {
+        // Fetch existing artifacts for this episode
+        const ep = episodes.find(e => e.id === selected.episodeId)
+        if (ep?.last_exec_run_id) {
+             const runId = String(ep.last_exec_run_id)
+             // Fetch latest data if available
+             api.getRunStage(projectId, runId, 'episode_outline_generate.raw')
+                .then(res => {
+                    const data = (res.data as any)?.data || {}
+                    const text = typeof data?.text === 'string' ? data.text : ''
+                    if (text) setRawOutlineText(text)
+                }).catch(() => {})
+
+             api.getRunStage(projectId, runId, 'episode_assets_visual_dna.raw')
+                .then(res => {
+                    const data = (res.data as any)?.data || {}
+                    const text = typeof data?.text === 'string' ? data.text : ''
+                    if (text) setRawAssetsVisualDnaText(text)
+                }).catch(() => {})
+        }
+    }
+  }, [selected, projectId, episodes])
+
   // Sync editors when selection changes
   useEffect(() => {
     const key =
       selected.kind === 'episode'
-        ? `episode:${selected.episodeId}`
-        : selected.kind === 'scene'
-          ? `scene:${selected.episodeId}:${selected.sceneId}`
-          : selected.kind === 'shot'
-            ? `shot:${selected.episodeId}:${selected.sceneId}:${selected.shotId}`
-            : 'none'
+        ? `episode:${selected.episodeId}:step:${selected.step}`
+        : 'none'
     const selectionChanged = key !== lastSelectionKeyRef.current
     if (selectionChanged) lastSelectionKeyRef.current = key
 
@@ -117,13 +119,10 @@ export function ScriptPage() {
       const ep = episodes.find((e) => e.id === selected.episodeId)
       if (selectionChanged) {
         setEpisodeText(String(ep?.description || ''))
-        setSceneText('')
-        setShotDraft(null)
-        setInterruptKind(null)
         setRawAssetsVisualDnaText('')
-        setRawSplitEpisodesText('')
+        setRawOutlineText('')
         lastAssetsRawTsRef.current = 0
-        lastSplitRawTsRef.current = 0
+        lastOutlineRawTsRef.current = 0
         lastFinalTsRef.current = 0
         lastInterruptTsRef.current = 0
         fetchedLogIdsRef.current.clear()
@@ -149,35 +148,12 @@ export function ScriptPage() {
       }
       return
     }
-    if (selected.kind === 'scene') {
-      if (selectionChanged) {
-        setEpisodeText('')
-        const sc = selectedScene
-        setSceneText(String(sc?.description || ''))
-        setShotDraft(null)
-        setExecRun(null)
-        setInterruptKind(null)
-      }
-      return
-    }
-    if (selected.kind === 'shot') {
-      if (selectionChanged) {
-        setEpisodeText('')
-        setSceneText('')
-        setShotDraft(selectedShot ? { ...selectedShot } : null)
-        setExecRun(null)
-        setInterruptKind(null)
-      }
-      return
-    }
+    
     if (selectionChanged) {
       setEpisodeText('')
-      setSceneText('')
-      setShotDraft(null)
       setExecRun(null)
-      setInterruptKind(null)
     }
-  }, [selected, episodes, projectId, selectedScene, selectedShot])
+  }, [selected, episodes, projectId])
 
   useEffect(() => {
     if (!projectId) return
@@ -211,17 +187,17 @@ export function ScriptPage() {
               .catch(() => {})
           }
         }
-        if (stageSet.has('episode_split_episodes.raw')) {
-          const ts = Number(stageTs.get('episode_split_episodes.raw') || 0)
-          if (ts > lastSplitRawTsRef.current) {
-            lastSplitRawTsRef.current = ts
+        if (stageSet.has('episode_outline_generate.raw')) {
+          const ts = Number(stageTs.get('episode_outline_generate.raw') || 0)
+          if (ts > lastOutlineRawTsRef.current) {
+            lastOutlineRawTsRef.current = ts
             api
-              .getRunStage(pid, runId, 'episode_split_episodes.raw')
+              .getRunStage(pid, runId, 'episode_outline_generate.raw')
               .then((res) => {
                 if (!alive) return
                 const data = (res.data as any)?.data || {}
                 const text = typeof data?.text === 'string' ? data.text : ''
-                if (text) setRawSplitEpisodesText(text)
+                if (text) setRawOutlineText(text)
               })
               .catch(() => {})
           }
@@ -370,14 +346,8 @@ export function ScriptPage() {
           const ts = Number(stageTs.get('chat.interrupt') || 0)
           if (ts > lastInterruptTsRef.current) {
             lastInterruptTsRef.current = ts
-            const it = await api.getRunStage(pid, runId, 'chat.interrupt')
-            const d = (it.data as any)?.data || {}
-            const k = d?.kind ? String(d.kind) : null
-            if (alive) setInterruptKind(k)
             refreshScript(pid).catch(() => {})
           }
-        } else {
-          if (alive) setInterruptKind(null)
         }
 
         if (stageSet.has('chat.final')) {
@@ -406,15 +376,6 @@ export function ScriptPage() {
   }, [projectId, execRun?.runId, execPollPaused, refreshScript])
 
   useEffect(() => {
-    if (!execRun?.runId) return
-    if (execRun.status !== 'running' && execRun.status !== 'queued' && execRun.status !== 'paused') return
-    if (execPollPaused) return
-    const timer = window.setInterval(() => setUiNowMs(Date.now()), 1000)
-    return () => window.clearInterval(timer)
-  }, [execRun?.runId, execRun?.status, execPollPaused])
-
-
-  useEffect(() => {
     if (autoScrollEnabled && debugLogs.length > 0) {
       setHasNewLogs(false)
     } else if (!autoScrollEnabled) {
@@ -423,6 +384,16 @@ export function ScriptPage() {
   }, [debugLogs, autoScrollEnabled])
 
   // Action handlers
+  const pushUiLog = useCallback((level: string, text: string) => {
+    setDebugLogs((prev) => {
+      const ts = Date.now()
+      const id = `ui.${ts}.${Math.random().toString(16).slice(2)}`
+      const next = [...prev, { id, ts, level, text }]
+      next.sort((a, b) => a.ts - b.ts)
+      return next
+    })
+  }, [])
+
   const saveEpisode = useCallback(async () => {
     if (!projectId || selected.kind !== 'episode') return
     setBusy('save_episode')
@@ -431,7 +402,7 @@ export function ScriptPage() {
       episodeDirtyForIdRef.current = selected.episodeId
       await api.updateEpisode(selected.episodeId, { description: episodeText })
       await refreshScript(projectId)
-      setSelected({ kind: 'episode', episodeId: selected.episodeId })
+      setSelected({ kind: 'episode', episodeId: selected.episodeId, step: 0 })
     } catch (e: any) {
       const isLocked =
         (e as any)?.response?.status === 409 &&
@@ -439,7 +410,7 @@ export function ScriptPage() {
       if (isLocked) {
         setError('本集已锁定（执行后自动锁定），不能再修改剧本。')
         await refreshScript(projectId)
-        setSelected({ kind: 'episode', episodeId: selected.episodeId })
+        setSelected({ kind: 'episode', episodeId: selected.episodeId, step: 0 })
       } else {
         setError(extractErrorMessage(e, '保存失败'))
       }
@@ -447,42 +418,6 @@ export function ScriptPage() {
       setBusy(null)
     }
   }, [projectId, selected, episodeText, refreshScript])
-
-  const saveScene = useCallback(async () => {
-    if (!projectId || selected.kind !== 'scene' || !selectedScene) return
-    setBusy('save_scene')
-    setError(null)
-    try {
-      sceneDirtyForIdRef.current = selectedScene.id
-      await api.updateScene(selectedScene.id, { description: sceneText })
-      await refreshScript(projectId)
-      setSelected({ kind: 'scene', episodeId: selected.episodeId, sceneId: selectedScene.id })
-    } catch (e: any) {
-      setError(extractErrorMessage(e, '保存失败'))
-    } finally {
-      setBusy(null)
-    }
-  }, [projectId, selected, selectedScene, sceneText, refreshScript])
-
-  const saveShot = useCallback(async () => {
-    if (!projectId || selected.kind !== 'shot' || !selectedShot || !shotDraft) return
-    setBusy('save_shot')
-    setError(null)
-    try {
-      await api.updateShot(selectedShot.id, {
-        title: shotDraft.title,
-        action_text: shotDraft.action_text,
-        dialogue: shotDraft.dialogue,
-        prompt: shotDraft.prompt,
-      })
-      await refreshScript(projectId)
-      setSelected({ kind: 'shot', episodeId: selected.episodeId, sceneId: selected.sceneId, shotId: selectedShot.id })
-    } catch (e: any) {
-      setError(extractErrorMessage(e, '保存失败'))
-    } finally {
-      setBusy(null)
-    }
-  }, [projectId, selected, selectedShot, shotDraft, refreshScript])
 
   const createEpisode = useCallback(async () => {
     if (!projectId) return
@@ -537,83 +472,42 @@ export function ScriptPage() {
     }
   }, [projectId, refreshProjects])
 
-  const deleteCurrentEpisode = useCallback(async () => {
-    if (!projectId) return
-    if (selected.kind !== 'episode') return
-    const epId = selected.episodeId
-    if (!window.confirm('确定删除当前集？此操作不可恢复。')) return
-    setDeleting('episode')
-    setError(null)
-    try {
-      await api.deleteEpisode(epId)
-      await refreshScript(projectId)
-      setSelected({ kind: 'none' })
-    } catch (e: any) {
-      setError(extractErrorMessage(e, '删除集失败'))
-    } finally {
-      setDeleting(null)
-    }
-  }, [projectId, selected, refreshScript])
-
-  const createScene = useCallback(async () => {
-    if (!projectId || selected.kind !== 'episode') return
-    setBusy('create_scene')
-    setError(null)
-    try {
-      await api.createScene(selected.episodeId, { title: `场${(selectedEpisode?.scenes || []).length + 1}` })
-      await refreshScript(projectId)
-    } catch (e: any) {
-      setError(extractErrorMessage(e, '新建场失败'))
-    } finally {
-      setBusy(null)
-    }
-  }, [projectId, selected, selectedEpisode, refreshScript])
-
-  const createShot = useCallback(async () => {
-    if (!projectId || selected.kind !== 'scene' || !selectedScene) return
-    setBusy('create_shot')
-    setError(null)
-    try {
-      await api.createShot(selectedScene.id, { title: `镜头${(selectedScene.shots || []).length + 1}`, action_text: '' })
-      await refreshScript(projectId)
-    } catch (e: any) {
-      setError(extractErrorMessage(e, '新建镜头失败'))
-    } finally {
-      setBusy(null)
-    }
-  }, [projectId, selected, selectedScene, refreshScript])
-
   const executeEpisode = useCallback(async () => {
     if (!projectId) return
     if (selected.kind !== 'episode') return
     const text = String(episodeText || '').trim()
-    if (!text) return
-    if (selectedEpisode?.script_locked) {
-      setError('本集已锁定（执行后自动锁定），不能再次执行。')
-      return
-    }
+    if (!text) return // Don't run if empty
+
     setExecBusy(true)
     setError(null)
     try {
+      pushUiLog('INFO', '开始执行：结构拆解（准备保存剧本并启动后端执行）')
+      // Always update script before execution
       try {
+        pushUiLog('INFO', '保存剧本到后端...')
         await api.updateEpisode(selected.episodeId, { description: episodeText })
+        pushUiLog('SUCCESS', '保存剧本成功')
       } catch (e: any) {
+        // Ignore lock errors if they still happen, but backend should be fixed now
         const isLocked =
           (e as any)?.response?.status === 409 &&
           String((e as any)?.response?.data?.detail || '').toLowerCase().includes('locked')
         if (isLocked) {
-          setError('本集已锁定（执行后自动锁定），不能再次执行。')
-          await refreshScript(projectId)
-          setSelected({ kind: 'episode', episodeId: selected.episodeId })
-          return
+          // Just proceed, assume we can run anyway
+          console.warn('Backend reported locked, but proceeding with execution per user request.')
+          pushUiLog('WARN', '后端提示已锁定，仍尝试继续执行')
+        } else {
+           throw e
         }
-        throw e
       }
+
       const runId =
         typeof window !== 'undefined' && (window as any).crypto && (window as any).crypto.randomUUID
           ? (window as any).crypto.randomUUID().replace(/-/g, '')
           : (Math.random().toString(16).slice(2) + Date.now().toString(16)).slice(0, 32)
       lsSet('aicomic.lastRunId', runId)
+      
+      pushUiLog('INFO', `启动执行请求：run=${runId.slice(0, 8)}...`)
       const res = await api.aiEpisodeExecuteActAsync({
         project_id: projectId,
         episode_id: selected.episodeId,
@@ -621,6 +515,7 @@ export function ScriptPage() {
         run_id: runId,
       })
       const rid = String(res.data?.run_id || runId)
+      pushUiLog('SUCCESS', `执行已启动：run=${rid.slice(0, 8)}...（开始轮询）`)
       setExecRun({
         runId: rid,
         status: 'queued',
@@ -631,7 +526,6 @@ export function ScriptPage() {
         currentActionKey: null,
       })
       setExecPollPaused(false)
-      setInterruptKind(null)
       lastFinalTsRef.current = 0
       lastInterruptTsRef.current = 0
       setDebugLogs([])
@@ -639,96 +533,69 @@ export function ScriptPage() {
       setExecBusy(false)
       await refreshScript(projectId)
     } catch (e: any) {
-      const isLocked =
-        (e as any)?.response?.status === 409 &&
-        String((e as any)?.response?.data?.detail || '').toLowerCase().includes('locked')
-      if (isLocked) {
-        setError('本集已锁定（执行后自动锁定），不能再次执行。')
-        await refreshScript(projectId)
-        setSelected({ kind: 'episode', episodeId: selected.episodeId })
-      } else {
-        setError(extractErrorMessage(e, '执行失败'))
-      }
+      setError(extractErrorMessage(e, '执行失败'))
+      pushUiLog('ERROR', `执行失败：${extractErrorMessage(e, '') || 'unknown'}`)
     } finally {
       setExecBusy(false)
     }
   }, [episodeText, projectId, refreshScript, selected, selectedEpisode])
 
-  const confirmExec = useCallback(
-    async (decision: 'confirmed' | 'regenerate' | 'rejected', artifacts?: Record<string, unknown>) => {
-      if (!projectId) return
-      if (selected.kind !== 'episode') return
-      const runId = execRun?.runId || String(selectedEpisode?.last_exec_run_id || '')
-      if (!runId) {
-        setError('缺少 run_id，无法继续（请刷新页面或重新执行一次）。')
-        return
-      }
-      setExecBusy(true)
-      setError(null)
-      try {
-        await api.aiEpisodeExecuteConfirm(selected.episodeId, { decision, artifacts: artifacts || null, run_id: runId })
-        setExecPollPaused(false)
-        setInterruptKind(null)
-        setExecRun((prev) => {
-          const t = now()
-          if (!prev || prev.runId !== runId) {
-            return {
-              runId,
-              status: 'queued',
-              steps: [],
-              startedAtMs: t,
-              lastAtMs: t,
-              currentStepIndex: null,
-              currentActionKey: null,
-              error: null,
-            }
-          }
-          return {
-            ...prev,
-            status: 'queued',
-            steps: [],
-            lastAtMs: t,
-            currentStepIndex: null,
-            currentActionKey: null,
-            error: null,
-          }
-        })
-        await refreshScript(projectId)
-      } catch (e: any) {
-        setError(extractErrorMessage(e, '提交确认失败'))
-      } finally {
-        setExecBusy(false)
-      }
-    },
-    [execRun?.runId, projectId, refreshScript, selected, selectedEpisode?.last_exec_run_id, selectedEpisode?.id]
-  )
+  // Auto-run logic: If entering Step 1, 2, or 3 and data is missing but script exists, trigger execution
+  useEffect(() => {
+    if (selected.kind !== 'episode' || !selectedEpisode) return
+    if (execBusy || execRun?.status === 'running' || execRun?.status === 'queued') return
+    if (!episodeText.trim()) return // Don't run if script is empty
 
-  const handlePauseExecPoll = useCallback(() => {
-    setExecPollPaused(true)
-  }, [])
+    // Debounce slightly to avoid rapid triggers on selection change
+    const timer = setTimeout(() => {
+        if (selected.step === 1 && !rawOutlineText) {
+            executeEpisode().catch(() => {})
+        } else if (selected.step === 2 && !rawAssetsVisualDnaText) {
+            executeEpisode().catch(() => {})
+        }
+    }, 500)
+    
+    return () => clearTimeout(timer)
+  }, [selected, selectedEpisode, rawOutlineText, rawAssetsVisualDnaText, execBusy, execRun?.status, episodeText, executeEpisode])
 
-  const handleResumeExecPoll = useCallback(() => {
-    setExecPollPaused(false)
-  }, [])
-
-  const handleForceRefreshExec = useCallback(async () => {
+  const deleteEpisode = useCallback(async (epId: number) => {
     if (!projectId) return
-    const runId = execRun?.runId || ''
-    if (!runId) return
+    if (!window.confirm('确定删除此集？此操作不可恢复。')) return
+    setBusy('create_episode') // Reuse busy state
+    setError(null)
     try {
-      const stagesRes = await api.listRunStages(projectId, runId)
-      const stageMetas = ((stagesRes.data as any)?.stages || []) as { name: string }[]
-      const stageSet = new Set(stageMetas.map((s) => String(s?.name || '')).filter((x) => x))
-      if (stageSet.has('chat.interrupt')) {
-        const it = await api.getRunStage(projectId, runId, 'chat.interrupt')
-        const d = (it.data as any)?.data || {}
-        setInterruptKind(d?.kind ? String(d.kind) : null)
+      await api.deleteEpisode(epId)
+      if (selected.kind === 'episode' && selected.episodeId === epId) {
+        setSelected({ kind: 'none' })
       }
       await refreshScript(projectId)
     } catch (e: any) {
-      setError(extractErrorMessage(e, '刷新失败'))
+      setError(extractErrorMessage(e, '删除集失败'))
+    } finally {
+      setBusy(null)
     }
-  }, [execRun?.runId, projectId, refreshScript])
+  }, [projectId, selected, refreshScript])
+
+  const goToStep1AndRun = useCallback(async () => {
+      if (selected.kind !== 'episode') return
+      // 1. Save
+      try {
+          await saveEpisode()
+      } catch {
+          return // Stop if save fails
+      }
+      // 2. Navigate
+      setSelected({ ...selected, step: 1 })
+      // 3. Execution is handled by useEffect auto-run logic when switching to step 1
+      setRawOutlineText('') 
+  }, [selected, selectedEpisode, saveEpisode])
+
+  const goToStep2AndRun = useCallback(() => {
+      if (selected.kind !== 'episode') return
+      setSelected({ ...selected, step: 2 })
+      // Force run by clearing data so auto-run triggers
+      setRawAssetsVisualDnaText('')
+  }, [selected])
 
   return (
     <div style={styles.page}>
@@ -812,58 +679,40 @@ export function ScriptPage() {
       ) : null}
 
       <div style={styles.body}>
-        <EpisodeList
+        <ScriptSidebar
           episodes={episodes}
           selected={selected}
-          selectedEpisodeId={selectedEpisode?.id || null}
-          selectedSceneId={selectedScene?.id || null}
-          onSelectEpisode={(episodeId) => setSelected({ kind: 'episode', episodeId })}
-          onSelectScene={(episodeId, sceneId) => setSelected({ kind: 'scene', episodeId, sceneId })}
+          onSelect={(episodeId, step) => setSelected({ kind: 'episode', episodeId, step })}
+          onDeleteEpisode={deleteEpisode}
         />
 
         <div style={styles.main}>
-          {selected.kind === 'none' ? <div style={styles.empty}>请选择一个 Episode 或 Scene</div> : null}
+          {selected.kind === 'none' ? <div style={styles.empty}>请从左侧选择一个 Step</div> : null}
 
           {selected.kind === 'episode' && selectedEpisode ? (
-            <EpisodeEditor
-              episode={selectedEpisode}
-              episodeText={episodeText}
-              uiNowMs={uiNowMs}
-              execRun={execRun}
-              execPollPaused={execPollPaused}
-              interruptKind={interruptKind}
-              execBusy={execBusy}
-              busy={busy === 'save_episode'}
-              deleting={deleting === 'episode'}
-              onEpisodeTextChange={setEpisodeText}
-              onSave={saveEpisode}
-              onCreateScene={createScene}
-              onDelete={deleteCurrentEpisode}
-              onExecute={executeEpisode}
-              onPauseExecPoll={handlePauseExecPoll}
-              onResumeExecPoll={handleResumeExecPoll}
-              onForceRefreshExec={handleForceRefreshExec}
-              onConfirmExec={confirmExec}
-              rawAssetsVisualDnaText={rawAssetsVisualDnaText}
-              rawSplitEpisodesText={rawSplitEpisodesText}
-            />
-          ) : null}
-
-          {selected.kind === 'scene' && selectedScene ? (
-            <SceneEditor
-              scene={selectedScene}
-              sceneText={sceneText}
-              busy={busy === 'save_scene'}
-              onSceneTextChange={setSceneText}
-              onCreateShot={createShot}
-              onSave={saveScene}
-              onSelectShot={(shotId) => setSelected({ kind: 'shot', episodeId: selected.episodeId, sceneId: selected.sceneId, shotId })}
-              selectedShotId={selectedShot?.id || null}
-            />
-          ) : null}
-
-          {selected.kind === 'shot' && selectedShot && shotDraft ? (
-            <ShotEditor shot={selectedShot} shotDraft={shotDraft} busy={busy === 'save_shot'} onDraftChange={setShotDraft} onSave={saveShot} />
+            <>
+              {selected.step === 0 && (
+                 <Step0_Script 
+                   text={episodeText}
+                   onChange={setEpisodeText}
+                   onNext={goToStep1AndRun}
+                   busy={busy === 'save_episode'}
+                 />
+               )}
+               {selected.step === 1 && (
+                 <Step1_Structure
+                   rawText={rawOutlineText} 
+                   onNext={goToStep2AndRun}
+                   busy={execBusy}
+                 />
+               )}
+               {selected.step === 2 && (
+                 <Step2_Assets
+                   rawText={rawAssetsVisualDnaText}
+                   busy={execBusy}
+                 />
+               )}
+            </>
           ) : null}
         </div>
       </div>
@@ -902,11 +751,15 @@ const styles: Record<string, React.CSSProperties> = {
   },
   body: {
     display: 'grid',
-    gridTemplateColumns: '320px 1fr',
+    gridTemplateColumns: '280px 1fr', // Sidebar width
     gap: 12,
     alignItems: 'start',
+    height: 'calc(100vh - 80px)', // Full height minus header/topbar
   },
-  main: {},
+  main: {
+    height: '100%',
+    overflow: 'hidden', // Let children handle scrolling
+  },
   empty: {
     border: '1px dashed rgba(255,255,255,0.2)',
     borderRadius: 12,
