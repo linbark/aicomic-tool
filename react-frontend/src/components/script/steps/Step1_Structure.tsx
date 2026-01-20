@@ -1,5 +1,5 @@
 import { memo, useState, useMemo } from 'react'
-import { SharedStepLayout } from './SharedStepLayout'
+import { SharedStepLayout, CanvasDraggablePanel } from './SharedStepLayout'
 import { Button } from '../../ui/Button'
 
 type Step1Props = {
@@ -87,53 +87,73 @@ export const Step1_Structure = memo(function Step1_Structure({
       busy={busy}
       enableInfiniteCanvas={true}
     >
-      <div
-        style={{
-          padding: 100,
-          minHeight: '100%',
-          display: 'flex',
-          flexWrap: 'wrap',
-          gap: 20,
-          justifyContent: 'center',
-          width: 1200,
-          maxWidth: '100%',
-          margin: '0 auto',
-        }}
-      >
-        {cards.length > 0 ? (
-          cards.map((card, idx) => (
-            <div key={idx} style={styles.card}>
-              <div style={styles.cardTitle}>{card.title}</div>
-              <div style={styles.cardContent}>{card.content}</div>
-            </div>
-          ))
-        ) : (
-          !busy && <div style={{ opacity: 0.5, marginTop: 100 }}>等待生成结构化数据...</div>
-        )}
-      </div>
+      {cards.length > 0 ? (
+        <div style={styles.board}>
+          {cards.map((card, idx) => {
+            const col = idx % 3
+            const row = Math.floor(idx / 3)
+            const left = 120 + col * 360
+            const top = 120 + row * 260
+            return (
+              <CanvasDraggablePanel
+                key={idx}
+                disabled={busy}
+                panelStyle={{
+                  ...styles.card,
+                  position: 'absolute',
+                  left,
+                  top,
+                }}
+              >
+                <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+                  <div data-aicomic-drag-handle="true" style={styles.cardTitleBar}>
+                    {card.title}
+                  </div>
+                  <div style={styles.cardContent}>{card.content}</div>
+                </div>
+              </CanvasDraggablePanel>
+            )
+          })}
+        </div>
+      ) : (
+        !busy && <div style={{ opacity: 0.5, marginTop: 100, padding: 100 }}>等待生成结构化数据...</div>
+      )}
     </SharedStepLayout>
   )
 })
 
 const styles: Record<string, React.CSSProperties> = {
+  board: {
+    position: 'relative',
+    width: 1400,
+    height: 1000,
+  },
   card: {
     width: 300,
     background: 'rgba(255,255,255,0.05)',
     border: '1px solid rgba(255,255,255,0.1)',
     borderRadius: 8,
-    padding: 16,
     boxShadow: '0 4px 6px rgba(0,0,0,0.2)',
+    overflow: 'hidden',
   },
-  cardTitle: {
+  cardTitleBar: {
+    padding: '10px 12px',
     fontSize: 14,
     fontWeight: 700,
-    marginBottom: 8,
     color: '#fff',
+    cursor: 'grab',
+    userSelect: 'none',
+    touchAction: 'none',
+    background: 'rgba(255,255,255,0.04)',
+    borderBottom: '1px solid rgba(255,255,255,0.08)',
   },
   cardContent: {
+    padding: 12,
     fontSize: 12,
     opacity: 0.8,
     lineHeight: 1.5,
     whiteSpace: 'pre-wrap',
+    maxHeight: 240,
+    overflow: 'auto',
   }
 }

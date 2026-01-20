@@ -49,7 +49,7 @@ def create_episode(project_id: str, episode: schemas.EpisodeCreate, db: Session 
     return db_ep
 
 # 2.1 更新集
-@router.patch("/episode/{episode_id}", response_model=schemas.EpisodeRead)
+@router.patch("/episode/{episode_id}", response_model=schemas.EpisodeReadLite)
 def update_episode(episode_id: int, episode_update: schemas.EpisodeUpdate, db: Session = Depends(get_db)):
     db_ep = db.query(models.Episode).filter(models.Episode.id == episode_id).first()
     if not db_ep:

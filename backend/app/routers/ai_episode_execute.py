@@ -242,27 +242,11 @@ async def _run_until_interrupt(
                 db=db,
                 project_id_pk=project_id_pk,
                 episode_id=episode_id,
-                exec_status="waiting_outline_confirm",
+                exec_status="running",
                 exec_artifacts=artifacts,
             )
-            emitter.status("paused", waiting_for="confirm_outline")
-            _write_interrupt_state(
-                project_id_pk=project_id_pk,
-                run_id=run_id,
-                interrupt={
-                    "kind": "confirm_outline",
-                    "resume_state": {
-                        "project_id_pk": project_id_pk,
-                        "project_id": project_uuid,
-                        "episode_id": episode_id,
-                        "run_id": run_id,
-                        "script_text": script_text,
-                        "step_index": step_index + 1,
-                        "artifacts": artifacts,
-                    },
-                },
-            )
-            return
+            step_index += 1
+            continue
 
         if ak == "episode_assets_visual_dna":
             in_text = "\n\n".join(
@@ -292,27 +276,11 @@ async def _run_until_interrupt(
                 db=db,
                 project_id_pk=project_id_pk,
                 episode_id=episode_id,
-                exec_status="waiting_assets_confirm",
+                exec_status="running",
                 exec_artifacts=artifacts,
             )
-            emitter.status("paused", waiting_for="confirm_assets")
-            _write_interrupt_state(
-                project_id_pk=project_id_pk,
-                run_id=run_id,
-                interrupt={
-                    "kind": "confirm_assets",
-                    "resume_state": {
-                        "project_id_pk": project_id_pk,
-                        "project_id": project_uuid,
-                        "episode_id": episode_id,
-                        "run_id": run_id,
-                        "script_text": script_text,
-                        "step_index": step_index + 1,
-                        "artifacts": artifacts,
-                    },
-                },
-            )
-            return
+            step_index += 1
+            continue
 
         if ak == "episode_split_episodes":
             in_text = "\n\n".join(
@@ -348,6 +316,11 @@ async def _run_until_interrupt(
                 exec_artifacts=artifacts,
             )
             emitter.status("paused", waiting_for="confirm_split")
+            emitter.log(
+                stage="episode_execute.pause",
+                summary="等待确认：confirm_split",
+                data={"step_index": int(step_index), "action_key": ak, "waiting_for": "confirm_split"},
+            )
             _write_interrupt_state(
                 project_id_pk=project_id_pk,
                 run_id=run_id,
@@ -428,6 +401,11 @@ async def _run_until_interrupt(
                 exec_artifacts=artifacts,
             )
             emitter.status("paused", waiting_for="confirm_ingest")
+            emitter.log(
+                stage="episode_execute.pause",
+                summary="等待确认：confirm_ingest",
+                data={"step_index": int(step_index), "action_key": ak, "waiting_for": "confirm_ingest"},
+            )
             _write_interrupt_state(
                 project_id_pk=project_id_pk,
                 run_id=run_id,
@@ -897,6 +875,12 @@ def episode_execute_confirm(episode_id: int, req: EpisodeExecuteConfirmRequest, 
     if not isinstance(resume_state, dict):
         raise HTTPException(status_code=409, detail="Invalid resume_state")
     kind = str(interrupt.get("kind") or "")
+    emitter = StageEmitter(project_id=project_id_pk, run_id=run_id, emit_stages=True)
+    emitter.log(
+        stage="episode_execute.confirm",
+        summary="收到确认请求",
+        data={"decision": decision, "kind": kind, "episode_id": int(episode_id)},
+    )
 
     artifacts = resume_state.get("artifacts")
     if not isinstance(artifacts, dict):

@@ -98,6 +98,19 @@ class EpisodeRead(BaseModel):
     scenes: List[SceneRead] = []
     class Config: from_attributes = True
 
+class EpisodeReadLite(BaseModel):
+    id: int
+    title: str
+    order: int
+    description: Optional[str] = None
+    action_text: Optional[str] = None
+    prompt: Optional[str] = None
+    script_locked: bool = False
+    last_exec_run_id: Optional[str] = None
+    exec_status: str = "idle"
+    exec_artifacts: Optional[dict] = None
+    class Config: from_attributes = True
+
 class EpisodeCreate(BaseModel):
     title: str
     order: int = 0

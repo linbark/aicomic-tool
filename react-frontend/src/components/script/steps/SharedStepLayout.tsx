@@ -110,7 +110,7 @@ const DraggablePanel = ({
   )
 }
 
-const CanvasDraggablePanel = ({
+export const CanvasDraggablePanel = ({
   children,
   panelStyle,
   disabled,

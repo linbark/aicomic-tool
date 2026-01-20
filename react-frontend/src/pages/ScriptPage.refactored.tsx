@@ -15,7 +15,7 @@ import { DebugWindow } from '../components/script/DebugWindow'
 import { Button } from '../components/ui/Button'
 import { Input } from '../components/ui/Input'
 import type { Selected, ChatRunUi, DebugLog, BusyState, DeletingState } from '../components/script/types'
-import { now, lsSet, extractErrorMessage } from '../components/script/utils'
+import { now, lsGet, lsSet, extractErrorMessage } from '../components/script/utils'
 import { panelStyle } from '../styles/shared'
 
 export function ScriptPage() {
@@ -37,10 +37,12 @@ export function ScriptPage() {
   const [execRun, setExecRun] = useState<ChatRunUi | null>(null)
   const [execPollPaused, setExecPollPaused] = useState(false)
   const [execBusy, setExecBusy] = useState(false)
+  const [execWaitingFor, setExecWaitingFor] = useState<string | null>(null)
   const [rawAssetsVisualDnaText, setRawAssetsVisualDnaText] = useState<string>('')
   const [rawOutlineText, setRawOutlineText] = useState<string>('')
   const lastAssetsRawTsRef = useRef(0)
   const lastOutlineRawTsRef = useRef(0)
+  const selectedEpisodeIdRef = useRef<number | null>(null)
 
   // Debug window
   const [debugLogs, setDebugLogs] = useState<DebugLog[]>([])
@@ -53,6 +55,18 @@ export function ScriptPage() {
 
   const episodeDirtyForIdRef = useRef<number | null>(null)
   const lastSelectionKeyRef = useRef<string>('')
+  const lastUiStatusRef = useRef<string>('')
+  const lastUiWaitingForRef = useRef<string>('')
+
+  const pushUiLog = useCallback((level: string, text: string) => {
+    setDebugLogs((prev) => {
+      const ts = Date.now()
+      const id = `ui.${ts}.${Math.random().toString(16).slice(2)}`
+      const next = [...prev, { id, ts, level, text }]
+      next.sort((a, b) => a.ts - b.ts)
+      return next
+    })
+  }, [])
 
   const selectedEpisode = useMemo(() => {
     if (selected.kind === 'episode') return episodes.find((e) => e.id === selected.episodeId) || null
@@ -81,52 +95,51 @@ export function ScriptPage() {
     else setEpisodes([])
   }, [projectId, refreshScript])
 
-  // Initial data fetch when selecting an episode
-  useEffect(() => {
-    if (selected.kind === 'episode' && projectId) {
-        // Fetch existing artifacts for this episode
-        const ep = episodes.find(e => e.id === selected.episodeId)
-        if (ep?.last_exec_run_id) {
-             const runId = String(ep.last_exec_run_id)
-             // Fetch latest data if available
-             api.getRunStage(projectId, runId, 'episode_outline_generate.raw')
-                .then(res => {
-                    const data = (res.data as any)?.data || {}
-                    const text = typeof data?.text === 'string' ? data.text : ''
-                    if (text) setRawOutlineText(text)
-                }).catch(() => {})
-
-             api.getRunStage(projectId, runId, 'episode_assets_visual_dna.raw')
-                .then(res => {
-                    const data = (res.data as any)?.data || {}
-                    const text = typeof data?.text === 'string' ? data.text : ''
-                    if (text) setRawAssetsVisualDnaText(text)
-                }).catch(() => {})
-        }
-    }
-  }, [selected, projectId, episodes])
-
   // Sync editors when selection changes
   useEffect(() => {
     const key =
       selected.kind === 'episode'
-        ? `episode:${selected.episodeId}:step:${selected.step}`
+        ? `episode:${selected.episodeId}`
         : 'none'
     const selectionChanged = key !== lastSelectionKeyRef.current
     if (selectionChanged) lastSelectionKeyRef.current = key
 
     if (selected.kind === 'episode') {
+      selectedEpisodeIdRef.current = selected.episodeId
       const ep = episodes.find((e) => e.id === selected.episodeId)
       if (selectionChanged) {
         setEpisodeText(String(ep?.description || ''))
-        setRawAssetsVisualDnaText('')
-        setRawOutlineText('')
+        const cachedOutline = projectId ? lsGet(`aicomic.episode_outline_raw.${projectId}.${selected.episodeId}`) : null
+        const cachedAssets = projectId ? lsGet(`aicomic.episode_assets_raw.${projectId}.${selected.episodeId}`) : null
+
+        const artifacts = (ep as any)?.exec_artifacts
+        const outlineFromArtifacts =
+          artifacts && typeof artifacts === 'object' && artifacts !== null ? (artifacts as any).outline : null
+        const assetsFromArtifacts =
+          artifacts && typeof artifacts === 'object' && artifacts !== null ? (artifacts as any).assets_visual_dna : null
+
+        const outlineText =
+          typeof cachedOutline === 'string' && cachedOutline.trim()
+            ? cachedOutline
+            : outlineFromArtifacts && typeof outlineFromArtifacts === 'object'
+              ? JSON.stringify(outlineFromArtifacts, null, 2)
+              : ''
+        const assetsText =
+          typeof cachedAssets === 'string' && cachedAssets.trim()
+            ? cachedAssets
+            : assetsFromArtifacts && typeof assetsFromArtifacts === 'object'
+              ? JSON.stringify(assetsFromArtifacts, null, 2)
+              : ''
+
+        setRawOutlineText(outlineText)
+        setRawAssetsVisualDnaText(assetsText)
         lastAssetsRawTsRef.current = 0
         lastOutlineRawTsRef.current = 0
         lastFinalTsRef.current = 0
         lastInterruptTsRef.current = 0
         fetchedLogIdsRef.current.clear()
         setDebugLogs([])
+        setExecWaitingFor(null)
         if (ep?.last_exec_run_id) {
           setExecRun({
             runId: String(ep.last_exec_run_id),
@@ -150,8 +163,10 @@ export function ScriptPage() {
     }
     
     if (selectionChanged) {
+      selectedEpisodeIdRef.current = null
       setEpisodeText('')
       setExecRun(null)
+      setExecWaitingFor(null)
     }
   }, [selected, episodes, projectId])
 
@@ -182,7 +197,11 @@ export function ScriptPage() {
                 if (!alive) return
                 const data = (res.data as any)?.data || {}
                 const text = typeof data?.text === 'string' ? data.text : ''
-                if (text) setRawAssetsVisualDnaText(text)
+                if (text) {
+                  setRawAssetsVisualDnaText(text)
+                  const eid = selectedEpisodeIdRef.current
+                  if (eid != null) lsSet(`aicomic.episode_assets_raw.${pid}.${eid}`, text)
+                }
               })
               .catch(() => {})
           }
@@ -197,7 +216,11 @@ export function ScriptPage() {
                 if (!alive) return
                 const data = (res.data as any)?.data || {}
                 const text = typeof data?.text === 'string' ? data.text : ''
-                if (text) setRawOutlineText(text)
+                if (text) {
+                  setRawOutlineText(text)
+                  const eid = selectedEpisodeIdRef.current
+                  if (eid != null) lsSet(`aicomic.episode_outline_raw.${pid}.${eid}`, text)
+                }
               })
               .catch(() => {})
           }
@@ -241,6 +264,24 @@ export function ScriptPage() {
           const atMs = typeof sd?.at_ms === 'number' ? Number(sd.at_ms) : null
           const curIdx = typeof sd?.current_step_index === 'number' ? Number(sd.current_step_index) : null
           const curAk = sd?.current_action_key ? String(sd.current_action_key) : null
+          const waitingFor = sd?.waiting_for ? String(sd.waiting_for) : null
+          if (alive && typeof s === 'string') {
+            if (s !== lastUiStatusRef.current) {
+              lastUiStatusRef.current = s
+              if (s === 'done') pushUiLog('SUCCESS', '后台执行完成')
+              if (s === 'error') pushUiLog('ERROR', '后台执行失败（可在上方查看错误详情）')
+              if (s === 'timeout') pushUiLog('ERROR', '后台执行超时（可尝试重试或调整模型超时设置）')
+            }
+            if (s === 'paused' && waitingFor && waitingFor !== lastUiWaitingForRef.current) {
+              lastUiWaitingForRef.current = waitingFor
+              pushUiLog('INFO', `后台已暂停，等待确认：${waitingFor}（step=${curIdx ?? '-'} ${curAk || ''}）`)
+            }
+          }
+          if (s === 'paused' && waitingFor) {
+            setExecWaitingFor(waitingFor)
+          } else if (s && s !== 'paused') {
+            setExecWaitingFor(null)
+          }
           if (s && alive) {
             setExecRun((prev) => {
               if (!prev) return prev
@@ -373,7 +414,7 @@ export function ScriptPage() {
       alive = false
       window.clearInterval(timer)
     }
-  }, [projectId, execRun?.runId, execPollPaused, refreshScript])
+  }, [projectId, execRun?.runId, execPollPaused, refreshScript, pushUiLog])
 
   useEffect(() => {
     if (autoScrollEnabled && debugLogs.length > 0) {
@@ -382,17 +423,6 @@ export function ScriptPage() {
       setHasNewLogs(true)
     }
   }, [debugLogs, autoScrollEnabled])
-
-  // Action handlers
-  const pushUiLog = useCallback((level: string, text: string) => {
-    setDebugLogs((prev) => {
-      const ts = Date.now()
-      const id = `ui.${ts}.${Math.random().toString(16).slice(2)}`
-      const next = [...prev, { id, ts, level, text }]
-      next.sort((a, b) => a.ts - b.ts)
-      return next
-    })
-  }, [])
 
   const saveEpisode = useCallback(async () => {
     if (!projectId || selected.kind !== 'episode') return
@@ -481,6 +511,7 @@ export function ScriptPage() {
     setExecBusy(true)
     setError(null)
     try {
+      pushUiLog('INFO', `执行请求准备中：status=${execRun?.status || 'none'} waiting=${execWaitingFor || '-'}`)
       pushUiLog('INFO', '开始执行：结构拆解（准备保存剧本并启动后端执行）')
       // Always update script before execution
       try {
@@ -528,6 +559,8 @@ export function ScriptPage() {
       setExecPollPaused(false)
       lastFinalTsRef.current = 0
       lastInterruptTsRef.current = 0
+      lastUiStatusRef.current = ''
+      lastUiWaitingForRef.current = ''
       setDebugLogs([])
       fetchedLogIdsRef.current.clear()
       setExecBusy(false)
@@ -538,12 +571,14 @@ export function ScriptPage() {
     } finally {
       setExecBusy(false)
     }
-  }, [episodeText, projectId, refreshScript, selected, selectedEpisode])
+  }, [episodeText, execRun?.status, execWaitingFor, projectId, refreshScript, selected, pushUiLog])
 
   // Auto-run logic: If entering Step 1, 2, or 3 and data is missing but script exists, trigger execution
   useEffect(() => {
     if (selected.kind !== 'episode' || !selectedEpisode) return
-    if (execBusy || execRun?.status === 'running' || execRun?.status === 'queued') return
+    if (execBusy || execRun?.status === 'running' || execRun?.status === 'queued' || execRun?.status === 'paused') return
+    const st = String(selectedEpisode.exec_status || '')
+    if (st.startsWith('waiting_')) return
     if (!episodeText.trim()) return // Don't run if script is empty
 
     // Debounce slightly to avoid rapid triggers on selection change
@@ -588,13 +623,12 @@ export function ScriptPage() {
       setSelected({ ...selected, step: 1 })
       // 3. Execution is handled by useEffect auto-run logic when switching to step 1
       setRawOutlineText('') 
-  }, [selected, selectedEpisode, saveEpisode])
+  }, [selected, saveEpisode])
 
-  const goToStep2AndRun = useCallback(() => {
-      if (selected.kind !== 'episode') return
-      setSelected({ ...selected, step: 2 })
-      // Force run by clearing data so auto-run triggers
-      setRawAssetsVisualDnaText('')
+  const goToStep2AndRun = useCallback(async () => {
+    if (selected.kind !== 'episode') return
+    setSelected({ ...selected, step: 2 })
+    setRawAssetsVisualDnaText('')
   }, [selected])
 
   return (

@@ -177,6 +177,94 @@ def test_episode_execute_asset_ingest_plan_and_apply(project_ids):
         db.close()
 
 
+def test_episode_execute_skips_outline_and_assets_confirm(monkeypatch, project_ids):
+    import json
+    from pathlib import Path
+    from types import SimpleNamespace
+    import anyio
+
+    from app import models
+    from app.database import SessionLocal
+    from app.services.chat_graph import StageEmitter
+    from app.services.context_store import ContextStore
+    import app.routers.ai_episode_execute as exe
+
+    async def _fake_chat(*, settings, messages):
+        return json.dumps(
+            {
+                "logline": "x",
+                "characters": [],
+                "act_1": "",
+                "act_2": "",
+                "act_3": "",
+                "key_beats": [],
+            },
+            ensure_ascii=False,
+        )
+
+    async def _fake_llm_json(*, system_prompt, user_prompt, project_id_pk, run_id, raw_stage):
+        if raw_stage == "episode_split_episodes.raw":
+            return {"episodes": []}
+        return {"characters": [], "props": [], "locations": [], "series_style": {}}
+
+    def _fake_mask_settings(raw):
+        return SimpleNamespace(
+            has_api_key=True,
+            base_url="http://localhost",
+            model="m",
+            temperature=0.1,
+            max_tokens=256,
+            timeout_seconds=5,
+        )
+
+    monkeypatch.setattr(
+        exe,
+        "_read_settings_raw",
+        lambda: {"api_key": "k", "base_url": "http://localhost", "model": "m", "temperature": 0.1, "max_tokens": 256, "timeout_seconds": 5},
+        raising=True,
+    )
+    monkeypatch.setattr(exe, "_mask_settings", _fake_mask_settings, raising=True)
+    monkeypatch.setattr(exe._chat_client, "chat", _fake_chat, raising=True)
+    monkeypatch.setattr(exe, "_llm_json", _fake_llm_json, raising=True)
+
+    db = SessionLocal()
+    try:
+        pid = int(project_ids["pk"])
+        ep = models.Episode(project_id=pid, title="E3", order=3, description="S")
+        db.add(ep)
+        db.commit()
+        db.refresh(ep)
+
+        run_id = "run_test_ep_execute_no_outline_assets_confirm"
+        emitter = StageEmitter(project_id=pid, run_id=run_id, emit_stages=False)
+        artifacts = {"script_text": "第一段。\n\n第二段。"}
+
+        anyio.run(
+            lambda: exe._run_until_interrupt(
+                project_id_pk=pid,
+                project_uuid=str(project_ids["uuid"]),
+                episode_id=int(ep.id),
+                run_id=run_id,
+                script_text=str(artifacts["script_text"]),
+                start_step_index=0,
+                artifacts=artifacts,
+                emitter=emitter,
+                db=db,
+            )
+        )
+
+        store = ContextStore()
+        interrupt_path = store.stage_path(project_id=pid, run_id=run_id, stage_name="chat.interrupt")
+        data = json.loads(Path(interrupt_path).read_text(encoding="utf-8"))
+        assert data.get("kind") == "confirm_split"
+        resume_state = data.get("resume_state") or {}
+        resume_artifacts = resume_state.get("artifacts") or {}
+        assert "outline" in resume_artifacts
+        assert "assets_visual_dna" in resume_artifacts
+    finally:
+        db.close()
+
+
 def test_episode_execute_step4_creates_changeset_and_interrupt(monkeypatch, project_ids):
     import json
     from pathlib import Path
@@ -261,5 +349,57 @@ def test_episode_execute_step4_creates_changeset_and_interrupt(monkeypatch, proj
         assert isinstance(ra, dict)
         assert str(ra.get("changeset_id") or "").strip() == csid
         assert isinstance(ra.get("asset_ingest_plan"), dict)
+    finally:
+        db.close()
+
+
+def test_episode_execute_confirm_emits_log(client, project_ids):
+    from app import models
+    from app.database import SessionLocal
+    from app.services.context_store import ContextStore
+    import app.routers.ai_episode_execute as exe
+
+    db = SessionLocal()
+    try:
+        pid = int(project_ids["pk"])
+        ep = models.Episode(project_id=pid, title="E2", order=2, description="S")
+        db.add(ep)
+        db.commit()
+        db.refresh(ep)
+
+        run_id = "run_test_ep_confirm_1"
+        exe._write_interrupt_state(
+            project_id_pk=pid,
+            run_id=run_id,
+            interrupt={
+                "kind": "confirm_outline",
+                "resume_state": {
+                    "project_id_pk": pid,
+                    "project_id": project_ids["uuid"],
+                    "episode_id": int(ep.id),
+                    "run_id": run_id,
+                    "script_text": "",
+                    "step_index": 1,
+                    "artifacts": {},
+                },
+            },
+        )
+
+        res = client.post(
+            f"/ai/episode-execute/{int(ep.id)}/confirm",
+            json={"decision": "rejected", "run_id": run_id},
+        )
+        assert res.status_code == 200
+
+        store = ContextStore()
+        stages = store.list_stages(project_id=pid, run_id=run_id)
+        log_names = [s["name"] for s in stages if str(s.get("name") or "").startswith("log.")]
+        found = False
+        for name in log_names:
+            data = store.read_stage(project_id=pid, run_id=run_id, stage_name=name) or {}
+            if data.get("stage") == "episode_execute.confirm":
+                found = True
+                break
+        assert found
     finally:
         db.close()
