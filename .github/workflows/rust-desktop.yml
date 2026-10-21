@@ -1,0 +1,92 @@
+name: Rust desktop
+
+on:
+  workflow_dispatch:
+  push:
+    paths: ["crates/**", "Cargo.toml", "Cargo.lock", "packaging/**", ".github/workflows/rust-desktop.yml"]
+  pull_request:
+    paths: ["crates/**", "Cargo.toml", "Cargo.lock", "packaging/**", ".github/workflows/rust-desktop.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            artifact: macos-arm64
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            artifact: macos-x64
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            artifact: windows-x64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    env:
+      CARGO_TERM_COLOR: always
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: "-C target-feature=+crt-static"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+          components: rustfmt, clippy
+      - name: Static release independence
+        if: runner.os == 'macOS'
+        run: bash packaging/check-release.sh --self-test
+      - name: Formatting
+        run: cargo fmt --all -- --check
+      - name: Tests
+        run: cargo test --locked --workspace --all-targets --target ${{ matrix.target }}
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets --target ${{ matrix.target }} -- -D warnings
+      - name: Release binary
+        run: cargo build --locked --release -p aicomic-desktop --target ${{ matrix.target }}
+      - name: Package macOS app and DMG
+        if: runner.os == 'macOS'
+        run: bash packaging/macos/package.sh --skip-build --target ${{ matrix.target }}
+      - name: Verify macOS packaged executable
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          check_dir="$(mktemp -d)"
+          "dist/${{ matrix.artifact }}/星晴.app/Contents/MacOS/aicomic-tool" --data-dir "$check_dir" --smoke-test
+          rm -rf "$check_dir"
+      - name: Install NSIS
+        if: runner.os == 'Windows'
+        run: choco install nsis --yes --no-progress
+      - name: Package Windows executable and installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./packaging/windows/package.ps1 -SkipBuild -Target ${{ matrix.target }}
+      - name: Verify Windows executable and per-user install/uninstall
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $dataDir = Join-Path $env:RUNNER_TEMP "xingqing-smoke"
+          $smoke = Start-Process "target/${{ matrix.target }}/release/aicomic-tool.exe" -ArgumentList "--data-dir", $dataDir, "--smoke-test" -Wait -PassThru
+          if ($smoke.ExitCode -ne 0) { throw "Executable smoke test failed." }
+          $installer = Get-ChildItem "dist/windows-x64/*-setup.exe" | Select-Object -First 1
+          $installDir = Join-Path $env:RUNNER_TEMP "xingqing-install"
+          $installed = Start-Process $installer.FullName -ArgumentList "/S", "/D=$installDir" -Wait -PassThru
+          if ($installed.ExitCode -ne 0 -or -not (Test-Path "$installDir/aicomic-tool.exe")) { throw "Per-user installation failed." }
+          $smoke = Start-Process "$installDir/aicomic-tool.exe" -ArgumentList "--data-dir", $dataDir, "--smoke-test" -Wait -PassThru
+          if ($smoke.ExitCode -ne 0) { throw "Installed executable smoke test failed." }
+          $removed = Start-Process "$installDir/Uninstall.exe" -ArgumentList "/S", "_?=$installDir" -Wait -PassThru
+          if ($removed.ExitCode -ne 0 -or (Test-Path "$installDir/aicomic-tool.exe")) { throw "Uninstall failed." }
+          if (-not (Test-Path "$dataDir/database.db")) { throw "Uninstall unexpectedly removed user data." }
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Xingqing-${{ matrix.artifact }}
+          if-no-files-found: error
+          path: |
+            dist/${{ matrix.artifact }}/*.dmg
+            dist/${{ matrix.artifact }}/*.zip
+            dist/${{ matrix.artifact }}/*.exe

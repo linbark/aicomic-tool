@@ -72,6 +72,7 @@ coverage/
 target/
 **/*.rs.bk
 Cargo.lock
+!/Cargo.lock
 
 # Database
 *.db
@@ -83,6 +84,8 @@ Cargo.lock
 logs/
 
 # Project Specific
+/demo-data/
+/smoke-data/
 # Ignore user generated projects but keep the directory structure if needed
 projects/*
 !projects/.gitkeep

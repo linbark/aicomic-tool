@@ -1,0 +1,27 @@
+[package]
+name = "aicomic-memory"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+
+[features]
+default = []
+local-bge = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers"]
+
+[dependencies]
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+uuid = { version = "1", features = ["v4"] }
+sha2 = "0.10"
+sha1 = "0.10"
+tokio = { version = "1", features = ["rt", "sync"] }
+tempfile = "3"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+candle-core = { version = "0.9", optional = true }
+candle-nn = { version = "0.9", optional = true }
+candle-transformers = { version = "0.9", optional = true }
+tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"], optional = true }
+
+[dev-dependencies]
