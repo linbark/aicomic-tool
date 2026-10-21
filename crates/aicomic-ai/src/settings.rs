@@ -4,9 +4,43 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{fmt, path::Path};
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AiProvider {
+    #[default]
+    #[serde(rename = "openai")]
+    OpenAi,
+    #[serde(rename = "google")]
+    Google,
+}
+impl AiProvider {
+    pub const ALL: [Self; 2] = [Self::OpenAi, Self::Google];
+
+    pub fn default_base_url(self) -> &'static str {
+        match self {
+            Self::OpenAi => "https://api.deepseek.com",
+            Self::Google => "https://generativelanguage.googleapis.com/v1beta",
+        }
+    }
+    pub fn default_model(self) -> &'static str {
+        match self {
+            Self::OpenAi => "deepseek-chat",
+            Self::Google => "gemini-flash-latest",
+        }
+    }
+}
+impl fmt::Display for AiProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::OpenAi => "OpenAI 兼容",
+            Self::Google => "Google AI / Gemini",
+        })
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AiSettings {
+    pub provider: AiProvider,
     pub api_key: String,
     pub base_url: String,
     pub model: String,
@@ -17,9 +51,10 @@ pub struct AiSettings {
 impl Default for AiSettings {
     fn default() -> Self {
         Self {
+            provider: AiProvider::default(),
             api_key: String::new(),
-            base_url: "https://api.deepseek.com".into(),
-            model: "deepseek-chat".into(),
+            base_url: AiProvider::default().default_base_url().into(),
+            model: AiProvider::default().default_model().into(),
             temperature: 0.2,
             max_tokens: None,
             timeout_seconds: 120.0,
@@ -29,6 +64,7 @@ impl Default for AiSettings {
 impl fmt::Debug for AiSettings {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AiSettings")
+            .field("provider", &self.provider)
             .field("api_key", &if self.api_key.is_empty() { "" } else { "***" })
             .field("base_url", &self.base_url)
             .field("model", &self.model)
@@ -42,6 +78,11 @@ impl AiSettings {
     pub fn load(root: &Path) -> Result<Self> {
         let raw = read_json(&root.join("ai_settings.json"))?.unwrap_or(json!({}));
         let defaults = Self::default();
+        let provider = raw
+            .get("provider")
+            .map(|value| serde_json::from_value::<AiProvider>(value.clone()))
+            .transpose()?
+            .unwrap_or_default();
         let text = |key: &str, fallback: String| {
             raw[key]
                 .as_str()
@@ -50,9 +91,10 @@ impl AiSettings {
                 .unwrap_or(fallback)
         };
         Ok(Self {
+            provider,
             api_key: text("api_key", String::new()),
-            base_url: text("base_url", defaults.base_url),
-            model: text("model", defaults.model),
+            base_url: text("base_url", provider.default_base_url().into()),
+            model: text("model", provider.default_model().into()),
             temperature: raw["temperature"].as_f64().unwrap_or(defaults.temperature),
             max_tokens: raw["max_tokens"]
                 .as_u64()
@@ -83,9 +125,12 @@ impl AiSettings {
         self.max_tokens.filter(|n| *n > 0).unwrap_or(8192).min(8192)
     }
     pub fn masked(&self) -> Value {
-        json!({"has_api_key": !self.api_key.trim().is_empty(), "base_url": self.base_url, "model": self.model, "temperature": self.temperature, "max_tokens": self.max_tokens, "timeout_seconds": self.timeout_seconds})
+        json!({"provider": self.provider, "has_api_key": !self.api_key.trim().is_empty(), "base_url": self.base_url, "model": self.model, "temperature": self.temperature, "max_tokens": self.max_tokens, "timeout_seconds": self.timeout_seconds})
     }
     pub fn validate(&self) -> Result<()> {
+        if self.model.trim().is_empty() {
+            return Err(AiError::InvalidInput("AI 模型名称不能为空".into()));
+        }
         if !self.timeout_seconds.is_finite()
             || self.timeout_seconds <= 0.0
             || self.timeout_seconds > 86400.0

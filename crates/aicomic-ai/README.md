@@ -82,8 +82,10 @@ Visual DNA 保留原服务的能力限制：当前 provider 是文本 chat，只
 - Context 保留原 `projects/{pk}/context/*.v1.json` 格式。
 - 文件先写临时文件再替换；Unix 配置/快照文件权限为 `0600`；调试输出遮盖 API key。
 - OpenAI 兼容 `/v1/chat/completions`；支持 base URL 已带 `/v1` 或完整 endpoint。
+- `AiSettings.provider` 为 `openai`（旧配置默认）或 `google`。Google 使用原生 `models/{model}:generateContent`，默认模型 `gemini-flash-latest`，以 `x-goog-api-key` 请求头认证；密钥不进入 URL。见 [Google 接口文档](https://ai.google.dev/api/generate-content)。
+- Google 的 system/developer 消息映射到 `systemInstruction`，assistant 映射为 `model`；输出仅拼接非 thought 文本，拒绝被拦截或不完整的回复。此适配只发送文本，不发送图片或调用工具。
 - reqwest 使用 rustls；超时/网络断流至多 3 次请求，350ms/700ms 退避；HTTP 错误直接返回。
-- 发送输出上限按原逻辑归一化为最多 8192；`length/max_tokens` 或明显未闭合 JSON 返回截断错误。
+- 发送输出上限按原逻辑归一化为最多 8192；`length/max_tokens/MAX_TOKENS` 或明显未闭合 JSON 返回截断错误。Google 的连接探测预留 1024 tokens（包含思考额度），OpenAI 兼容探测为 8 tokens。
 - 结构化动作支持 fenced JSON/前后说明提取；根类型错误使用同一模型修复一次，原始输出始终保留。
 - ShotSpec/Prompt 对数量和受控参数进行校验；schema 不满足时明确失败，不自动补造有效镜头。
 

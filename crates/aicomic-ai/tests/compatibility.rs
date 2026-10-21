@@ -1,4 +1,4 @@
-use aicomic_ai::{AiSettings, ContextStore, PromptRegistry, extract_json};
+use aicomic_ai::{AiProvider, AiSettings, ContextStore, PromptRegistry, extract_json};
 use serde_json::json;
 
 #[test]
@@ -11,12 +11,66 @@ fn old_settings_load_defaults_and_never_debug_print_the_key() {
     .unwrap();
     let settings = AiSettings::load(root.path()).unwrap();
     assert_eq!(settings.api_key, "secret-key");
+    assert_eq!(settings.provider, AiProvider::OpenAi);
     assert_eq!(settings.temperature, 0.0);
     assert_eq!(settings.normalized_max_tokens(), 8192);
     assert_eq!(settings.base_url, "https://api.deepseek.com");
     assert!(!format!("{settings:?}").contains("secret-key"));
     assert_eq!(settings.masked()["has_api_key"], true);
     assert!(settings.masked().get("api_key").is_none());
+}
+
+#[test]
+fn google_settings_use_native_defaults_and_preserve_other_local_fields() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("ai_settings.json");
+    std::fs::write(
+        &path,
+        r#"{"provider":"google","api_key":"mock-google-key","custom_option":true}"#,
+    )
+    .unwrap();
+    let settings = AiSettings::load(root.path()).unwrap();
+    assert_eq!(settings.provider, AiProvider::Google);
+    assert_eq!(
+        settings.base_url,
+        "https://generativelanguage.googleapis.com/v1beta"
+    );
+    assert_eq!(settings.model, "gemini-flash-latest");
+    assert_eq!(settings.masked()["provider"], "google");
+    assert!(!format!("{settings:?}").contains("mock-google-key"));
+    settings.save(root.path()).unwrap();
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(saved["custom_option"], true);
+    assert_eq!(saved["provider"], "google");
+    assert_eq!(
+        AiSettings::load(root.path()).unwrap().provider,
+        AiProvider::Google
+    );
+}
+
+#[test]
+fn unknown_provider_is_rejected_instead_of_sending_credentials_to_a_default_service() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("ai_settings.json"),
+        r#"{"provider":"unknown","api_key":"mock-key"}"#,
+    )
+    .unwrap();
+    assert!(AiSettings::load(root.path()).is_err());
+}
+
+#[test]
+fn blank_model_cannot_overwrite_saved_settings() {
+    let root = tempfile::tempdir().unwrap();
+    let mut settings = AiSettings::default();
+    settings.save(root.path()).unwrap();
+    let previous = std::fs::read(root.path().join("ai_settings.json")).unwrap();
+    settings.model = "  ".into();
+    assert!(settings.save(root.path()).is_err());
+    assert_eq!(
+        std::fs::read(root.path().join("ai_settings.json")).unwrap(),
+        previous
+    );
 }
 
 #[test]

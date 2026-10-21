@@ -3,8 +3,8 @@ use crate::board::{Board, BoardCard, BoardView};
 use crate::event_matrix::{self, MatrixMessage};
 use crate::session::{EditorSession, EpisodeKey};
 use aicomic_ai::{
-    AiSettings, ContextStore, ExecutionInput, PromptRegistry, ReviewDecision, WorkflowEngine,
-    WorkflowResult,
+    AiProvider, AiSettings, ContextStore, ExecutionInput, PromptRegistry, ReviewDecision,
+    WorkflowEngine, WorkflowResult,
 };
 use aicomic_core::{AssetItemUpdate, AssetTarget, EpisodeUpdate, EventUpdate, Store};
 use aicomic_memory::{EmbeddingSettings, MemoryQuery, MemoryService, MemoryStore};
@@ -116,6 +116,7 @@ pub enum Message {
     Tick,
     Snapshot(iced::window::Screenshot),
     Close,
+    Provider(AiProvider),
     Setting(&'static str, String),
     SaveSettings,
     TestAi,
@@ -1213,6 +1214,15 @@ impl App {
                 }
                 return iced::exit();
             }
+            Message::Provider(provider) => {
+                if self.settings.provider != provider {
+                    self.settings.provider = provider;
+                    self.settings.base_url = provider.default_base_url().into();
+                    self.settings.model = provider.default_model().into();
+                    self.settings.api_key.clear();
+                    self.status = format!("已切换至 {provider}，请重新输入 API Key 并保存设置");
+                }
+            }
             Message::Setting(field, value) => match field {
                 "api_key" => self.settings.api_key = value,
                 "base_url" => self.settings.base_url = value,
@@ -2158,9 +2168,25 @@ impl App {
             ]
             .spacing(6)
         };
+        let provider_hint = match self.settings.provider {
+            AiProvider::OpenAi => "使用 OpenAI 兼容接口，可填写兼容服务的地址与模型。",
+            AiProvider::Google => {
+                "使用 Google 原生 generateContent 接口，默认模型 gemini-flash-latest，可修改模型。"
+            }
+        };
         let mut settings = column![
             text("AI 设置").size(26),
-            small("兼容 OpenAI 接口的模型服务"),
+            column![
+                small("模型服务"),
+                pick_list(
+                    AiProvider::ALL,
+                    Some(self.settings.provider),
+                    Message::Provider
+                )
+                .width(Fill),
+                small(provider_hint)
+            ]
+            .spacing(6),
             column![
                 small("API Key"),
                 text_input("输入 API Key", &self.settings.api_key)
@@ -2173,7 +2199,7 @@ impl App {
             row![
                 field("温度", &self.settings_temperature, "temperature"),
                 field(
-                    "最大输出 Tokens（留空为服务默认）",
+                    "最大输出 Tokens（留空为 8192，上限 8192）",
                     &self.settings_tokens,
                     "tokens"
                 ),
@@ -2679,6 +2705,71 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn switching_ai_provider_clears_credentials_preserves_parameters_and_saves_selection() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        let mut app = App::new(
+            store,
+            Options {
+                root: root.path().into(),
+                ..Options::default()
+            },
+        );
+        app.settings.api_key = "old-provider-test-key".into();
+        app.settings.base_url = "https://old.example/api".into();
+        app.settings.model = "custom-old-model".into();
+        let _ = app.update(Message::Setting("temperature", "0.7".into()));
+        let _ = app.update(Message::Setting("tokens", "4096".into()));
+        let _ = app.update(Message::Setting("timeout", "90".into()));
+
+        let _ = app.update(Message::Provider(AiProvider::Google));
+        assert_eq!(app.settings.provider, AiProvider::Google);
+        assert!(app.settings.api_key.is_empty());
+        assert_eq!(app.settings.base_url, AiProvider::Google.default_base_url());
+        assert_eq!(app.settings.model, AiProvider::Google.default_model());
+        assert!(app.status.contains("重新输入"));
+        assert_eq!(app.settings_temperature, "0.7");
+        assert_eq!(app.settings_tokens, "4096");
+        assert_eq!(app.settings_timeout, "90");
+
+        let _ = app.update(Message::Setting("api_key", "new-provider-test-key".into()));
+        let _ = app.update(Message::Setting("model", "gemini-custom".into()));
+        let _ = app.update(Message::SaveSettings);
+        let saved = AiSettings::load(root.path()).unwrap();
+        assert_eq!(saved.provider, AiProvider::Google);
+        assert_eq!(saved.api_key, "new-provider-test-key");
+        assert_eq!(saved.model, "gemini-custom");
+        assert_eq!(saved.temperature, 0.7);
+        assert_eq!(saved.max_tokens, Some(4096));
+        assert_eq!(saved.timeout_seconds, 90.0);
+
+        let _ = app.update(Message::Provider(AiProvider::OpenAi));
+        assert!(app.settings.api_key.is_empty());
+        assert_eq!(app.settings.base_url, AiProvider::OpenAi.default_base_url());
+        assert_eq!(app.settings.model, AiProvider::OpenAi.default_model());
+    }
+
+    #[test]
+    fn selecting_the_current_ai_provider_keeps_custom_settings_and_credentials() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        let mut app = App::new(
+            store,
+            Options {
+                root: root.path().into(),
+                ..Options::default()
+            },
+        );
+        app.settings.api_key = "current-provider-test-key".into();
+        app.settings.base_url = "https://custom.example/api".into();
+        app.settings.model = "custom-model".into();
+        let _ = app.update(Message::Provider(app.settings.provider));
+        assert_eq!(app.settings.api_key, "current-provider-test-key");
+        assert_eq!(app.settings.base_url, "https://custom.example/api");
+        assert_eq!(app.settings.model, "custom-model");
+    }
+
     #[test]
     fn cancelled_or_stale_run_completion_cannot_change_the_editor() {
         let root = tempfile::tempdir().unwrap();

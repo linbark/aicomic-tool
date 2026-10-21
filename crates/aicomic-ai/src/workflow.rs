@@ -146,7 +146,10 @@ impl WorkflowEngine {
     pub async fn test_connection(&self) -> Result<String> {
         let mut settings = self.settings.clone();
         settings.temperature = 0.0;
-        settings.max_tokens = Some(8);
+        settings.max_tokens = Some(match settings.provider {
+            crate::AiProvider::Google => 1024,
+            crate::AiProvider::OpenAi => 8,
+        });
         let text = LlmClient
             .chat(
                 &settings,

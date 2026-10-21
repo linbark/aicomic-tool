@@ -10,7 +10,7 @@ mod workflow;
 pub use client::{ChatMessage, LlmClient, extract_json};
 pub use error::{AiError, Result};
 pub use prompts::{PromptRegistry, PromptTemplate};
-pub use settings::AiSettings;
+pub use settings::{AiProvider, AiSettings};
 pub use store::{ContextStore, StageMeta};
 pub use workflow::{
     ExecutionInput, ReviewDecision, WorkflowEngine, WorkflowEvent, WorkflowResult,

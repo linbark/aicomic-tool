@@ -1,6 +1,6 @@
 # 星晴 · AI Comic Tool
 
-面向 macOS 与 Windows 的原生 Rust 漫剧创作桌面应用。界面使用 Iced，项目与记忆保存在本机 SQLite；AI 请求由 Rust 直接调用可配置的 OpenAI 兼容服务。
+面向 macOS 与 Windows 的原生 Rust 漫剧创作桌面应用。界面使用 Iced，项目与记忆保存在本机 SQLite；AI 请求由 Rust 直接调用 Google Gemini 原生接口或可配置的 OpenAI 兼容服务。
 
 发布程序不需要 Python、Node、npm、WebView、Tauri 或本地 API 服务。源码构建使用 Cargo 和平台编译工具；本地大模型权重不包含在安装包中。
 
@@ -70,6 +70,10 @@ Windows 可将路径替换为 `"C:\path\to\copied-app-data"`。也可使用环�
 
 在“AI 设置”填写服务地址、API Key 和模型名，保存后可主动点击“测试连接”。剧本生成、项目大纲、Visual DNA 和 HTTP Embedding 会访问所配置的远程服务；普通编辑、素材管理及事实浏览不需要这些服务。
 
+接入 Google AI 时，在“模型服务”选择 **Google AI / Gemini**，填写自己的 API Key 并保存。默认服务地址为 `https://generativelanguage.googleapis.com/v1beta`，默认模型为 `gemini-flash-latest`；模型名可修改。Rust 使用 `generateContent` 和 `x-goog-api-key` 请求头，直接接入 [Gemini 原生接口](https://ai.google.dev/api/generate-content)。切换模型服务会重置地址和模型并清空旧密钥，避免将另一服务的密钥发送出去；未包含服务类型的旧配置继续按 OpenAI 兼容接口读取。密钥只保存在本机设置文件，不应提交或分享。
+
+“测试连接”仅发送简短测试提示，不发送项目内容；Google 的测试输出额度为 1024 tokens，以容纳模型的思考过程。此接入覆盖现有文本创作流程；记忆 Embedding 仍使用下述独立配置。
+
 记忆 Embedding 默认 `disabled`，仍可查看原文、词面检索、使用结构化记忆上下文及审核变更。启用语义检索有两种方式：
 
 - `http`：配置 OpenAI 兼容 Embedding 服务。
@@ -109,7 +113,7 @@ Windows x64 在 Windows PowerShell 中安装 Rust MSVC 工具链与 NSIS 3 后�
 
 CI 配置见 [rust-desktop.yml](.github/workflows/rust-desktop.yml)；配置存在不代表运行成功。最低 macOS 版本配置也不代表已在该版本实测。音频、视频和文档目前通过系统默认应用打开，图片可在素材库内预览。
 
-2026-10-21 最终本机检查：107 项测试通过（AI 24、存储 21、桌面与集成 32、记忆 30），workspace 格式与严格 Clippy 检查通过。旧数据副本启动后，项目/分集数量保持一致，主库与记忆库完整性检查通过。具体范围见 [验证证据](docs/rust-migration.md#构建发布与验证证据)。
+2026-10-21 本机检查：120 项测试通过（AI 35、存储 21、桌面与集成 34、记忆 30），workspace 格式与严格 Clippy 检查通过；Google 原生连接探测实际返回“连接成功”，只发送简短测试文字。此前旧数据副本启动后，项目/分集数量保持一致，主库与记忆库完整性检查通过。具体范围见 [验证证据](docs/rust-migration.md#构建发布与验证证据)。
 
 ## 源码布局
 
