@@ -1,4 +1,0 @@
-运行的时候请使用conda 的py312环境
-使用tauri的时候，请指定AICOMIC_PYTHON为conda的py312环境
-
-npm run tauri:dev

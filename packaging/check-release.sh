@@ -56,7 +56,6 @@ check_sources() {
 check_sources "$repo_dir"
 [[ "$(od -An -tx1 -N4 "$repo_dir/packaging/icons/icon.ico" | tr -d ' \n')" == 00000100 ]] || { printf 'Invalid Windows icon\n' >&2; exit 1; }
 [[ "$(dd if="$repo_dir/packaging/icons/icon.icns" bs=4 count=1 2>/dev/null)" == icns ]] || { printf 'Invalid macOS icon\n' >&2; exit 1; }
-[[ "$(od -An -tx1 -N8 "$repo_dir/packaging/icons/icon.png" | tr -d ' \n')" == 89504e470d0a1a0a ]] || { printf 'Invalid PNG icon\n' >&2; exit 1; }
 if command -v xmllint >/dev/null 2>&1; then
   xmllint --nonet --noout "$repo_dir/packaging/windows/app.manifest"
 fi

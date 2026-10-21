@@ -12,10 +12,10 @@ path = "src/main.rs"
 aicomic-core = { path = "../aicomic-core" }
 aicomic-ai = { path = "../aicomic-ai" }
 aicomic-memory = { path = "../aicomic-memory", features = ["local-bge"] }
-iced = { version = "=0.14.0", default-features = false, features = ["wgpu", "tiny-skia", "tokio", "canvas", "image", "advanced"] }
+iced = { version = "=0.14.0", default-features = false, features = ["wgpu", "tiny-skia", "tokio", "canvas", "image-without-codecs", "advanced"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "fs", "time", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync"] }
 uuid = { version = "1", features = ["v4"] }
 directories = "6"
 rfd = "0.15"

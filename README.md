@@ -120,7 +120,17 @@ crates/
   aicomic-memory/     # 事实、证据、变更审核、检索与可选 Rust 推理
   aicomic-desktop/    # Iced 窗口、编辑器、画布与应用集成
 packaging/           # 独立图标、macOS 与 Windows 打包脚本
-legacy/              # 旧 Python/FastAPI、React/Tauri 历史参考，不参与 Cargo 编译或打包
+docs/design/         # 漫剧创作、Prompt 与记忆系统的领域设计研究
 ```
 
-旧架构文档与 `legacy/` 用于追溯行为，不作为当前运行方式的说明。当前能力、已知差异和验收范围以 [Rust 迁移说明](docs/rust-migration.md) 为准。
+旧 Python/React/Tauri 源码与过时工具配置已从当前工作树移除，可从 Git 历史追溯。当前能力、已知差异和验收范围以 [Rust 迁移说明](docs/rust-migration.md) 为准。
+
+## 领域设计资料
+
+以下文档保留创作原则、原始产品需求与设计设想；其中的方案和模型效果描述不代表当前实现状态：
+
+- [Prompt 指导原则](<docs/design/AI 漫剧创作 Prompt 指导原则.md>)
+- [记忆工程研究](<docs/design/AI 漫剧记忆工程实现方案.md>)
+- [剧本代理层示例](docs/design/剧本代理层示例讲解.md)
+- [小说漫剧化记忆管理方案](docs/design/小说漫剧化记忆管理方案.md)
+- [JSON 与视觉一致性设计](docs/design/JSON一致性优化.md)

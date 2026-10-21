@@ -1,2 +1,0 @@
-{"location": "projects.py:48", "message": "create_project called", "data": {"name": "11", "description": null}, "timestamp": 1767980439109, "sessionId": "debug-session", "runId": "run1", "hypothesisId": "D"}
-{"location": "projects.py:54", "message": "create_project success", "data": {"id": 3, "name": "11"}, "timestamp": 1767980439134, "sessionId": "debug-session", "runId": "run1", "hypothesisId": "D"}

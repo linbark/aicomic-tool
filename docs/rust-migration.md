@@ -1,6 +1,6 @@
 # Rust 桌面迁移：功能对照与验证边界
 
-本文记录原版实际可达界面与当前 Rust 桌面界面的对应关系，不把“源码里有组件/接口”当作“用户已经能在界面操作”。旧源码归档于 `legacy/`，仅作为行为参考，不是 Cargo 构建、安装包或运行依赖。
+本文记录原版实际可达界面与当前 Rust 桌面界面的对应关系，不把“源码里有组件/接口”当作“用户已经能在界面操作”。旧 Python/React/Tauri 源码已从当前工作树移除；原版行为的审计基线为 Git 提交 `ce78de1`，可通过 `git show ce78de1:<原路径>` 查询历史源码。
 
 ## 运行架构
 
@@ -20,7 +20,7 @@
 
 `Step3_Storyboard`、`ChatPanel`、`EpisodeEditor`、`SceneEditor`、`ShotEditor` 等文件存在，但没有接入该剧本页；`RunStatusPanel` 也只被未挂载组件引用。资产提取卡片上的“入库”仅弹出占位提示。原版没有富文本编辑器，也没有真正的图像/视频生成、剪辑或成片导出实现。
 
-参考旧文件：`legacy/react-frontend/src/App.tsx`、`legacy/react-frontend/src/components/AppLayout.tsx`、`legacy/react-frontend/src/pages/ScriptPage.refactored.tsx`、`legacy/react-frontend/src/components/script/ScriptSidebar.tsx` 与 `legacy/react-frontend/src/components/script/steps/Step2_Assets.tsx`。
+审计参考文件在 `ce78de1` 中的原路径为：`react-frontend/src/App.tsx`、`react-frontend/src/components/AppLayout.tsx`、`react-frontend/src/pages/ScriptPage.refactored.tsx`、`react-frontend/src/components/script/ScriptSidebar.tsx` 与 `react-frontend/src/components/script/steps/Step2_Assets.tsx`。例如，使用 `git show ce78de1:react-frontend/src/App.tsx` 查看旧版入口。
 
 ## 用户操作对照
 
