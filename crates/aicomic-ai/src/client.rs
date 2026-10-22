@@ -17,76 +17,102 @@ impl LlmClient {
             return Err(AiError::MissingApiKey);
         }
         let url = endpoint(settings)?;
-        let timeout = Duration::from_secs_f64(settings.timeout_seconds);
-        let client = reqwest::Client::builder()
-            .connect_timeout(timeout.min(Duration::from_secs(10)))
-            .timeout(timeout)
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(|e| AiError::Network(e.to_string()))?;
+        let client = http_client(settings)?;
         let payload = match settings.provider {
             AiProvider::OpenAi => {
                 json!({"model":settings.model,"messages":messages,"temperature":settings.temperature,"max_tokens":settings.normalized_max_tokens()})
             }
             AiProvider::Google => google_payload(settings, messages)?,
         };
-        for attempt in 0..3 {
-            let result = async {
-                let request = client
-                    .post(url.clone())
-                    .header("Accept", "application/json");
-                let request = match settings.provider {
-                    AiProvider::OpenAi => request.bearer_auth(&settings.api_key),
-                    AiProvider::Google => request.header("x-goog-api-key", &settings.api_key),
-                };
-                let mut response = request.json(&payload).send().await?;
-                let status = response.status().as_u16();
-                let mut bytes = Vec::new();
-                while let Some(chunk) = response.chunk().await? {
-                    bytes.extend_from_slice(&chunk);
-                    if bytes.len() > 16 * 1024 * 1024 {
-                        break;
-                    }
-                }
-                Ok::<_, reqwest::Error>((status, bytes))
-            }
-            .await;
-            let (status, bytes) = match result {
-                Ok(result) => result,
-                Err(e) => {
-                    if attempt < 2
-                        && (e.is_timeout() || e.is_connect() || e.is_request() || e.is_body())
-                    {
-                        tokio::time::sleep(Duration::from_millis(350 * (1 << attempt))).await;
-                        continue;
-                    }
-                    let message = e.to_string().replace(&settings.api_key, "***");
-                    return Err(AiError::Network(format!("AI 请求失败：{message}")));
-                }
-            };
-            if bytes.len() > 16 * 1024 * 1024 {
-                return Err(AiError::Protocol("AI 响应超过 16 MiB 限制".into()));
-            }
-            if !(200..300).contains(&status) {
-                let message: String = String::from_utf8_lossy(&bytes)
-                    .replace(&settings.api_key, "***")
-                    .chars()
-                    .take(500)
-                    .collect();
-                return Err(AiError::Http { status, message });
-            }
-            let data: Value = serde_json::from_slice(&bytes)?;
-            return match settings.provider {
-                AiProvider::OpenAi => openai_content(&data),
-                AiProvider::Google => google_content(&data),
-            };
+        let data = request_json(
+            &client,
+            settings,
+            reqwest::Method::POST,
+            url,
+            Some(&payload),
+        )
+        .await?;
+        match settings.provider {
+            AiProvider::OpenAi => openai_content(&data),
+            AiProvider::Google => google_content(&data),
         }
-        Err(AiError::Network("AI 重试次数已耗尽".into()))
     }
 }
 
-fn endpoint(settings: &AiSettings) -> Result<reqwest::Url> {
-    let mut url = reqwest::Url::parse(settings.base_url.trim())
+pub(crate) fn http_client(settings: &AiSettings) -> Result<reqwest::Client> {
+    let timeout = Duration::from_secs_f64(settings.timeout_seconds);
+    reqwest::Client::builder()
+        .connect_timeout(timeout.min(Duration::from_secs(10)))
+        .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| AiError::Network(e.to_string()))
+}
+
+pub(crate) async fn request_json(
+    client: &reqwest::Client,
+    settings: &AiSettings,
+    method: reqwest::Method,
+    url: reqwest::Url,
+    payload: Option<&Value>,
+) -> Result<Value> {
+    for attempt in 0..3 {
+        let result = async {
+            let request = client
+                .request(method.clone(), url.clone())
+                .header("Accept", "application/json");
+            let request = match settings.provider {
+                AiProvider::OpenAi => request.bearer_auth(&settings.api_key),
+                AiProvider::Google => request.header("x-goog-api-key", &settings.api_key),
+            };
+            let request = if let Some(payload) = payload {
+                request.json(payload)
+            } else {
+                request
+            };
+            let mut response = request.send().await?;
+            let status = response.status().as_u16();
+            let mut bytes = Vec::new();
+            while let Some(chunk) = response.chunk().await? {
+                bytes.extend_from_slice(&chunk);
+                if bytes.len() > 16 * 1024 * 1024 {
+                    break;
+                }
+            }
+            Ok::<_, reqwest::Error>((status, bytes))
+        }
+        .await;
+        let (status, bytes) = match result {
+            Ok(result) => result,
+            Err(e) => {
+                if attempt < 2
+                    && (e.is_timeout() || e.is_connect() || e.is_request() || e.is_body())
+                {
+                    tokio::time::sleep(Duration::from_millis(350 * (1 << attempt))).await;
+                    continue;
+                }
+                let message = e.to_string().replace(&settings.api_key, "***");
+                return Err(AiError::Network(format!("AI 请求失败：{message}")));
+            }
+        };
+        if bytes.len() > 16 * 1024 * 1024 {
+            return Err(AiError::Protocol("AI 响应超过 16 MiB 限制".into()));
+        }
+        if !(200..300).contains(&status) {
+            let message: String = String::from_utf8_lossy(&bytes)
+                .replace(&settings.api_key, "***")
+                .chars()
+                .take(500)
+                .collect();
+            return Err(AiError::Http { status, message });
+        }
+        return Ok(serde_json::from_slice(&bytes)?);
+    }
+    Err(AiError::Network("AI 重试次数已耗尽".into()))
+}
+
+pub(crate) fn base_url(settings: &AiSettings) -> Result<reqwest::Url> {
+    let url = reqwest::Url::parse(settings.base_url.trim())
         .map_err(|_| AiError::InvalidInput("AI Base URL 无效".into()))?;
     if !matches!(url.scheme(), "http" | "https")
         || !url.username().is_empty()
@@ -98,6 +124,31 @@ fn endpoint(settings: &AiSettings) -> Result<reqwest::Url> {
             "AI Base URL 必须为 HTTP/HTTPS，且不含登录凭证、查询参数或片段".into(),
         ));
     }
+    Ok(url)
+}
+
+pub(crate) fn google_version(base: &str) -> Result<&str> {
+    match base {
+        "" => Ok("/v1beta"),
+        "/v1" | "/v1beta" => Ok(base),
+        _ => base
+            .split_once("/models/")
+            .filter(|(root, tail)| {
+                matches!(*root, "/v1" | "/v1beta")
+                    && !tail.contains('/')
+                    && tail.ends_with(":generateContent")
+            })
+            .map(|(root, _)| root)
+            .ok_or_else(|| {
+                AiError::InvalidInput(
+                    "Google AI 地址应为 API 域名、/v1beta、/v1 或 generateContent 地址".into(),
+                )
+            }),
+    }
+}
+
+fn endpoint(settings: &AiSettings) -> Result<reqwest::Url> {
+    let mut url = base_url(settings)?;
     let base = url.path().trim_end_matches('/');
     let path = match settings.provider {
         AiProvider::OpenAi if base.ends_with("/chat/completions") => base.to_owned(),
@@ -114,24 +165,7 @@ fn endpoint(settings: &AiSettings) -> Result<reqwest::Url> {
             {
                 return Err(AiError::InvalidInput("Google AI 模型名称无效".into()));
             }
-            let version = match base {
-                "" => "/v1beta",
-                "/v1" | "/v1beta" => base,
-                _ => base
-                    .split_once("/models/")
-                    .filter(|(root, tail)| {
-                        matches!(*root, "/v1" | "/v1beta")
-                            && !tail.contains('/')
-                            && tail.ends_with(":generateContent")
-                    })
-                    .map(|(root, _)| root)
-                    .ok_or_else(|| {
-                        AiError::InvalidInput(
-                            "Google AI 地址应为 API 域名、/v1beta、/v1 或 generateContent 地址"
-                                .into(),
-                        )
-                    })?,
-            };
+            let version = google_version(base)?;
             format!("{version}/models/{model}:generateContent")
         }
     };

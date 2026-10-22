@@ -72,6 +72,10 @@ Windows 可将路径替换为 `"C:\path\to\copied-app-data"`。也可使用环�
 
 接入 Google AI 时，在“模型服务”选择 **Google AI / Gemini**，填写自己的 API Key 并保存。默认服务地址为 `https://generativelanguage.googleapis.com/v1beta`，默认模型为 `gemini-flash-latest`；模型名可修改。Rust 使用 `generateContent` 和 `x-goog-api-key` 请求头，直接接入 [Gemini 原生接口](https://ai.google.dev/api/generate-content)。切换模型服务会重置地址和模型并清空旧密钥，避免将另一服务的密钥发送出去；未包含服务类型的旧配置继续按 OpenAI 兼容接口读取。密钥只保存在本机设置文件，不应提交或分享。
 
+点击“获取模型列表”可读取当前服务的模型目录，在可搜索的下拉列表中选择后保存。Google 使用 [`models.list`](https://ai.google.dev/api/models#method:-models.list)，会读取全部分页；OpenAI 兼容服务使用 [`/v1/models`](https://developers.openai.com/api/reference/resources/models/methods/list)。列表显示服务返回的全部模型；Google 未声明支持 `generateContent` 的模型会标为不适用于当前创作，不能从列表激活。支持该接口也不代表模型一定支持当前文本参数、账户权限或付费额度。OpenAI 兼容目录通常不含能力信息，具体兼容性以实际请求结果为准。
+
+获取目录不会修改当前模型，也不会请求生成内容。服务不支持列举、目录没有包含模型别名或请求失败时，仍可手动填写模型名。切换服务、地址或密钥会清除旧目录并忽略旧请求结果；应用启动不会自动联网获取列表。
+
 “测试连接”仅发送简短测试提示，不发送项目内容；Google 的测试输出额度为 1024 tokens，以容纳模型的思考过程。此接入覆盖现有文本创作流程；记忆 Embedding 仍使用下述独立配置。
 
 记忆 Embedding 默认 `disabled`，仍可查看原文、词面检索、使用结构化记忆上下文及审核变更。启用语义检索有两种方式：
@@ -113,7 +117,7 @@ Windows x64 在 Windows PowerShell 中安装 Rust MSVC 工具链与 NSIS 3 后�
 
 CI 配置见 [rust-desktop.yml](.github/workflows/rust-desktop.yml)；配置存在不代表运行成功。最低 macOS 版本配置也不代表已在该版本实测。音频、视频和文档目前通过系统默认应用打开，图片可在素材库内预览。
 
-2026-10-21 本机检查：120 项测试通过（AI 35、存储 21、桌面与集成 34、记忆 30），workspace 格式与严格 Clippy 检查通过；Google 原生连接探测实际返回“连接成功”，只发送简短测试文字。此前旧数据副本启动后，项目/分集数量保持一致，主库与记忆库完整性检查通过。具体范围见 [验证证据](docs/rust-migration.md#构建发布与验证证据)。
+2026-10-22 本机检查：140 项测试通过（AI 46、存储 21、桌面与集成 43、记忆 30），workspace 格式与严格 Clippy 检查通过。此前 Google 原生连接探测实际返回“连接成功”，只发送简短测试文字；旧数据副本启动后，项目/分集数量保持一致，主库与记忆库完整性检查通过。具体范围见 [验证证据](docs/rust-migration.md#构建发布与验证证据)。
 
 ## 源码布局
 

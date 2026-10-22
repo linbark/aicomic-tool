@@ -3,14 +3,14 @@ use crate::board::{Board, BoardCard, BoardView};
 use crate::event_matrix::{self, MatrixMessage};
 use crate::session::{EditorSession, EpisodeKey};
 use aicomic_ai::{
-    AiProvider, AiSettings, ContextStore, ExecutionInput, PromptRegistry, ReviewDecision,
-    WorkflowEngine, WorkflowResult,
+    AiProvider, AiSettings, ContextStore, ExecutionInput, LlmClient, ModelInfo, PromptRegistry,
+    ReviewDecision, WorkflowEngine, WorkflowResult,
 };
 use aicomic_core::{AssetItemUpdate, AssetTarget, EpisodeUpdate, EventUpdate, Store};
 use aicomic_memory::{EmbeddingSettings, MemoryQuery, MemoryService, MemoryStore};
 use iced::widget::{
-    button, column, container, image, pick_list, row, scrollable, space, text, text_editor,
-    text_input,
+    button, column, combo_box, container, image, pick_list, row, scrollable, space, text,
+    text_editor, text_input,
 };
 use iced::{Color, Element, Fill, Length, Subscription, Task, Theme};
 use serde::Serialize;
@@ -94,6 +94,39 @@ impl fmt::Display for Choice {
     }
 }
 
+#[derive(Clone)]
+pub struct SettingValue(String);
+impl fmt::Debug for SettingValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("<设置输入已隐藏>")
+    }
+}
+impl From<String> for SettingValue {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+impl From<&str> for SettingValue {
+    fn from(value: &str) -> Self {
+        Self(value.into())
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ModelChoice {
+    info: ModelInfo,
+    supported: bool,
+}
+impl fmt::Display for ModelChoice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.info.fmt(f)?;
+        if !self.supported {
+            f.write_str(" · 不适用于当前创作")?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Message {
     Page(Page),
@@ -117,7 +150,10 @@ pub enum Message {
     Snapshot(iced::window::Screenshot),
     Close,
     Provider(AiProvider),
-    Setting(&'static str, String),
+    Setting(&'static str, SettingValue),
+    FetchModels,
+    ModelsFetched(u64, Result<Vec<ModelInfo>, String>),
+    SelectModel(String),
     SaveSettings,
     TestAi,
     AiTest(Result<String, String>),
@@ -197,6 +233,11 @@ pub struct App {
     settings_tokens: String,
     settings_timeout: String,
     settings_temperature: String,
+    model_catalog: combo_box::State<ModelChoice>,
+    model_catalog_request: u64,
+    model_catalog_loading: bool,
+    model_catalog_loaded: bool,
+    model_catalog_status: String,
     templates: Vec<Value>,
     prompt_key: String,
     prompt_title: String,
@@ -294,6 +335,11 @@ impl App {
             settings_timeout: settings.timeout_seconds.to_string(),
             settings_temperature: settings.temperature.to_string(),
             settings,
+            model_catalog: combo_box::State::new(vec![]),
+            model_catalog_request: 0,
+            model_catalog_loading: false,
+            model_catalog_loaded: false,
+            model_catalog_status: "填写服务地址与 API Key 后获取；也可以直接输入模型名称。".into(),
             templates: vec![],
             prompt_key: String::new(),
             prompt_title: String::new(),
@@ -391,6 +437,14 @@ impl App {
     }
     fn fail(&mut self, error: impl fmt::Display) {
         self.status = format!("操作失败：{error}");
+    }
+    fn invalidate_model_catalog(&mut self) {
+        self.model_catalog_request = self.model_catalog_request.wrapping_add(1);
+        self.model_catalog_loading = false;
+        self.model_catalog_loaded = false;
+        self.model_catalog = combo_box::State::new(vec![]);
+        self.model_catalog_status =
+            "服务配置已变更，请重新获取模型列表；当前模型仍可手动设置。".into();
     }
     fn reload_projects(&mut self) {
         match self.store.projects() {
@@ -1216,6 +1270,7 @@ impl App {
             }
             Message::Provider(provider) => {
                 if self.settings.provider != provider {
+                    self.invalidate_model_catalog();
                     self.settings.provider = provider;
                     self.settings.base_url = provider.default_base_url().into();
                     self.settings.model = provider.default_model().into();
@@ -1223,15 +1278,103 @@ impl App {
                     self.status = format!("已切换至 {provider}，请重新输入 API Key 并保存设置");
                 }
             }
-            Message::Setting(field, value) => match field {
-                "api_key" => self.settings.api_key = value,
-                "base_url" => self.settings.base_url = value,
-                "model" => self.settings.model = value,
-                "tokens" => self.settings_tokens = value,
-                "timeout" => self.settings_timeout = value,
-                "temperature" => self.settings_temperature = value,
-                _ => {}
-            },
+            Message::Setting(field, value) => {
+                let value = value.0;
+                match field {
+                    "api_key" => {
+                        if self.settings.api_key != value {
+                            self.invalidate_model_catalog();
+                            self.settings.api_key = value;
+                        }
+                    }
+                    "base_url" => {
+                        if self.settings.base_url != value {
+                            self.invalidate_model_catalog();
+                            self.settings.base_url = value;
+                        }
+                    }
+                    "model" => self.settings.model = value,
+                    "tokens" => self.settings_tokens = value,
+                    "timeout" => self.settings_timeout = value,
+                    "temperature" => self.settings_temperature = value,
+                    _ => {}
+                }
+            }
+            Message::FetchModels => {
+                if self.model_catalog_loading {
+                    return Task::none();
+                }
+                self.model_catalog_request = self.model_catalog_request.wrapping_add(1);
+                let request = self.model_catalog_request;
+                let settings = self.settings.clone();
+                self.model_catalog_loading = true;
+                self.model_catalog_status = "正在获取服务提供的全部模型…".into();
+                return Task::perform(
+                    async move {
+                        LlmClient
+                            .list_models(&settings)
+                            .await
+                            .map_err(|e| e.to_string())
+                    },
+                    move |result| Message::ModelsFetched(request, result),
+                );
+            }
+            Message::ModelsFetched(request, result) => {
+                if request != self.model_catalog_request || !self.model_catalog_loading {
+                    return Task::none();
+                }
+                self.model_catalog_loading = false;
+                match result {
+                    Ok(models) => {
+                        let choices: Vec<_> = models
+                            .into_iter()
+                            .map(|info| ModelChoice {
+                                supported: info.supports_chat(self.settings.provider),
+                                info,
+                            })
+                            .collect();
+                        let supported = choices.iter().filter(|model| model.supported).count();
+                        self.model_catalog_status = if choices.is_empty() {
+                            "服务未返回模型，仍可手动输入模型名称。".into()
+                        } else if self.settings.provider == AiProvider::OpenAi {
+                            format!(
+                                "共 {} 个模型，均可选择；服务未提供统一能力信息，请选择聊天模型并保存设置。",
+                                choices.len()
+                            )
+                        } else {
+                            format!(
+                                "共 {} 个模型，{} 个支持当前生成接口；选择后请保存设置。",
+                                choices.len(),
+                                supported
+                            )
+                        };
+                        self.model_catalog = combo_box::State::new(choices);
+                        self.model_catalog_loaded = true;
+                    }
+                    Err(error) => {
+                        self.model_catalog_status =
+                            format!("获取模型列表失败：{error}。仍可手动输入模型名称并保存。");
+                    }
+                }
+                self.status = self.model_catalog_status.clone();
+            }
+            Message::SelectModel(model_id) => {
+                match self
+                    .model_catalog
+                    .options()
+                    .iter()
+                    .find(|model| model.info.id == model_id)
+                {
+                    Some(model) if model.supported => {
+                        self.settings.model = model.info.id.clone();
+                        self.status = format!("已选择 {}，请保存设置", self.settings.model);
+                    }
+                    Some(_) => self.status = "该模型不支持当前生成接口，请选择其他模型。".into(),
+                    None => {
+                        self.status = "模型列表已更新，请重新选择；也可以手动输入模型名称。".into()
+                    }
+                }
+            }
             Message::SaveSettings => {
                 let result = (|| -> Result<(), String> {
                     self.settings.max_tokens = if self.settings_tokens.trim().is_empty() {
@@ -2164,7 +2307,7 @@ impl App {
         let field = |name: &'static str, value: &str, key: &'static str| {
             column![
                 small(name),
-                text_input(name, value).on_input(move |v| Message::Setting(key, v))
+                text_input(name, value).on_input(move |v| Message::Setting(key, v.into()))
             ]
             .spacing(6)
         };
@@ -2174,6 +2317,46 @@ impl App {
                 "使用 Google 原生 generateContent 接口，默认模型 gemini-flash-latest，可修改模型。"
             }
         };
+        let mut model_picker = column![
+            row![
+                small("服务提供的模型"),
+                space::horizontal(),
+                button(if self.model_catalog_loading {
+                    "正在获取…"
+                } else if self.model_catalog_loaded {
+                    "刷新模型列表"
+                } else {
+                    "获取模型列表"
+                })
+                .on_press_maybe((!self.model_catalog_loading).then_some(Message::FetchModels))
+            ]
+            .spacing(10),
+            small(&self.model_catalog_status),
+            small("模型可见不代表账号有调用权限；实际输入、输出和参数支持以服务为准。")
+        ]
+        .spacing(8);
+        if !self.model_catalog.options().is_empty() {
+            let selected = self
+                .model_catalog
+                .options()
+                .iter()
+                .find(|model| model.supported && model.info.id == self.settings.model);
+            model_picker = model_picker.push(
+                combo_box(
+                    &self.model_catalog,
+                    "搜索模型名称或 ID",
+                    selected,
+                    |model| Message::SelectModel(model.info.id),
+                )
+                .width(Fill)
+                .menu_height(280),
+            );
+            if selected.is_none() {
+                model_picker = model_picker.push(small(
+                    "当前模型保留在下方；别名或自定义模型可能不在列表中。",
+                ));
+            }
+        }
         let mut settings = column![
             text("AI 设置").size(26),
             column![
@@ -2191,11 +2374,12 @@ impl App {
                 small("API Key"),
                 text_input("输入 API Key", &self.settings.api_key)
                     .secure(true)
-                    .on_input(|v| Message::Setting("api_key", v))
+                    .on_input(|v| Message::Setting("api_key", v.into()))
             ]
             .spacing(6),
             field("服务地址", &self.settings.base_url, "base_url"),
-            field("模型", &self.settings.model, "model"),
+            model_picker,
+            field("当前模型（可手动输入）", &self.settings.model, "model"),
             row![
                 field("温度", &self.settings_temperature, "temperature"),
                 field(
@@ -2705,6 +2889,232 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn model_settings_app() -> (tempfile::TempDir, App) {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        let app = App::new(
+            store,
+            Options {
+                root: root.path().into(),
+                ..Options::default()
+            },
+        );
+        (root, app)
+    }
+
+    fn catalog_model(id: &str, methods: &[&str]) -> ModelInfo {
+        ModelInfo {
+            id: id.into(),
+            display_name: format!("显示名称 {id}"),
+            supported_generation_methods: methods.iter().map(|method| (*method).into()).collect(),
+        }
+    }
+
+    #[test]
+    fn model_catalog_fetch_is_explicit_and_duplicate_requests_are_ignored() {
+        let (_root, mut app) = model_settings_app();
+        assert_eq!(app.model_catalog_request, 0);
+        assert!(!app.model_catalog_loading);
+        assert!(!app.model_catalog_loaded);
+        assert!(app.model_catalog.options().is_empty());
+        let _ = app.update(Message::FetchModels);
+        let request = app.model_catalog_request;
+        assert!(app.model_catalog_loading);
+        let _ = app.update(Message::FetchModels);
+        assert_eq!(app.model_catalog_request, request);
+    }
+
+    #[test]
+    fn model_catalog_selection_is_saved_without_auto_selecting_or_replacing_aliases() {
+        let (root, mut app) = model_settings_app();
+        app.settings.model = "custom-alias".into();
+        let _ = app.update(Message::FetchModels);
+        let request = app.model_catalog_request;
+        let _ = app.update(Message::ModelsFetched(
+            request,
+            Ok(vec![catalog_model("available", &[])]),
+        ));
+        assert_eq!(app.settings.model, "custom-alias");
+        assert!(app.model_catalog_loaded);
+        assert!(!app.model_catalog_loading);
+        assert!(app.model_catalog_status.contains("共 1 个模型，均可选择"));
+        assert!(app.model_catalog_status.contains("未提供统一能力信息"));
+
+        let _ = app.update(Message::SelectModel("available".into()));
+        assert_eq!(app.settings.model, "available");
+        let _ = app.update(Message::SaveSettings);
+        assert_eq!(AiSettings::load(root.path()).unwrap().model, "available");
+    }
+
+    #[test]
+    fn google_non_chat_models_are_displayed_but_cannot_replace_current_model() {
+        let (_root, mut app) = model_settings_app();
+        let _ = app.update(Message::Provider(AiProvider::Google));
+        let current = app.settings.model.clone();
+        let _ = app.update(Message::FetchModels);
+        let request = app.model_catalog_request;
+        let _ = app.update(Message::ModelsFetched(
+            request,
+            Ok(vec![
+                catalog_model("gemini-text", &["generateContent"]),
+                catalog_model("embedding-only", &["embedContent"]),
+            ]),
+        ));
+        assert_eq!(app.model_catalog.options().len(), 2);
+        assert!(
+            app.model_catalog.options()[1]
+                .to_string()
+                .contains("不适用于当前创作")
+        );
+        assert!(
+            app.model_catalog_status
+                .contains("共 2 个模型，1 个支持当前生成接口")
+        );
+        let _ = app.update(Message::SelectModel("embedding-only".into()));
+        assert_eq!(app.settings.model, current);
+        assert!(app.status.contains("不支持当前生成接口"));
+        let _ = app.update(Message::SelectModel("gemini-text".into()));
+        assert_eq!(app.settings.model, "gemini-text");
+    }
+
+    #[test]
+    fn failed_model_refresh_preserves_catalog_and_allows_manual_model_save() {
+        let (root, mut app) = model_settings_app();
+        let _ = app.update(Message::FetchModels);
+        let request = app.model_catalog_request;
+        let _ = app.update(Message::ModelsFetched(
+            request,
+            Ok(vec![catalog_model("available", &[])]),
+        ));
+        let _ = app.update(Message::Setting("model", "manual-alias".into()));
+        let _ = app.update(Message::FetchModels);
+        let request = app.model_catalog_request;
+        let _ = app.update(Message::ModelsFetched(request, Err("服务暂不可用".into())));
+        assert_eq!(app.settings.model, "manual-alias");
+        assert_eq!(app.model_catalog.options().len(), 1);
+        assert!(!app.model_catalog_loading);
+        assert!(app.model_catalog_status.contains("仍可手动输入"));
+        let _ = app.update(Message::SaveSettings);
+        assert_eq!(AiSettings::load(root.path()).unwrap().model, "manual-alias");
+    }
+
+    #[test]
+    fn address_or_key_changes_invalidate_catalog_and_discard_stale_success_and_failure() {
+        for field in ["base_url", "api_key"] {
+            let (_root, mut app) = model_settings_app();
+            let _ = app.update(Message::FetchModels);
+            let first = app.model_catalog_request;
+            let _ = app.update(Message::ModelsFetched(
+                first,
+                Ok(vec![catalog_model("old", &[])]),
+            ));
+            let _ = app.update(Message::FetchModels);
+            let stale = app.model_catalog_request;
+            let _ = app.update(Message::Setting(field, "changed-config".into()));
+            let status = app.model_catalog_status.clone();
+            assert!(app.model_catalog.options().is_empty());
+            assert!(!app.model_catalog_loaded);
+            assert!(!app.model_catalog_loading);
+            assert_ne!(app.model_catalog_request, stale);
+            let _ = app.update(Message::FetchModels);
+            let current = app.model_catalog_request;
+            let _ = app.update(Message::ModelsFetched(
+                stale,
+                Ok(vec![catalog_model("stale", &[])]),
+            ));
+            let _ = app.update(Message::ModelsFetched(stale, Err("过期错误".into())));
+            assert!(app.model_catalog_loading);
+            assert!(app.model_catalog.options().is_empty());
+            assert!(!app.model_catalog_status.contains("过期错误"));
+            assert_ne!(app.model_catalog_status, status);
+            let _ = app.update(Message::ModelsFetched(
+                current,
+                Ok(vec![catalog_model("current", &[])]),
+            ));
+            assert_eq!(app.model_catalog.options()[0].info.id, "current");
+        }
+    }
+
+    #[test]
+    fn provider_change_invalidates_catalog_and_stale_errors_do_not_replace_status() {
+        let (_root, mut app) = model_settings_app();
+        let _ = app.update(Message::FetchModels);
+        let stale = app.model_catalog_request;
+        let _ = app.update(Message::Provider(AiProvider::Google));
+        let status = app.status.clone();
+        let catalog_status = app.model_catalog_status.clone();
+        let _ = app.update(Message::ModelsFetched(stale, Err("过期错误".into())));
+        let _ = app.update(Message::ModelsFetched(
+            stale,
+            Ok(vec![catalog_model("stale", &[])]),
+        ));
+        assert_eq!(app.status, status);
+        assert_eq!(app.model_catalog_status, catalog_status);
+        assert!(app.model_catalog.options().is_empty());
+    }
+
+    #[test]
+    fn late_refresh_result_cannot_replace_newer_catalog_or_failure() {
+        let (_root, mut app) = model_settings_app();
+        let _ = app.update(Message::FetchModels);
+        let first = app.model_catalog_request;
+        let _ = app.update(Message::ModelsFetched(
+            first,
+            Ok(vec![catalog_model("first", &[])]),
+        ));
+        let _ = app.update(Message::FetchModels);
+        let second = app.model_catalog_request;
+        let _ = app.update(Message::ModelsFetched(second, Err("本次错误".into())));
+        let status = app.model_catalog_status.clone();
+        let _ = app.update(Message::ModelsFetched(
+            first,
+            Ok(vec![catalog_model("late", &[])]),
+        ));
+        let _ = app.update(Message::ModelsFetched(first, Err("过期错误".into())));
+        assert_eq!(app.model_catalog_status, status);
+        assert_eq!(app.model_catalog.options()[0].info.id, "first");
+    }
+
+    #[test]
+    fn model_and_numeric_edits_keep_catalog_and_same_credentials_do_not_invalidate() {
+        let (_root, mut app) = model_settings_app();
+        let _ = app.update(Message::FetchModels);
+        let request = app.model_catalog_request;
+        let _ = app.update(Message::ModelsFetched(
+            request,
+            Ok(vec![catalog_model("available", &[])]),
+        ));
+        let _ = app.update(Message::Provider(app.settings.provider));
+        let _ = app.update(Message::Setting(
+            "base_url",
+            app.settings.base_url.clone().into(),
+        ));
+        let _ = app.update(Message::Setting(
+            "api_key",
+            app.settings.api_key.clone().into(),
+        ));
+        for (field, value) in [
+            ("model", "manual"),
+            ("tokens", "4096"),
+            ("timeout", "20"),
+            ("temperature", "0.7"),
+        ] {
+            let _ = app.update(Message::Setting(field, value.into()));
+        }
+        assert_eq!(app.model_catalog_request, request);
+        assert_eq!(app.model_catalog.options().len(), 1);
+        assert!(app.model_catalog_loaded);
+    }
+
+    #[test]
+    fn api_key_input_is_hidden_in_message_debug_output() {
+        let message = Message::Setting("api_key", "do-not-print-this-test-key".into());
+        let debug = format!("{message:?}");
+        assert!(!debug.contains("do-not-print-this-test-key"));
+        assert!(debug.contains("已隐藏"));
+    }
+
     #[test]
     fn switching_ai_provider_clears_credentials_preserves_parameters_and_saves_selection() {
         let root = tempfile::tempdir().unwrap();

@@ -5,7 +5,7 @@
 `WorkflowEngine::new(root, settings)` 的 `root` 是应用数据根目录，包含
 `ai_settings.json`、`prompt_templates.json`、`data/` 和 `projects/`。
 构造引擎、读取数据与修改模板不请求模型。只有 `execute`、`resume` 中需要重新生成的步骤、
-以及用户主动调用 `test_connection` 才可能发出网络请求。
+以及用户主动调用 `test_connection` 或 `list_models` 才可能发出网络请求；列举模型只读取目录，不请求生成。
 
 ## 公共契约
 
@@ -83,6 +83,7 @@ Visual DNA 保留原服务的能力限制：当前 provider 是文本 chat，只
 - 文件先写临时文件再替换；Unix 配置/快照文件权限为 `0600`；调试输出遮盖 API key。
 - OpenAI 兼容 `/v1/chat/completions`；支持 base URL 已带 `/v1` 或完整 endpoint。
 - `AiSettings.provider` 为 `openai`（旧配置默认）或 `google`。Google 使用原生 `models/{model}:generateContent`，默认模型 `gemini-flash-latest`，以 `x-goog-api-key` 请求头认证；密钥不进入 URL。见 [Google 接口文档](https://ai.google.dev/api/generate-content)。
+- `LlmClient::list_models(&settings)` 返回当前服务完整模型目录与能力元数据，不依赖当前模型名。Google 使用 `GET /v1beta/models`（或配置的 `/v1`）并处理 `nextPageToken`；OpenAI 兼容服务使用 `GET /v1/models`。目录保留不支持聊天的条目，调用方可用 `ModelInfo::supports_chat(provider)` 检查 Google 是否声明 `generateContent`；OpenAI 兼容目录缺少统一能力字段，不推断每个模型的聊天兼容性。模型被列出不保证当前账号有生成权限或额度。
 - Google 的 system/developer 消息映射到 `systemInstruction`，assistant 映射为 `model`；输出仅拼接非 thought 文本，拒绝被拦截或不完整的回复。此适配只发送文本，不发送图片或调用工具。
 - reqwest 使用 rustls；超时/网络断流至多 3 次请求，350ms/700ms 退避；HTTP 错误直接返回。
 - 发送输出上限按原逻辑归一化为最多 8192；`length/max_tokens/MAX_TOKENS` 或明显未闭合 JSON 返回截断错误。Google 的连接探测预留 1024 tokens（包含思考额度），OpenAI 兼容探测为 8 tokens。

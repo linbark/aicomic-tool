@@ -131,6 +131,9 @@ impl AiSettings {
         if self.model.trim().is_empty() {
             return Err(AiError::InvalidInput("AI 模型名称不能为空".into()));
         }
+        self.validate_request()
+    }
+    pub(crate) fn validate_request(&self) -> Result<()> {
         if !self.timeout_seconds.is_finite()
             || self.timeout_seconds <= 0.0
             || self.timeout_seconds > 86400.0
