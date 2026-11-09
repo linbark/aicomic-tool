@@ -4928,7 +4928,7 @@ impl App {
         let selected = self.selected_item == Some(item_id);
         let dna = self.visual_dna_ids.contains(&item_id);
         let description = label(item, "description");
-        container(
+        button(
             column![
                 row![
                     ui::eyebrow(category_label(label(item, "category"))),
@@ -4951,17 +4951,17 @@ impl App {
                 .size(12)
                 .color(ui::TEXT_SECONDARY)
                 .line_height(1.55),
-                space::vertical(),
                 row![
-                    button("打开详情")
-                        .style(ui::ghost)
-                        .padding([4, 0])
-                        .on_press(Message::SelectItem(item_id)),
+                    ui::muted(if selected {
+                        "正在查看"
+                    } else {
+                        "点击查看"
+                    })
+                    .size(11),
                     space::horizontal(),
-                    button("删除")
-                        .style(ui::ghost)
-                        .padding([4, 0])
-                        .on_press(Message::DeleteItem(item_id)),
+                    text("→")
+                        .size(13)
+                        .color(if selected { ui::GOLD } else { ui::TEXT_MUTED }),
                 ]
                 .align_y(iced::Center),
             ]
@@ -4970,27 +4970,33 @@ impl App {
         .padding(14)
         .width(Fill)
         .height(Fill)
-        .style(move |_: &Theme| container::Style {
-            background: Some(
-                if selected {
-                    ui::SURFACE_HIGH
-                } else {
-                    ui::SURFACE
-                }
-                .into(),
-            ),
-            border: iced::Border {
-                color: if selected {
-                    ui::GOLD_DIM
-                } else {
-                    ui::LINE_SOFT
+        .style(move |_: &Theme, status| {
+            let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+            button::Style {
+                background: Some(
+                    if selected || hovered {
+                        ui::SURFACE_HIGH
+                    } else {
+                        ui::SURFACE
+                    }
+                    .into(),
+                ),
+                text_color: ui::TEXT,
+                border: iced::Border {
+                    color: if selected {
+                        ui::GOLD_DIM
+                    } else if hovered {
+                        ui::LINE
+                    } else {
+                        ui::LINE_SOFT
+                    },
+                    width: 1.0,
+                    radius: 12.0.into(),
                 },
-                width: 1.0,
-                radius: 12.0.into(),
-            },
-            text_color: Some(ui::TEXT),
-            ..container::Style::default()
+                ..button::Style::default()
+            }
         })
+        .on_press(Message::SelectItem(item_id))
         .into()
     }
 
