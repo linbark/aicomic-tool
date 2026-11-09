@@ -11,7 +11,10 @@ use aicomic_ai::{
     AiProvider, AiSettings, ContextStore, ExecutionInput, LlmClient, ModelInfo, PromptRegistry,
     ReviewDecision, WorkflowEngine, WorkflowResult,
 };
-use aicomic_core::{AssetItemUpdate, AssetTarget, EpisodeUpdate, EventUpdate, Store};
+use aicomic_core::{
+    AssetItemUpdate, AssetTarget, EpisodeUpdate, EventUpdate, ExportSummary, Store, export_project,
+    import_project,
+};
 use aicomic_memory::{EmbeddingSettings, MemoryQuery, MemoryService, MemoryStore};
 use iced::widget::{
     button, column, combo_box, container, grid, image, pick_list, row, scrollable, space, stack,
@@ -195,6 +198,10 @@ pub enum Message {
     NewProjectDescription(String),
     ToggleNewProject,
     CreateProject,
+    ImportProject,
+    ProjectImported(Result<Option<i64>, String>),
+    ExportProject,
+    ProjectExported(Result<Option<(PathBuf, ExportSummary)>, String>),
     DeleteProject,
     CreateEpisode,
     Episode(i64, u8),
@@ -397,6 +404,26 @@ fn short(text: &str, limit: usize) -> String {
         value.push('…');
     }
     value
+}
+
+fn export_file_stem(name: &str) -> String {
+    let value = name
+        .chars()
+        .map(|ch| {
+            if ch.is_control() || "/\\:*?\"<>|".contains(ch) {
+                '_'
+            } else {
+                ch
+            }
+        })
+        .collect::<String>();
+    let value = value.trim().trim_end_matches('.').trim();
+    let value = value.chars().take(80).collect::<String>();
+    if value.is_empty() {
+        "星晴项目".into()
+    } else {
+        value
+    }
 }
 
 fn episode_number(episode: &Value) -> i64 {
@@ -1635,6 +1662,96 @@ impl App {
                     }
                 }
             }
+            Message::ImportProject => {
+                let store = self.store.clone();
+                return Task::perform(
+                    async move {
+                        let Some(file) = rfd::AsyncFileDialog::new()
+                            .add_filter("星晴项目", &["xqproj"])
+                            .pick_file()
+                            .await
+                        else {
+                            return Ok(None);
+                        };
+                        let path = file.path().to_path_buf();
+                        let summary = tokio::task::spawn_blocking(move || {
+                            import_project(&store, &path).map_err(|error| error.to_string())
+                        })
+                        .await
+                        .map_err(|error| error.to_string())??;
+                        Ok(Some(summary.project_id))
+                    },
+                    Message::ProjectImported,
+                );
+            }
+            Message::ProjectImported(result) => match result {
+                Ok(Some(id)) => {
+                    self.reload_projects();
+                    if let Some(choice) =
+                        self.projects.iter().find(|choice| choice.id == id).cloned()
+                    {
+                        self.select_project(choice);
+                        self.status = "项目已导入，分集、资产、设定与事件已加入。".into();
+                    } else {
+                        self.status = "项目已导入，但刷新列表失败，请切换项目后重试。".into();
+                    }
+                }
+                Ok(None) => self.status = "已取消导入。".into(),
+                Err(error) => self.fail(error),
+            },
+            Message::ExportProject => {
+                let Some(project_id) = self.pid() else {
+                    self.status = "请先选择项目。".into();
+                    return Task::none();
+                };
+                let Some(project) = self.project.clone() else {
+                    return Task::none();
+                };
+                let store = self.store.clone();
+                let file_name = format!("{}.xqproj", export_file_stem(&project.name));
+                return Task::perform(
+                    async move {
+                        let Some(file) = rfd::AsyncFileDialog::new()
+                            .set_file_name(&file_name)
+                            .add_filter("星晴项目", &["xqproj"])
+                            .save_file()
+                            .await
+                        else {
+                            return Ok(None);
+                        };
+                        let path = file.path().to_path_buf();
+                        let target = path.clone();
+                        let summary = tokio::task::spawn_blocking(move || {
+                            export_project(&store, project_id, &target)
+                                .map_err(|error| format!("导出失败：{error}"))
+                        })
+                        .await
+                        .map_err(|error| error.to_string())??;
+                        Ok(Some((path, summary)))
+                    },
+                    Message::ProjectExported,
+                );
+            }
+            Message::ProjectExported(result) => match result {
+                Ok(Some((path, summary))) => {
+                    let warnings = if summary.warnings.is_empty() {
+                        String::new()
+                    } else {
+                        format!("，{} 条警告", summary.warnings.len())
+                    };
+                    self.status = format!(
+                        "已导出「{}」：{} 集 / {} 资产条目 / {} 个媒体{} → {}",
+                        summary.project_name,
+                        summary.episodes,
+                        summary.asset_items,
+                        summary.media,
+                        warnings,
+                        path.display()
+                    );
+                }
+                Ok(None) => self.status = "已取消导出。".into(),
+                Err(error) => self.fail(error),
+            },
             Message::DeleteProject => self.pending_delete = self.pid().map(|id| (true, id)),
             Message::CreateEpisode => {
                 if let Some(pid) = self.pid() {
@@ -2879,7 +2996,12 @@ impl App {
                     .on_press_maybe(
                         (!self.project_name.trim().is_empty()).then_some(Message::CreateProject)
                     ),
-                ui::muted("创建后不会联网，也不会自动生成内容。"),
+                button("导入项目文件")
+                    .style(ui::secondary)
+                    .width(Fill)
+                    .padding([10, 16])
+                    .on_press(Message::ImportProject),
+                ui::muted("创建后不会联网；已有 .xqproj 时可一步导入项目、分集、资产与设定。"),
             ]
             .spacing(16),
         )
@@ -2961,6 +3083,10 @@ impl App {
                 container(pickers).padding([0, 10]),
                 space::horizontal(),
                 stage_chip,
+                button("导入项目")
+                    .style(ui::secondary)
+                    .padding([8, 14])
+                    .on_press(Message::ImportProject),
                 button("＋ 新建项目")
                     .style(ui::secondary)
                     .padding([8, 14])
@@ -3870,6 +3996,12 @@ impl App {
             );
         }
         actions = actions.push(
+            button("导出项目")
+                .style(ui::secondary)
+                .padding([6, 10])
+                .on_press(Message::ExportProject),
+        );
+        actions = actions.push(
             button("删除项目")
                 .style(ui::danger)
                 .padding([6, 10])
@@ -3879,7 +4011,7 @@ impl App {
             row![
                 column![
                     ui::eyebrow("项目管理"),
-                    ui::muted("删除会移除该范围内的剧本、资产关联与运行引用，操作前会再次确认。"),
+                    ui::muted("导出为单个 .xqproj（不含运行历史与记忆）；删除会移除该范围内的剧本、资产关联与运行引用，操作前会再次确认。"),
                 ]
                 .spacing(3),
                 space::horizontal(),
@@ -7088,5 +7220,31 @@ mod tests {
         assert!(app.pending_run.is_none());
         assert!(app.busy.is_none());
         assert!(app.status.contains("输入已发生变化"));
+    }
+    #[test]
+    fn imported_project_result_selects_the_new_project() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        let mut app = App::new(
+            store.clone(),
+            Options {
+                root: root.path().into(),
+                demo: false,
+                ..Options::default()
+            },
+        );
+        assert!(app.project.is_none());
+        let project = store.create_project("导入项目", None).unwrap();
+        let _ = app.update(Message::ProjectImported(Ok(Some(project.id))));
+        assert_eq!(
+            app.project.as_ref().map(|project| project.id),
+            Some(project.id)
+        );
+        assert!(app.status.contains("项目已导入"));
+    }
+    #[test]
+    fn export_file_stem_removes_path_separators() {
+        assert_eq!(export_file_stem("../A/B"), ".._A_B");
+        assert_eq!(export_file_stem("   "), "星晴项目");
     }
 }

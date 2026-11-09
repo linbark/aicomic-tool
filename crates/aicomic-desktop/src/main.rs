@@ -26,6 +26,9 @@ pub struct Options {
     pub preview: Option<String>,
     pub ime_log: bool,
     pub scroll: Option<f32>,
+    pub export_project: Option<String>,
+    pub export_output: Option<PathBuf>,
+    pub import_project: Option<PathBuf>,
 }
 
 fn options() -> Result<Options, String> {
@@ -42,6 +45,23 @@ fn options() -> Result<Options, String> {
             }
             "--page" => options.page = Some(arguments.next().ok_or("--page 需要页面名称")?),
             "--ime-log" => options.ime_log = true,
+            "--export-project" => {
+                options.export_project = Some(
+                    arguments
+                        .next()
+                        .ok_or("--export-project 需要项目 ID 或 UUID")?,
+                )
+            }
+            "--export-output" => {
+                options.export_output = Some(PathBuf::from(
+                    arguments.next().ok_or("--export-output 需要文件路径")?,
+                ))
+            }
+            "--import-project" => {
+                options.import_project = Some(PathBuf::from(
+                    arguments.next().ok_or("--import-project 需要文件路径")?,
+                ))
+            }
             "--scroll" => {
                 options.scroll = Some(
                     arguments
@@ -65,7 +85,7 @@ fn options() -> Result<Options, String> {
             }
             "--help" | "-h" => {
                 println!(
-                    "星晴\n  --data-dir PATH  独立数据目录\n  --demo           在空目录创建演示项目\n  --smoke-test     启动检查后退出\n  --screenshot PNG 原生窗口截图\n  --page NAME      启动页面（开发用）\n  --step N         剧本步骤 0/1/2（开发用）\n  --preview ACTION 启动时打开生成确认（开发用）\n  --ime-log        打印输入法事件（开发用）\n  --scroll PX      滚动提示词编辑器（开发用）"
+                    "星晴\n  --data-dir PATH  独立数据目录\n  --demo           在空目录创建演示项目\n  --smoke-test     启动检查后退出\n  --screenshot PNG 原生窗口截图\n  --page NAME      启动页面（开发用）\n  --step N         剧本步骤 0/1/2（开发用）\n  --preview ACTION 启动时打开生成确认（开发用）\n  --ime-log        打印输入法事件（开发用）\n  --scroll PX      滚动提示词编辑器（开发用）\n  --export-project ID/UUID  导出项目（命令行）\n  --export-output FILE      导出文件路径\n  --import-project FILE     导入项目归档（命令行）"
                 );
                 std::process::exit(0);
             }
@@ -97,6 +117,41 @@ fn default_data_dir() -> PathBuf {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let options = options().map_err(std::io::Error::other)?;
     let store = aicomic_core::Store::open(&options.root)?;
+    if let Some(project) = &options.export_project {
+        let output = options
+            .export_output
+            .clone()
+            .ok_or_else(|| std::io::Error::other("--export-project 需要 --export-output"))?;
+        let project = store.resolve_project(project)?;
+        let summary = aicomic_core::export_project(&store, project.id, &output)?;
+        println!(
+            "导出完成：{}（{} 集 / {} 资产条目 / {} 个媒体）-> {}",
+            summary.project_name,
+            summary.episodes,
+            summary.asset_items,
+            summary.media,
+            output.display()
+        );
+        for warning in &summary.warnings {
+            eprintln!("警告：{warning}");
+        }
+        return Ok(());
+    }
+    if let Some(archive) = &options.import_project {
+        let summary = aicomic_core::import_project(&store, archive)?;
+        println!(
+            "导入完成：{}（ID {}，{} 集 / {} 资产条目 / {} 个媒体）",
+            summary.project_name,
+            summary.project_id,
+            summary.episodes,
+            summary.asset_items,
+            summary.media
+        );
+        for warning in &summary.warnings {
+            eprintln!("警告：{warning}");
+        }
+        return Ok(());
+    }
     iced::application(
         move || app::App::new(store.clone(), options.clone()),
         app::App::update,

@@ -1,4 +1,5 @@
 //! Local domain storage. Existing SQLAlchemy tables and JSON files stay readable.
+mod archive;
 mod crud;
 mod files;
 mod identity;
@@ -8,6 +9,7 @@ pub mod models;
 mod paths;
 mod schema;
 mod workflow;
+pub use archive::{ExportSummary, ImportSummary, export_project, import_project};
 pub use models::*;
 pub use paths::AppPaths;
 use rusqlite::{

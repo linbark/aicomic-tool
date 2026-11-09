@@ -4,6 +4,7 @@
 **/*.rs.bk
 
 # Local application data and model weights
+/exports/
 /data/
 /projects/
 /qdrant_db/
