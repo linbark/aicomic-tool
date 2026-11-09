@@ -10,6 +10,27 @@
 
 生成结果、运行详情与记忆按字段标题、列表编号和层级缩进展示，保留正文换行；画布预览按文字宽度折行，完整内容可在详情查看。项目上下文通过分组表单编辑，支持添加、删除字段和列表条目；无须编辑 JSON，底层数据与原始运行记录保持兼容。
 
+## 新机器快速开始
+
+需要 Rust 1.88 起；macOS 安装 Xcode Command Line Tools，Windows 安装 MSVC C++ Build Tools 与 Windows SDK。
+
+```sh
+git clone https://github.com/linbark/aicomic-tool.git
+cd aicomic-tool
+cargo run --locked -p aicomic-desktop -- --data-dir "./demo-data" --demo
+```
+
+首次启动会创建独立数据目录并写入演示项目，不联网、不请求模型。稳定构建：
+
+```sh
+cargo build --locked --release -p aicomic-desktop
+./target/release/aicomic-tool
+```
+
+Windows 使用 `target\release\aicomic-tool.exe`。
+
+仓库只包含源码、内置 Prompt 与演示截图，**不包含数据库、项目素材、模型权重或 API Key**。要把现有项目带到另一台电脑，请复制整个应用数据根目录（`database.db`、`memory_store.db`、`projects/`、`data/`、`ai_settings.json` 等），再用 `--data-dir` 指向它；私有仓库也不建议提交密钥。
+
 ## 制作工作流与界面
 
 设计文档把制作拆成五个已实现阶段，并在需要人确认的地方设置闸门：
