@@ -98,6 +98,31 @@ cargo run --locked --release -p aicomic-desktop -- --data-dir "./smoke-data" --d
 
 自动化测试使用临时数据库、本地模拟 HTTP 和微型推理权重；它们不等于真实付费模型、完整 BGE-M3 或每个平台的人工验收。
 
+### Windows：C 依赖编译报 D8050
+
+MSVC 14.44 经 cargo 编译 C 依赖时可能遇到：
+
+```text
+cl: 命令行 error D8050 :无法执行"…\HostX64\x64\c1.dll": 未能将命令行放入调试记录中
+```
+
+同样的 `cl.exe` 参数在命令行手工执行可以通过，所以不是 MSVC 安装损坏；触发点是 cc-rs 在构建脚本环境里给 C 源码追加的 `/Z7`。`ring`、`libsqlite3-sys` 都出现过该错误，剥掉这个开关后全量构建通过。建一个只做这件事的编译器包装器 `msvc-cc-nodz7.bat`：
+
+```bat
+@echo off
+call "%ProgramFiles(x86)%\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" >nul 2>&1
+set "A=%*"
+set "A=%A:-Z7 =%"
+cl.exe %A%
+```
+
+```powershell
+$env:CC_x86_64_pc_windows_msvc = "C:\path\to\msvc-cc-nodz7.bat"
+cargo build --locked --workspace
+```
+
+代价是 C 依赖（ring、SQLite）没有调试行号，Rust 侧调试信息不受影响。2026-11-09 在 Windows build 26200 + MSVC 14.44.35207 实测：不带包装器 `ring`/`libsqlite3-sys` 均失败，带上后 `cargo build --workspace --locked` 与窗口冒烟检查通过。
+
 ## 旧数据与备份
 
 `--data-dir` 指向**应用数据根目录**，其中应包含 `database.db`，以及同级的 `data/`、`projects/` 等内容；不要把它指向旧 `AICOMIC_DATA_DIR` 对应的素材 `data/` 子目录。
@@ -177,7 +202,7 @@ Windows x64 在 Windows PowerShell 中安装 Rust MSVC 工具链与 NSIS 3 后�
 | --- | --- |
 | macOS arm64 | release、APP/ZIP/DMG 及校验通过；在 macOS 27 实测中文编辑、保存快捷键、切集、事件矩阵选择/缩放、系统素材导入和图片预览。不是所有交互或最低系统版本的完整验收 |
 | macOS Intel x64 | 本机交叉编译与 APP/ZIP/DMG 打包通过；Rosetta 隔离启动检查退出 0，尚无 Intel 硬件实测 |
-| Windows x64 | 已配置原生 CI、EXE/NSIS 打包及安装/卸载检查；本次尚未在 Windows 实际运行 |
+| Windows x64 | 已配置原生 CI、EXE/NSIS 打包及安装/卸载脚本；2026-11-09 在 Windows build 26200 完成 dev 构建与原生窗口冒烟检查，打包后的 EXE 与 NSIS 安装器仍未在 Windows 实测 |
 | 签名 | macOS 仅 ad-hoc 签名，无 Developer ID 签名或 Apple 公证；Windows EXE/安装器未签名 |
 
 CI 配置见 [rust-desktop.yml](.github/workflows/rust-desktop.yml)；配置存在不代表运行成功。最低 macOS 版本配置也不代表已在该版本实测。音频、视频和文档目前通过系统默认应用打开，图片可在素材库内预览。
