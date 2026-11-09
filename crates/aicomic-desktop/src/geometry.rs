@@ -47,7 +47,7 @@ impl BoardView {
         self.positions
             .get(&index)
             .copied()
-            .unwrap_or([(index % 3) as f32 * 300.0, (index / 3) as f32 * 240.0])
+            .unwrap_or([(index % 2) as f32 * 300.0, (index / 2) as f32 * 240.0])
     }
 }
 #[cfg(test)]

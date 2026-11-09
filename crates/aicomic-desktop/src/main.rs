@@ -2,11 +2,16 @@
 
 mod app;
 mod board;
+mod context_form;
+mod editor;
 mod event_matrix;
 mod geometry;
 mod integration;
+mod presentation;
+mod production;
 mod session;
 mod shortcuts;
+mod ui;
 
 use std::path::PathBuf;
 
@@ -16,6 +21,11 @@ pub struct Options {
     pub demo: bool,
     pub smoke: bool,
     pub screenshot: Option<PathBuf>,
+    pub page: Option<String>,
+    pub step: Option<u8>,
+    pub preview: Option<String>,
+    pub ime_log: bool,
+    pub scroll: Option<f32>,
 }
 
 fn options() -> Result<Options, String> {
@@ -30,9 +40,32 @@ fn options() -> Result<Options, String> {
                 options.screenshot =
                     Some(arguments.next().ok_or("--screenshot 需要 PNG 路径")?.into())
             }
+            "--page" => options.page = Some(arguments.next().ok_or("--page 需要页面名称")?),
+            "--ime-log" => options.ime_log = true,
+            "--scroll" => {
+                options.scroll = Some(
+                    arguments
+                        .next()
+                        .ok_or("--scroll 需要像素值")?
+                        .parse()
+                        .map_err(|_| "--scroll 需要像素值")?,
+                )
+            }
+            "--preview" => {
+                options.preview = Some(arguments.next().ok_or("--preview 需要动作 key")?)
+            }
+            "--step" => {
+                options.step = Some(
+                    arguments
+                        .next()
+                        .ok_or("--step 需要 0、1 或 2")?
+                        .parse()
+                        .map_err(|_| "--step 需要 0、1 或 2")?,
+                )
+            }
             "--help" | "-h" => {
                 println!(
-                    "星晴\n  --data-dir PATH  独立数据目录\n  --demo           在空目录创建演示项目\n  --smoke-test     启动检查后退出\n  --screenshot PNG 原生窗口截图"
+                    "星晴\n  --data-dir PATH  独立数据目录\n  --demo           在空目录创建演示项目\n  --smoke-test     启动检查后退出\n  --screenshot PNG 原生窗口截图\n  --page NAME      启动页面（开发用）\n  --step N         剧本步骤 0/1/2（开发用）\n  --preview ACTION 启动时打开生成确认（开发用）\n  --ime-log        打印输入法事件（开发用）\n  --scroll PX      滚动提示词编辑器（开发用）"
                 );
                 std::process::exit(0);
             }

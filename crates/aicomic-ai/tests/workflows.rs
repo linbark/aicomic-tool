@@ -1,4 +1,6 @@
-use aicomic_ai::{AiSettings, ContextStore, ExecutionInput, ReviewDecision, WorkflowEngine};
+use aicomic_ai::{
+    AiError, AiSettings, ContextStore, ExecutionInput, ReviewDecision, WorkflowEngine,
+};
 use serde_json::{Value, json};
 use std::{
     io::{Read, Write},
@@ -6,10 +8,11 @@ use std::{
     thread,
 };
 
-fn provider(replies: Vec<Value>) -> (String, thread::JoinHandle<()>) {
+fn provider(replies: Vec<Value>) -> (String, thread::JoinHandle<Vec<Value>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let handle = thread::spawn(move || {
+        let mut requests = Vec::new();
         for reply in replies {
             let (mut stream, _) = listener.accept().unwrap();
             stream
@@ -38,6 +41,9 @@ fn provider(replies: Vec<Value>) -> (String, thread::JoinHandle<()>) {
                     }
                 }
             }
+            let request = String::from_utf8(data).unwrap();
+            let (_, body) = request.split_once("\r\n\r\n").unwrap();
+            requests.push(serde_json::from_str(body).unwrap());
             let text = reply
                 .as_str()
                 .map(str::to_owned)
@@ -46,6 +52,7 @@ fn provider(replies: Vec<Value>) -> (String, thread::JoinHandle<()>) {
                 .to_string();
             write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
         }
+        requests
     });
     (url, handle)
 }
@@ -222,6 +229,80 @@ async fn project_outline_generation_and_optimization_write_compatible_context() 
         "改稿"
     );
     handle.join().unwrap();
+}
+
+#[tokio::test]
+async fn project_outline_optimization_uses_explicit_edits_instead_of_the_saved_outline() {
+    let root = tempfile::tempdir().unwrap();
+    let (url, handle) = provider(vec![
+        json!("broken output"),
+        json!({"project_outline":{"title":"优化后的大纲","episode_outlines":[]},"changes_summary":"保留本轮编辑"}),
+    ]);
+    let engine = WorkflowEngine::new(root.path().into(), settings(url));
+    engine
+        .store()
+        .put_context(
+            "12",
+            "project_outline",
+            "v1",
+            &json!({"title":"磁盘上的旧大纲"}),
+        )
+        .unwrap();
+    let edited =
+        json!({"title":"表单中尚未保存的新大纲","episode_outlines":[{"summary":"新增悬念"}]});
+    let mut request = input("project_outline_optimize", "edited-outline-run");
+    request.context["current_outline"] = edited.clone();
+    let result = engine.execute(request).await.unwrap();
+    let requests = handle.join().unwrap();
+    assert_eq!(requests.len(), 2);
+    for (index, request) in requests.iter().enumerate() {
+        let user_message = request["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["role"] == "user")
+            .unwrap()["content"]
+            .as_str()
+            .unwrap();
+        if index == 0 {
+            assert!(user_message.contains(&format!("当前项目大纲：{edited}")));
+        }
+        assert!(user_message.contains("表单中尚未保存的新大纲"));
+        assert!(!user_message.contains("磁盘上的旧大纲"));
+    }
+    assert_eq!(result.artifacts["project_outline"]["title"], "优化后的大纲");
+}
+
+#[tokio::test]
+async fn invalid_explicit_outline_is_rejected_without_falling_back_to_saved_content() {
+    let root = tempfile::tempdir().unwrap();
+    let engine = WorkflowEngine::new(root.path().into(), AiSettings::default());
+    let saved = json!({"title":"应当保留的旧大纲"});
+    engine
+        .store()
+        .put_context("12", "project_outline", "v1", &saved)
+        .unwrap();
+    for (index, invalid) in [Value::Null, json!("普通文本"), json!([]), json!(12)]
+        .into_iter()
+        .enumerate()
+    {
+        let mut request = input(
+            "project_outline_optimize",
+            &format!("invalid-outline-{index}"),
+        );
+        request.context["current_outline"] = invalid;
+        assert!(matches!(
+            engine.execute(request).await,
+            Err(AiError::InvalidInput(_))
+        ));
+        assert_eq!(
+            engine
+                .store()
+                .get_context("12", "project_outline", "v1")
+                .unwrap(),
+            Some(saved.clone())
+        );
+    }
 }
 
 #[tokio::test]

@@ -371,13 +371,31 @@ impl WorkflowEngine {
         }
         self.run_steps(input, &steps, 0, artifacts).await
     }
-    fn with_context(&self, input: &ExecutionInput, text: &str) -> Result<String> {
+    fn outline_for_optimization(&self, input: &ExecutionInput) -> Result<Value> {
+        match input.context.get("current_outline") {
+            Some(current) if current.is_object() => Ok(current.clone()),
+            Some(_) => Err(AiError::InvalidInput(
+                "需要优化的项目大纲应包含分组内容，请重新载入后重试".into(),
+            )),
+            None => self
+                .store
+                .get_context(&input.project_id, "project_outline", "v1")?
+                .ok_or_else(|| AiError::InvalidInput("请先保存需要优化的项目大纲".into())),
+        }
+    }
+    fn with_context(&self, input: &ExecutionInput, stage: &str, text: &str) -> Result<String> {
         let bible = self
             .store
             .get_context(&input.project_id, "series_bible", "v1")?;
-        let outline = self
-            .store
-            .get_context(&input.project_id, "project_outline", "v1")?;
+        let outline = if matches!(
+            stage,
+            "project_outline_optimize" | "project_outline_optimize.repair"
+        ) {
+            Some(self.outline_for_optimization(input)?)
+        } else {
+            self.store
+                .get_context(&input.project_id, "project_outline", "v1")?
+        };
         Ok(format!(
             "{text}\n\n### 创作上下文（遵循已确认设定）\n{}",
             json!({"series_bible":bible,"project_outline":outline,"provided":input.context})
@@ -404,7 +422,7 @@ impl WorkflowEngine {
         if repair {
             settings.temperature = 0.0;
         }
-        let user = self.with_context(input, user)?;
+        let user = self.with_context(input, stage, user)?;
         let output = LlmClient
             .chat(
                 &settings,
@@ -794,10 +812,7 @@ impl WorkflowEngine {
                             .clamp(1, 500)
                     )
                 } else {
-                    let current = self
-                        .store
-                        .get_context(&input.project_id, "project_outline", "v1")?
-                        .unwrap_or_else(|| input.context["current_outline"].clone());
+                    let current = self.outline_for_optimization(input)?;
                     format!("当前项目大纲：{current}\n\n优化指令：{user}")
                 };
                 let value = self

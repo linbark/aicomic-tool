@@ -1,5 +1,6 @@
 //! Episode rows and local scene columns, with event paths across the story.
 use crate::geometry::BoardView;
+use crate::ui;
 use iced::widget::canvas::{self, Action, Event, Frame, Geometry, Path, Stroke, Text};
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme, Vector, mouse};
 use serde_json::Value;
@@ -276,7 +277,7 @@ fn parse_color(value: &str) -> Color {
     {
         return Color::from_rgb8((value >> 16) as u8, (value >> 8) as u8, value as u8);
     }
-    Color::from_rgb8(129, 140, 248)
+    ui::INDIGO
 }
 fn alpha(mut color: Color, opacity: f32) -> Color {
     color.a = opacity;
@@ -370,7 +371,7 @@ impl canvas::Program<MatrixMessage> for Matrix<'_> {
         cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
         let mut frame = Frame::new(renderer, bounds.size());
-        frame.fill_rectangle(Point::ORIGIN, bounds.size(), Color::from_rgb8(12, 20, 35));
+        frame.fill_rectangle(Point::ORIGIN, bounds.size(), ui::INK);
         let grid = episode_grid(self.episodes, self.scenes);
         let paths = event_paths(self.events, &grid);
         let selected = self
@@ -385,11 +386,7 @@ impl canvas::Program<MatrixMessage> for Matrix<'_> {
         frame.with_save(|frame| {
             frame.translate(Vector::new(self.view.pan[0], self.view.pan[1]));
             frame.scale(self.view.zoom);
-            frame.fill_rectangle(
-                Point::ORIGIN,
-                Size::new(width, TOP),
-                Color::from_rgb8(20, 30, 49),
-            );
+            frame.fill_rectangle(Point::ORIGIN, Size::new(width, TOP), ui::SURFACE);
             for (index, path) in paths.iter().enumerate() {
                 let bounds = legend(index);
                 let active = selected == Some(path.event_id) || hovered == Some(path.event_id);
@@ -410,7 +407,7 @@ impl canvas::Program<MatrixMessage> for Matrix<'_> {
                     if active {
                         Color::WHITE
                     } else {
-                        Color::from_rgb8(185, 199, 219)
+                        ui::TEXT_SECONDARY
                     },
                     LEGEND_WIDTH - 42.0,
                 );
@@ -420,7 +417,7 @@ impl canvas::Program<MatrixMessage> for Matrix<'_> {
                 "分集 / 场景",
                 Point::new(18.0, 66.0),
                 15.0,
-                Color::from_rgb8(226, 232, 240),
+                ui::TEXT,
                 LEFT - 32.0,
             );
             for column in 0..grid.max_columns {
@@ -430,14 +427,12 @@ impl canvas::Program<MatrixMessage> for Matrix<'_> {
                     format!("scene {}", column + 1),
                     Point::new(x + 40.0, 67.0),
                     12.0,
-                    Color::from_rgb8(148, 163, 184),
+                    ui::TEXT_MUTED,
                     COLUMN - 22.0,
                 );
                 frame.stroke(
                     &Path::line(Point::new(x, TOP), Point::new(x, height)),
-                    Stroke::default()
-                        .with_color(Color::from_rgb8(33, 46, 66))
-                        .with_width(1.0),
+                    Stroke::default().with_color(ui::LINE).with_width(1.0),
                 );
             }
             for (row_index, row) in grid.rows.iter().enumerate() {
@@ -451,10 +446,10 @@ impl canvas::Program<MatrixMessage> for Matrix<'_> {
                 }
                 text(
                     frame,
-                    format!("EP{:02}", row.order),
+                    format!("EP{:02}", row.order + 1),
                     Point::new(20.0, y + 17.0),
                     15.0,
-                    Color::from_rgb8(203, 213, 225),
+                    ui::TEXT,
                     LEFT - 30.0,
                 );
                 text(
@@ -462,7 +457,7 @@ impl canvas::Program<MatrixMessage> for Matrix<'_> {
                     row.title.chars().take(11).collect::<String>(),
                     Point::new(20.0, y + 44.0),
                     11.0,
-                    Color::from_rgb8(148, 163, 184),
+                    ui::TEXT_MUTED,
                     LEFT - 30.0,
                 );
                 if row.scenes.is_empty() {
@@ -471,15 +466,13 @@ impl canvas::Program<MatrixMessage> for Matrix<'_> {
                         "暂无场景",
                         Point::new(LEFT + 24.0, y + 30.0),
                         12.0,
-                        Color::from_rgb8(100, 116, 139),
+                        ui::TEXT_MUTED,
                         COLUMN - 24.0,
                     );
                 }
                 frame.stroke(
                     &Path::line(Point::new(0.0, y + ROW), Point::new(width, y + ROW)),
-                    Stroke::default()
-                        .with_color(Color::from_rgb8(33, 46, 66))
-                        .with_width(1.0),
+                    Stroke::default().with_color(ui::LINE).with_width(1.0),
                 );
             }
             let mut ordered: Vec<_> = paths.iter().enumerate().collect();
@@ -525,16 +518,14 @@ impl canvas::Program<MatrixMessage> for Matrix<'_> {
                         .copied()
                         .find(|path| Some(path.event_id) == selected)
                         .or_else(|| linked.first().copied());
-                    let color = primary
-                        .map(|path| path.color)
-                        .unwrap_or(Color::from_rgb8(71, 85, 105));
+                    let color = primary.map(|path| path.color).unwrap_or(ui::INDIGO);
                     let active = primary.is_some_and(|path| {
                         Some(path.event_id) == selected || Some(path.event_id) == hovered
                     });
                     if active {
                         frame.fill(&Path::circle(node, RADIUS + 6.0), alpha(color, 0.13));
                     }
-                    frame.fill(&Path::circle(node, RADIUS), Color::from_rgb8(15, 23, 42));
+                    frame.fill(&Path::circle(node, RADIUS), ui::SURFACE_SOFT);
                     frame.stroke(
                         &Path::circle(node, RADIUS),
                         Stroke::default().with_color(color).with_width(if active {
@@ -551,7 +542,7 @@ impl canvas::Program<MatrixMessage> for Matrix<'_> {
                         if primary.is_some() {
                             Color::WHITE
                         } else {
-                            Color::from_rgb8(148, 163, 184)
+                            ui::TEXT_MUTED
                         },
                         24.0,
                     );
@@ -566,7 +557,7 @@ impl canvas::Program<MatrixMessage> for Matrix<'_> {
                         label(scene, "title").chars().take(10).collect::<String>(),
                         node + Vector::new(-54.0, 28.0),
                         10.5,
-                        Color::from_rgb8(125, 145, 171),
+                        ui::TEXT_SECONDARY,
                         COLUMN - 24.0,
                     );
                 }
@@ -577,7 +568,7 @@ impl canvas::Program<MatrixMessage> for Matrix<'_> {
                     "创建分集并拆分场景后，事件将在对应场景间连线。",
                     Point::new(24.0, TOP + 24.0),
                     14.0,
-                    Color::from_rgb8(148, 163, 184),
+                    ui::TEXT_MUTED,
                     520.0,
                 );
             }
@@ -600,7 +591,7 @@ impl canvas::Program<MatrixMessage> for Matrix<'_> {
             ),
             Point::new(14.0, bounds.height - 26.0),
             11.0,
-            Color::from_rgb8(148, 163, 184),
+            ui::TEXT_MUTED,
             (bounds.width - 28.0).max(0.0),
         );
         vec![frame.into_geometry()]

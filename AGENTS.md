@@ -13,7 +13,7 @@
 - `crates/aicomic-ai`：模型客户端、Prompt、工作流及 Run/Stage。
 - `crates/aicomic-memory`：证据、实体、变更审核、检索和可选 Candle 推理。
 - `packaging/`：Mac APP/DMG 与 Windows EXE/NSIS 打包；图标只使用 ICNS/ICO。
-- `docs/`：迁移边界与领域设计资料。设计研究不等于已交付功能。
+- `docs/`：迁移边界与领域设计资料，历史资料归档在 `docs/archive/`。设计研究不等于已交付功能。
 
 正式程序由 Rust 直接执行，不引入 Python、Node、WebView 或本地 HTTP 服务。
 
