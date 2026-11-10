@@ -1,0 +1,32 @@
+{
+  "pack": "architecture",
+  "version": "1.0",
+  "title": "建筑领域包",
+  "domain": {"id": "architecture", "title": "建筑与空间", "medium": "space"},
+  "note": "选它作为第二个领域，是因为它和界面共享『空间组织』的问题域，但手法完全不同——跨域迁移最容易在这里产出可用灵感，而不是噪音。",
+  "devices": [
+    {"term": "arch.colonnade", "label": "柱廊", "realizes": ["rhythm.equal", "depth.framing", "scale.hierarchy"], "mechanism": "等距垂直构件形成节拍，柱间空隙提供通透的负空间与纵深", "observable": "柱距方差、柱高与开间比", "extract": ["vision-llm"]},
+    {"term": "arch.axial-symmetry", "label": "中轴对称", "realizes": ["balance.symmetry", "scale.hierarchy"], "mechanism": "轴线两侧镜像，行进方向被结构本身规定", "observable": "立面镜像相似度与轴线偏移", "extract": ["vision-llm"]},
+    {"term": "arch.courtyard-void", "label": "庭院留白", "realizes": ["negative-space.active", "rhythm.hold", "depth.framing"], "mechanism": "用一块不可建造的空地组织动线与采光，空白即结构", "observable": "建筑占地中空腔面积占比与位置", "extract": ["vision-llm"]},
+    {"term": "arch.threshold", "label": "门槛", "realizes": ["rhythm.hold", "narrative.juxtaposition"], "mechanism": "在两种状态之间插入一段过渡空间，让进入被感知", "observable": "入口序列的空间层次数与高差", "extract": ["manual"]},
+    {"term": "arch.fenestration-rhythm", "label": "开窗节奏", "realizes": ["rhythm.equal", "rhythm.syncopation", "contrast.value"], "mechanism": "窗洞的等距或错位重复，同时决定采光与立面表情", "observable": "窗宽/窗距序列的变异系数", "extract": ["vision-llm"]},
+    {"term": "arch.structural-exposure", "label": "结构外露", "realizes": ["order.unfinished", "narrative.quote"], "mechanism": "把承重逻辑直接呈现，减少装饰层，暴露建造过程", "observable": "可见结构构件占比", "extract": ["vision-llm"]},
+    {"term": "arch.patina", "label": "岁月痕迹", "realizes": ["order.unfinished", "contrast.material", "gesture.hand"], "mechanism": "材料随时间变化，记录使用与气候", "observable": "表面色差与纹理粗糙度的空间分布", "extract": ["vision-llm"]},
+    {"term": "arch.scale-contrast-door", "label": "尺度对比入口", "realizes": ["scale.jump", "tension.off-axis"], "mechanism": "用远小于常规的入口反衬内部空间的宏大", "observable": "入口宽度与相邻墙体宽度的比值", "extract": ["vision-llm"]},
+    {"term": "arch.material-joint", "label": "材料交接", "realizes": ["contrast.material", "proportion.system"], "mechanism": "两种材料的接缝被精确处理，缝本身成为装饰秩序", "observable": "接缝宽度一致性与对位关系", "extract": ["vision-llm"]},
+    {"term": "arch.deep-window", "label": "深窗", "realizes": ["depth.framing", "material.light-translucency", "contrast.value"], "mechanism": "窗洞进深让光有方向，室内因此获得时间感", "observable": "窗洞进深/宽度比与光斑形状", "extract": ["vision-llm"]}
+  ],
+  "styles": [
+    {"term": "style.arch.brutalist", "label": "粗野主义", "definition": "裸露混凝土、重体量、结构即装饰"},
+    {"term": "style.arch.japandi", "label": "和风极简", "definition": "木、纸、低对比、留白与框景"},
+    {"term": "style.arch.memphis-postmodern", "label": "后现代拼贴", "definition": "引用历史符号、强色彩、玩味比例"}
+  ],
+  "sources": [
+    {"id": "archdaily", "tier": "B", "note": "项目图集，需核对单图授权"},
+    {"id": "wikimedia-commons", "tier": "A", "note": "开放许可建筑摄影，已实测可达"},
+    {"id": "capture-inbox", "tier": "B", "note": "用户自有建筑摄影"}
+  ],
+  "spec_template": {
+    "sections": ["场地与动线", "体量与比例", "材料与光", "细部秩序", "反模式", "证据与署名"]
+  }
+}

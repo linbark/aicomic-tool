@@ -1,0 +1,34 @@
+{
+  "pack": "ui",
+  "version": "1.0",
+  "title": "产品界面领域包",
+  "domain": {"id": "ui", "title": "产品界面", "medium": "space"},
+  "note": "device 是某个领域里可检查的具体手法。observable 说明抽取器看什么，mechanism 说明它为什么实现了对应基元。",
+  "devices": [
+    {"term": "ui.spacing-scale", "label": "间距阶", "realizes": ["proportion.system", "rhythm.equal", "negative-space.active"], "mechanism": "固定模数让间距可预期，阶数之间自然留出空白带", "observable": "间距值集合是否落在 4/8 的倍数上，是否只有 4–6 档", "extract": ["css-probe", "vision-llm"]},
+    {"term": "ui.type-scale", "label": "字阶", "realizes": ["scale.hierarchy", "proportion.system"], "mechanism": "有限档位的字号形成清晰层级，避免中间态模糊", "observable": "字号集合大小与相邻比值的方差", "extract": ["css-probe", "vision-llm"]},
+    {"term": "ui.grid-columns", "label": "网格列", "realizes": ["proportion.system", "grid.deviation"], "mechanism": "显式列网格让对齐可验证，偏离需有理由", "observable": "元素左边缘落在少数几条 x 坐标上", "extract": ["vision-llm"]},
+    {"term": "ui.single-accent", "label": "单强调色", "realizes": ["contrast.value", "restraint.single-hue"], "mechanism": "只允许一种强调色承载可操作语义，其余用中性色", "observable": "高饱和像素的色相数量与面积占比", "extract": ["vision-llm"]},
+    {"term": "ui.elevation-stack", "label": "层级堆叠", "realizes": ["depth.overlap", "depth.atmospheric"], "mechanism": "阴影/模糊/明度差共同编码前后关系，层级数有限", "observable": "阴影模糊半径与不透明度的离散层级数", "extract": ["css-probe"]},
+    {"term": "ui.empty-state", "label": "空状态", "realizes": ["negative-space.active", "restraint.removal"], "mechanism": "无数据时用一句话与一个动作占据空白，而不是塞满占位", "observable": "零数据页面中的文案量、操作数与留白率", "extract": ["vision-llm"]},
+    {"term": "ui.nav-rail", "label": "侧边导航轨", "realizes": ["rhythm.equal", "depth.framing", "balance.asymmetry"], "mechanism": "等距重复的导航项形成节拍，固定轨道框住内容区", "observable": "导航项高度方差与轨道宽度占比", "extract": ["vision-llm", "css-probe"]},
+    {"term": "ui.modal-scrim", "label": "遮罩层", "realizes": ["depth.overlap", "contrast.value"], "mechanism": "降低背景对比度把注意力压到前景层", "observable": "背景层亮度/饱和度下降幅度", "extract": ["vision-llm"]},
+    {"term": "ui.state-color", "label": "状态色语义", "realizes": ["contrast.value"], "mechanism": "成功/警告/错误用稳定的色相编码，且不只靠颜色", "observable": "状态色色相分布与是否附带图标/文案", "extract": ["vision-llm", "css-probe"]},
+    {"term": "ui.corner-system", "label": "圆角系统", "realizes": ["organic.curve", "proportion.system"], "mechanism": "圆角半径分级并与尺寸成比例，避免随机圆角", "observable": "圆角半径的档位数与半径/尺寸比", "extract": ["css-probe"]},
+    {"term": "ui.micro-motion", "label": "微动效", "realizes": ["motion.ease", "motion.follow-through", "motion.anticipation"], "mechanism": "状态切换用 120–240ms 的缓动，次级元素错峰", "observable": "过渡时长分布与缓动曲线二阶差分", "extract": ["css-probe", "recording-probe"]},
+    {"term": "ui.hero-focal", "label": "首屏焦点", "realizes": ["scale.jump", "order.single-exception"], "mechanism": "首屏只允许一个尺寸或色彩上的例外作为焦点", "observable": "首屏最大视觉重量元素数量", "extract": ["vision-llm"]}
+  ],
+  "styles": [
+    {"term": "style.ui.neutral-dense", "label": "中性高密", "definition": "低饱和、密信息、弱装饰，适合长时间操作"},
+    {"term": "style.ui.editorial", "label": "编辑感", "definition": "大字级差、强留白、图片主导，适合内容与营销"},
+    {"term": "style.ui.tactile", "label": "触感拟物", "definition": "材质与光影提示可操作性，适合创作工具"}
+  ],
+  "sources": [
+    {"id": "designeer", "tier": "A+B", "note": "目录层自动、详情层需浏览器辅助，见 Designeer 接入规范"},
+    {"id": "capture-inbox", "tier": "B", "note": "用户截图与网页另存，最贴近真实项目语境"},
+    {"id": "project-repo", "tier": "A", "note": "自有产品代码里的 CSS token 与组件，作为偏好锚点"}
+  ],
+  "spec_template": {
+    "sections": ["产品语境", "视觉方向", "间距与字阶", "色彩与状态", "组件规则", "动效", "反模式", "证据与署名"]
+  }
+}
