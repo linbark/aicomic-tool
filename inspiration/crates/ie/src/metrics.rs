@@ -24,6 +24,8 @@ pub struct Metrics {
     pub compactness: f32,
     /// 对齐度 0..1，越高越守网格
     pub alignment: f32,
+    /// 主色板：(hex, 面积占比)，按占比降序
+    pub palette: Vec<(String, f32)>,
 }
 
 pub fn compute(path: &std::path::Path) -> anyhow::Result<Metrics> {
@@ -51,6 +53,7 @@ pub fn compute(path: &std::path::Path) -> anyhow::Result<Metrics> {
         contrast: contrast_ratio(&luma),
         compactness: palette_compactness(&rgb),
         alignment: alignment(&gx, &gy, w, h),
+        palette: palette(&rgb),
     })
 }
 
@@ -274,6 +277,76 @@ fn palette_compactness(rgb: &RgbImage) -> f32 {
     }
     let norm = spread / 160.0;
     (1.0 - norm.clamp(0.0, 1.0)).clamp(0.0, 1.0)
+}
+
+/// 主色板：k-means 的簇心 + 面积占比。颜色是复现里最不能靠形容词的部分，必须给 hex。
+fn palette(rgb: &RgbImage) -> Vec<(String, f32)> {
+    const K: usize = 5;
+    let (w, h) = rgb.dimensions();
+    let step = (((w as usize * h as usize) / 20_000).max(1)) as u32;
+    let mut pts: Vec<[f32; 3]> = Vec::new();
+    for y in (0..h).step_by(step as usize) {
+        for x in (0..w).step_by(step as usize) {
+            let p = rgb.get_pixel(x, y);
+            pts.push([p[0] as f32, p[1] as f32, p[2] as f32]);
+        }
+    }
+    if pts.len() < K {
+        return Vec::new();
+    }
+    let mut centers: Vec<[f32; 3]> = (0..K).map(|k| pts[k * pts.len() / K]).collect();
+    let mut assign = vec![0usize; pts.len()];
+    for _ in 0..12 {
+        for (pi, p) in pts.iter().enumerate() {
+            let mut best = 0usize;
+            let mut bd = f32::MAX;
+            for (ci, c) in centers.iter().enumerate() {
+                let d = (p[0] - c[0]).powi(2) + (p[1] - c[1]).powi(2) + (p[2] - c[2]).powi(2);
+                if d < bd {
+                    bd = d;
+                    best = ci;
+                }
+            }
+            assign[pi] = best;
+        }
+        let mut sum = [[0.0f32; 3]; K];
+        let mut cnt = [0usize; K];
+        for (pi, p) in pts.iter().enumerate() {
+            let c = assign[pi];
+            for ch in 0..3 {
+                sum[c][ch] += p[ch];
+            }
+            cnt[c] += 1;
+        }
+        for ci in 0..K {
+            if cnt[ci] > 0 {
+                for ch in 0..3 {
+                    centers[ci][ch] = sum[ci][ch] / cnt[ci] as f32;
+                }
+            }
+        }
+    }
+    let mut shares = [0f32; K];
+    for a in assign.iter() {
+        shares[*a] += 1.0;
+    }
+    let total = pts.len() as f32;
+    let mut out: Vec<(String, f32)> = centers
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let hex = format!(
+                "#{:02X}{:02X}{:02X}",
+                c[0].round().clamp(0.0, 255.0) as u8,
+                c[1].round().clamp(0.0, 255.0) as u8,
+                c[2].round().clamp(0.0, 255.0) as u8
+            );
+            (hex, shares[i] / total)
+        })
+        .filter(|(_, s)| *s > 0.02)
+        .collect();
+    out.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    out
 }
 
 fn alignment(gx: &[f32], gy: &[f32], w: u32, h: u32) -> f32 {

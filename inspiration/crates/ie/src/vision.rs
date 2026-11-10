@@ -213,10 +213,10 @@ pub fn run(opts: &Opts<'_>) -> Result<()> {
     Ok(())
 }
 
-struct LimitInfo {
-    body: String,
-    retry_after: f32,
-    per_day: bool,
+pub(crate) struct LimitInfo {
+    pub(crate) body: String,
+    pub(crate) retry_after: f32,
+    pub(crate) per_day: bool,
 }
 
 fn parse_limit(text: &str) -> LimitInfo {
@@ -250,7 +250,7 @@ fn parse_limit(text: &str) -> LimitInfo {
     }
 }
 
-enum CallOutcome {
+pub(crate) enum CallOutcome {
     Ok(serde_json::Value, i64),
     RateLimited(LimitInfo),
     Failed(String),
@@ -412,7 +412,7 @@ fn request_body(prompt: &str, b64: &str, mime: &str, thinking: u32) -> serde_jso
 
 /// 缩到 768px 宽再发：原图 1200×675 约 1100 image token，768 宽约 300–400，
 /// 版式判断不受影响，成本和延迟都降一档。
-fn prepare_image(path: &Path) -> Result<Vec<u8>> {
+pub(crate) fn prepare_image(path: &Path) -> Result<Vec<u8>> {
     let img = image::ImageReader::open(path)?
         .with_guessed_format()?
         .decode()?;
@@ -429,7 +429,7 @@ fn prepare_image(path: &Path) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
-fn call(
+pub(crate) fn call(
     client: &reqwest::blocking::Client,
     base_url: &str,
     model: &str,
