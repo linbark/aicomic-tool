@@ -76,7 +76,21 @@ ie fit      --db <db> --person demo
 | 主要手法 | `ui.type-scale` 14、`ui.grid-columns` 9、`ui.corner-system` 9、`ui.hero-focal` 8 |
 | 主要基元 | `negative-space.active` 20、`contrast.value` 18、`scale.hierarchy` 14、`rhythm.equal` 11 |
 
-视觉与像素代理的一致性（同一基元，n=20）：`negative-space.active` Spearman **0.62**，`contrast.value` 仅 **0.13**。后者说明像素对比度代理不可靠——两路证据**不应盲目平均**。当前 `work_primitive` 的合并只是物化折中，原始分数都留在 `observation.payload_json` 里，之后可以按来源重算或做复核队列。
+视觉与像素代理的一致性（同一基元，n=46，三模型混合）：
+
+| 基元 | Spearman | 解读 |
+| --- | --- | --- |
+| `detail.density` | **0.81** | 两路都靠谱，可互相印证 |
+| `negative-space.active` | **0.73** | 同上 |
+| `contrast.value` | 0.38 | 像素分位数代理不可靠 |
+| `balance.symmetry` | 0.29 | 像素镜像对白底敏感 |
+| `restraint.single-hue` | 0.25 | 调色板紧凑度过粗 |
+
+结论：**两路证据不能平均**。已改为按来源存证据（`work_primitive_evidence`，迁移 005）：
+`work_primitive` 只物化置信度最高的那一路，两路都 ≥0.5 且相差 >0.3 时写 `review_queue` 待复核。
+像素代理置信度固定 0.45，视觉模型用自报置信度，所以正常情况下视觉胜出、像素留作对照。
+
+46 张视觉标注已覆盖 **28 个基元**（像素层只有 6 个），平均每张 5.9 个基元。
 
 全量 851 张的估算：约 **2.45M token**。
 

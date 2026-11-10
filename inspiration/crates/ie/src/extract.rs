@@ -114,14 +114,17 @@ pub fn run(db: &str, root: &Path, limit: Option<usize>) -> Result<()> {
         }
         for (term, score) in proxies(m) {
             if let Some(id) = prims.get(term) {
-                tx.execute(
-                    "INSERT INTO work_primitive(work_id, primitive_term_id, score, confidence, source, extractor_version, updated_at)
-                     VALUES(?1, ?2, ?3, 0.45, 'pixel-proxy', ?4, ?5)
-                     ON CONFLICT(work_id, primitive_term_id) DO UPDATE SET
-                       score=excluded.score, confidence=excluded.confidence,
-                       source=excluded.source, extractor_version=excluded.extractor_version,
-                       updated_at=excluded.updated_at",
-                    params![work_id, id, score, VERSION, now],
+                crate::vector::record(
+                    &tx,
+                    &crate::vector::Score {
+                        work_id: *work_id,
+                        term_id: *id,
+                        score,
+                        confidence: 0.45,
+                        source: "pixel-proxy",
+                        version: VERSION,
+                        now: &now,
+                    },
                 )?;
                 vectors += 1;
             }

@@ -158,17 +158,17 @@ pub fn run(opts: &Opts<'_>) -> Result<()> {
                     }
                     for (term, score, conf) in &parsed.primitives {
                         if let Some(id) = prim_index.get(term.as_str()) {
-                            tx.execute(
-                                "INSERT INTO work_primitive(work_id, primitive_term_id, score, confidence, source, extractor_version, updated_at)
-                                 VALUES(?1, ?2, ?3, ?4, 'vision', ?5, ?6)
-                                 ON CONFLICT(work_id, primitive_term_id) DO UPDATE SET
-                                   score = (work_primitive.score * work_primitive.confidence + excluded.score * excluded.confidence)
-                                           / nullif(work_primitive.confidence + excluded.confidence, 0),
-                                   confidence = min(0.95, max(work_primitive.confidence, excluded.confidence) * 1.15),
-                                   source = CASE WHEN work_primitive.source = excluded.source THEN excluded.source ELSE 'mixed' END,
-                                   extractor_version = excluded.extractor_version,
-                                   updated_at = excluded.updated_at",
-                                params![work_id, id, score, conf, model, now],
+                            crate::vector::record(
+                                &tx,
+                                &crate::vector::Score {
+                                    work_id: *work_id,
+                                    term_id: *id,
+                                    score: *score,
+                                    confidence: *conf,
+                                    source: "vision",
+                                    version: model,
+                                    now: &now,
+                                },
                             )?;
                             prim_rows += 1;
                         }

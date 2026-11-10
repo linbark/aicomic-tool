@@ -9,6 +9,7 @@
 mod extract;
 mod fit;
 mod metrics;
+mod vector;
 mod vision;
 
 use anyhow::Result;
