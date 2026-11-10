@@ -78,7 +78,21 @@ ie fit      --db <db> --person demo
 
 视觉与像素代理的一致性（同一基元，n=20）：`negative-space.active` Spearman **0.62**，`contrast.value` 仅 **0.13**。后者说明像素对比度代理不可靠——两路证据**不应盲目平均**。当前 `work_primitive` 的合并只是物化折中，原始分数都留在 `observation.payload_json` 里，之后可以按来源重算或做复核队列。
 
-全量 851 张的估算：约 **2.45M token**，串行约 2–3 小时，并发 4–6 路约 40 分钟。
+全量 851 张的估算：约 **2.45M token**。
+
+### 额度实测（免费层）
+
+这个 key 是 **Free Tier**，API 不提供"剩余额度"查询（`/v1beta/quotas` 404，响应头也没有配额字段）。能读到的只有触顶后的 429：
+
+```text
+quotaId: GenerateRequestsPerMinutePerProjectPerModel-FreeTier
+quotaValue: "5"     # 每模型每分钟 5 次
+retryDelay: 16–27s
+```
+
+因此 `ie vision` 默认 **串行 + 5 次/分钟节流**；遇到 429 按 `retryDelay` 退避重试，遇到「每日」配额才停。不同模型的每分钟额度互相独立（flash-lite 与 3.5-flash 可各自跑）。
+
+按 5 次/分钟算：825 张剩余约 **2.75 小时**；每日上限未知，跑满会以 429 停下并打印原始错误。
 
 ## 内核卡（演练输出）
 

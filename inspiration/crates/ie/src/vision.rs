@@ -21,14 +21,26 @@ struct Term {
     hint: String,
 }
 
-pub fn run(
-    db: &str,
-    root: &Path,
-    model: &str,
-    limit: Option<usize>,
-    base_url: &str,
-    thinking: u32,
-) -> Result<()> {
+pub struct Opts<'a> {
+    pub db: &'a str,
+    pub root: &'a Path,
+    pub model: &'a str,
+    pub limit: Option<usize>,
+    pub base_url: &'a str,
+    pub thinking: u32,
+    pub rpm: u32,
+}
+
+pub fn run(opts: &Opts<'_>) -> Result<()> {
+    let Opts {
+        db,
+        root,
+        model,
+        limit,
+        base_url,
+        thinking,
+        rpm,
+    } = *opts;
     let key = std::env::var("GEMINI_API_KEY")
         .context("缺少环境变量 GEMINI_API_KEY（只在运行时读取，不写入任何文件）")?;
     let conn = Connection::open(db)?;
@@ -41,7 +53,7 @@ pub fn run(
     }
     let prompt = build_prompt(&devices, &prims);
     let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(120))
+        .timeout(Duration::from_secs(180))
         .build()?;
 
     let mut stmt = conn.prepare(
@@ -57,7 +69,10 @@ pub fn run(
             Ok((r.get(0)?, r.get(1)?, root.join(r.get::<_, String>(2)?)))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    println!("待语义抽取：{}（模型 {model}）", jobs.len());
+    println!(
+        "待语义抽取：{}（模型 {model}，节流 {rpm}/min，thinking {thinking}）",
+        jobs.len()
+    );
     if jobs.is_empty() {
         return Ok(());
     }
@@ -71,9 +86,17 @@ pub fn run(
     let mut tokens = 0i64;
     let mut dev_rows = 0usize;
     let mut prim_rows = 0usize;
+    let mut limited: Option<String> = None;
     let started = Instant::now();
+    let interval = Duration::from_millis(60_000 / rpm.max(1) as u64);
 
+    // 免费额度是「每模型每分钟 N 次」，所以串行 + 节流；并发只会换来 429。
     for (asset_id, work_id, path) in &jobs {
+        if let Some(body) = &limited {
+            println!("已停止：{body}");
+            break;
+        }
+        std::thread::sleep(interval);
         let bytes = match prepare_image(path) {
             Ok(b) => b,
             Err(e) => {
@@ -82,74 +105,136 @@ pub fn run(
                 continue;
             }
         };
-        let mime = "image/jpeg";
         let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-        let body = request_body(&prompt, &b64, mime, thinking);
-        let t0 = Instant::now();
-        match call(&client, base_url, model, &key, &body) {
-            Ok((json, used)) => {
-                tokens += used;
-                let p = parse(&json, &dev_index, &prim_index)?;
-                let tx = conn.unchecked_transaction()?;
-                tx.execute(
-                    "INSERT INTO observation(asset_id, extractor, extractor_version, payload_json, confidence, created_at)
-                     VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![
-                        asset_id,
-                        EXTRACTOR,
-                        model,
-                        serde_json::to_string(&json)?,
-                        p.confidence,
-                        now
-                    ],
-                )?;
-                for (term, conf, evidence) in &p.devices {
-                    if let Some(id) = dev_index.get(term.as_str()) {
-                        tx.execute(
-                            "INSERT OR IGNORE INTO device_usage(work_id, device_term_id, strength, note)
-                             VALUES(?1, ?2, ?3, ?4)",
-                            params![work_id, id, conf, evidence],
-                        )?;
-                        dev_rows += 1;
+        let body = request_body(&prompt, &b64, "image/jpeg", thinking);
+
+        let mut attempt = 0;
+        loop {
+            match call(&client, base_url, model, &key, &body) {
+                CallOutcome::Ok(json, used) => {
+                    tokens += used;
+                    let parsed = match parse(&json, &dev_index, &prim_index) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            eprintln!("  ✗ 解析 asset {asset_id}: {e}");
+                            failed += 1;
+                            break;
+                        }
+                    };
+                    let tx = conn.unchecked_transaction()?;
+                    tx.execute(
+                        "INSERT INTO observation(asset_id, extractor, extractor_version, payload_json, confidence, created_at)
+                         VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+                        params![asset_id, EXTRACTOR, model, serde_json::to_string(&json)?, parsed.confidence, now],
+                    )?;
+                    for (term, conf, evidence) in &parsed.devices {
+                        if let Some(id) = dev_index.get(term.as_str()) {
+                            tx.execute(
+                                "INSERT OR IGNORE INTO device_usage(work_id, device_term_id, strength, note)
+                                 VALUES(?1, ?2, ?3, ?4)",
+                                params![work_id, id, conf, evidence],
+                            )?;
+                            dev_rows += 1;
+                        }
                     }
-                }
-                for (term, score, conf) in &p.primitives {
-                    if let Some(id) = prim_index.get(term.as_str()) {
-                        tx.execute(
-                            "INSERT INTO work_primitive(work_id, primitive_term_id, score, confidence, source, extractor_version, updated_at)
-                             VALUES(?1, ?2, ?3, ?4, 'vision', ?5, ?6)
-                             ON CONFLICT(work_id, primitive_term_id) DO UPDATE SET
-                               score = (work_primitive.score * work_primitive.confidence + excluded.score * excluded.confidence)
-                                       / nullif(work_primitive.confidence + excluded.confidence, 0),
-                               confidence = min(0.95, max(work_primitive.confidence, excluded.confidence) * 1.15),
-                               source = CASE WHEN work_primitive.source = excluded.source THEN excluded.source ELSE 'mixed' END,
-                               extractor_version = excluded.extractor_version,
-                               updated_at = excluded.updated_at",
-                            params![work_id, id, score, conf, model, now],
-                        )?;
-                        prim_rows += 1;
+                    for (term, score, conf) in &parsed.primitives {
+                        if let Some(id) = prim_index.get(term.as_str()) {
+                            tx.execute(
+                                "INSERT INTO work_primitive(work_id, primitive_term_id, score, confidence, source, extractor_version, updated_at)
+                                 VALUES(?1, ?2, ?3, ?4, 'vision', ?5, ?6)
+                                 ON CONFLICT(work_id, primitive_term_id) DO UPDATE SET
+                                   score = (work_primitive.score * work_primitive.confidence + excluded.score * excluded.confidence)
+                                           / nullif(work_primitive.confidence + excluded.confidence, 0),
+                                   confidence = min(0.95, max(work_primitive.confidence, excluded.confidence) * 1.15),
+                                   source = CASE WHEN work_primitive.source = excluded.source THEN excluded.source ELSE 'mixed' END,
+                                   extractor_version = excluded.extractor_version,
+                                   updated_at = excluded.updated_at",
+                                params![work_id, id, score, conf, model, now],
+                            )?;
+                            prim_rows += 1;
+                        }
                     }
+                    tx.commit()?;
+                    ok += 1;
+                    println!(
+                        "  ✓ {ok}/{} asset {asset_id} 手法{} 基元{} 累计 {tokens} tok",
+                        jobs.len(),
+                        parsed.devices.len(),
+                        parsed.primitives.len()
+                    );
+                    break;
                 }
-                tx.commit()?;
-                ok += 1;
-                println!(
-                    "  ✓ asset {asset_id} {:.1}s 手法{} 基元{}",
-                    t0.elapsed().as_secs_f32(),
-                    p.devices.len(),
-                    p.primitives.len()
-                );
-            }
-            Err(e) => {
-                failed += 1;
-                eprintln!("  ✗ asset {asset_id}: {e}");
+                CallOutcome::RateLimited(info) => {
+                    if info.per_day {
+                        limited = Some(info.body);
+                        break;
+                    }
+                    attempt += 1;
+                    if attempt > 5 {
+                        limited = Some(format!("{}（重试 {} 次仍限流）", info.body, attempt));
+                        break;
+                    }
+                    let wait = info.retry_after.max(5.0) + 1.0;
+                    println!("  … 限流，等 {wait:.0}s 后重试（第 {attempt} 次）");
+                    std::thread::sleep(Duration::from_secs_f32(wait));
+                }
+                CallOutcome::Failed(e) => {
+                    failed += 1;
+                    eprintln!("  ✗ asset {asset_id}: {e}");
+                    break;
+                }
             }
         }
     }
+
     println!(
-        "完成：成功 {ok} 失败 {failed}，token {tokens}，用时 {:.1}s，写入手法 {dev_rows} 条、基元 {prim_rows} 条",
+        "完成：成功 {ok} 失败 {failed}，token {tokens}，用时 {:.1}s，手法 {dev_rows} 条、基元 {prim_rows} 条",
         started.elapsed().as_secs_f32()
     );
     Ok(())
+}
+
+struct LimitInfo {
+    body: String,
+    retry_after: f32,
+    per_day: bool,
+}
+
+fn parse_limit(text: &str) -> LimitInfo {
+    let v: serde_json::Value = serde_json::from_str(text).unwrap_or(serde_json::Value::Null);
+    let msg = v
+        .pointer("/error/message")
+        .and_then(|x| x.as_str())
+        .unwrap_or(text);
+    let retry_after = msg
+        .split("Please retry in ")
+        .nth(1)
+        .and_then(|s| s.split('s').next())
+        .and_then(|s| s.trim().parse::<f32>().ok())
+        .or_else(|| {
+            v.pointer("/error/details")
+                .and_then(|d| d.as_array())
+                .and_then(|a| {
+                    a.iter().find_map(|e| {
+                        e.get("retryDelay")
+                            .and_then(|r| r.as_str())
+                            .and_then(|s| s.trim_end_matches('s').parse::<f32>().ok())
+                    })
+                })
+        })
+        .unwrap_or(20.0);
+    let per_day = msg.contains("PerDay") || msg.contains("per day");
+    LimitInfo {
+        body: msg.chars().take(300).collect(),
+        retry_after,
+        per_day,
+    }
+}
+
+enum CallOutcome {
+    Ok(serde_json::Value, i64),
+    RateLimited(LimitInfo),
+    Failed(String),
 }
 
 struct Parsed {
@@ -331,39 +416,53 @@ fn call(
     model: &str,
     key: &str,
     body: &serde_json::Value,
-) -> Result<(serde_json::Value, i64)> {
+) -> CallOutcome {
     let url = format!("{base_url}/v1beta/models/{model}:generateContent");
     let mut last = String::new();
     for attempt in 0..4 {
-        let resp = client
+        match client
             .post(&url)
             .header("x-goog-api-key", key)
             .json(body)
-            .send();
-        match resp {
+            .send()
+        {
             Ok(r) => {
                 let status = r.status();
                 let text = r.text().unwrap_or_default();
                 if status.is_success() {
-                    let v: serde_json::Value = serde_json::from_str(&text)?;
+                    let v: serde_json::Value = match serde_json::from_str(&text) {
+                        Ok(v) => v,
+                        Err(e) => return CallOutcome::Failed(format!("响应非 JSON: {e}")),
+                    };
                     let used = v
                         .pointer("/usageMetadata/totalTokenCount")
                         .and_then(|x| x.as_i64())
                         .unwrap_or(0);
-                    let content = v
+                    let content = match v
                         .pointer("/candidates/0/content/parts/0/text")
                         .and_then(|x| x.as_str())
-                        .ok_or_else(|| {
-                            anyhow!("响应里没有文本：{}", &text[..text.len().min(200)])
-                        })?;
-                    let parsed: serde_json::Value =
-                        serde_json::from_str(content).with_context(|| {
-                            format!("模型输出不是 JSON：{}", &content[..content.len().min(200)])
-                        })?;
-                    return Ok((parsed, used));
+                    {
+                        Some(c) => c,
+                        None => {
+                            return CallOutcome::Failed(format!(
+                                "响应里没有文本：{}",
+                                &text[..text.len().min(200)]
+                            ));
+                        }
+                    };
+                    return match serde_json::from_str::<serde_json::Value>(content) {
+                        Ok(p) => CallOutcome::Ok(p, used),
+                        Err(e) => CallOutcome::Failed(format!(
+                            "模型输出不是 JSON（{e}）：{}",
+                            &content[..content.len().min(200)]
+                        )),
+                    };
+                }
+                if status.as_u16() == 429 {
+                    return CallOutcome::RateLimited(parse_limit(&text));
                 }
                 last = format!("HTTP {status}: {}", &text[..text.len().min(200)]);
-                if status.as_u16() == 429 || status.as_u16() >= 500 {
+                if status.as_u16() >= 500 {
                     std::thread::sleep(Duration::from_secs(2 + attempt * 3));
                     continue;
                 }
@@ -375,5 +474,5 @@ fn call(
             }
         }
     }
-    Err(anyhow!(last))
+    CallOutcome::Failed(last)
 }

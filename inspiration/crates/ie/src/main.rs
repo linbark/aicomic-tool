@@ -70,7 +70,16 @@ fn main() -> Result<()> {
                 .get("thinking")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0);
-            vision::run(&db, &root, &model, limit, &base_url, thinking)
+            let rpm: u32 = opts.get("rpm").and_then(|v| v.parse().ok()).unwrap_or(5);
+            vision::run(&vision::Opts {
+                db: &db,
+                root: &root,
+                model: &model,
+                limit,
+                base_url: &base_url,
+                thinking,
+                rpm,
+            })
         }
         "stats" => stats(&db),
         _ => {
