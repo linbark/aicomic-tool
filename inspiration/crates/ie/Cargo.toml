@@ -1,0 +1,15 @@
+[package]
+name = "ie"
+description = "灵感引擎：像素度量抽取与个人内核拟合（研究原型）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow = "1"
+image = { version = "0.25", default-features = false, features = ["webp", "jpeg", "png"] }
+rayon = "1.12"
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde_json = "1"
+base64 = "0.22"
+reqwest = { version = "0.12", features = ["blocking", "json"] }
