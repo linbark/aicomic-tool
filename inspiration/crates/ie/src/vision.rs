@@ -29,6 +29,8 @@ pub struct Opts<'a> {
     pub base_url: &'a str,
     pub thinking: u32,
     pub rpm: u32,
+    pub shard: (usize, usize),
+    pub finds_first: bool,
 }
 
 pub fn run(opts: &Opts<'_>) -> Result<()> {
@@ -40,11 +42,14 @@ pub fn run(opts: &Opts<'_>) -> Result<()> {
         base_url,
         thinking,
         rpm,
+        shard,
+        finds_first,
     } = *opts;
     let key = std::env::var("GEMINI_API_KEY")
         .context("缺少环境变量 GEMINI_API_KEY（只在运行时读取，不写入任何文件）")?;
     let conn = Connection::open(db)?;
     conn.execute_batch("PRAGMA foreign_keys=ON;")?;
+    conn.busy_timeout(std::time::Duration::from_secs(30))?;
 
     let devices = load_terms(&conn, "device", "ui")?;
     let prims = load_terms(&conn, "primitive", "core")?;
@@ -56,18 +61,32 @@ pub fn run(opts: &Opts<'_>) -> Result<()> {
         .timeout(Duration::from_secs(180))
         .build()?;
 
-    let mut stmt = conn.prepare(
-        "SELECT a.id, a.work_id, a.local_path FROM asset a
+    let order = if finds_first {
+        "CASE WHEN w.collection = 'finds' THEN 0 ELSE 1 END, (a.id * 2654435761) % 997"
+    } else {
+        "(a.id * 2654435761) % 997"
+    };
+    let sql = format!(
+        "SELECT a.id, a.work_id, a.local_path FROM asset a JOIN work w ON w.id = a.work_id
          WHERE a.local_path IS NOT NULL
+           AND (?3 = 1 OR (a.id % ?4) = ?5)
            AND NOT EXISTS (SELECT 1 FROM observation o
                            WHERE o.asset_id = a.id AND o.extractor = ?1)
-         ORDER BY (a.id * 2654435761) % 997
-         LIMIT ?2",
-    )?;
+         ORDER BY {order}
+         LIMIT ?2"
+    );
+    let mut stmt = conn.prepare(&sql)?;
     let jobs: Vec<(i64, i64, PathBuf)> = stmt
-        .query_map(params![EXTRACTOR, limit.unwrap_or(1000) as i64], |r| {
-            Ok((r.get(0)?, r.get(1)?, root.join(r.get::<_, String>(2)?)))
-        })?
+        .query_map(
+            params![
+                EXTRACTOR,
+                limit.unwrap_or(1000) as i64,
+                if shard.1 <= 1 { 1 } else { 0 },
+                shard.1.max(1) as i64,
+                shard.0 as i64
+            ],
+            |r| Ok((r.get(0)?, r.get(1)?, root.join(r.get::<_, String>(2)?))),
+        )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     println!(
         "待语义抽取：{}（模型 {model}，节流 {rpm}/min，thinking {thinking}）",

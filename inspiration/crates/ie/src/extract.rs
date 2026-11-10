@@ -23,6 +23,7 @@ struct Job {
 pub fn run(db: &str, root: &Path, limit: Option<usize>) -> Result<()> {
     let conn = Connection::open(db)?;
     conn.execute_batch("PRAGMA foreign_keys=ON;")?;
+    conn.busy_timeout(std::time::Duration::from_secs(30))?;
 
     let mut stmt = conn.prepare(
         "SELECT a.id, a.work_id, a.local_path FROM asset a

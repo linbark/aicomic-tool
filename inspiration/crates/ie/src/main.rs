@@ -71,6 +71,12 @@ fn main() -> Result<()> {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0);
             let rpm: u32 = opts.get("rpm").and_then(|v| v.parse().ok()).unwrap_or(5);
+            let shard: (usize, usize) = opts
+                .get("shard")
+                .and_then(|s| s.split_once('/'))
+                .and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?)))
+                .unwrap_or((0, 1));
+            let finds_first = opts.get("priority").map(|v| v == "finds").unwrap_or(false);
             vision::run(&vision::Opts {
                 db: &db,
                 root: &root,
@@ -79,6 +85,8 @@ fn main() -> Result<()> {
                 base_url: &base_url,
                 thinking,
                 rpm,
+                shard,
+                finds_first,
             })
         }
         "stats" => stats(&db),
