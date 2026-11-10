@@ -69,17 +69,19 @@ fn resolve(opts: &Opts<'_>) -> Result<(PathBuf, String, String)> {
     }
     let id = opts.work.context("需要 --image 或 --work")?;
     let conn = Connection::open(opts.db)?;
-    let (local, title, collection): (String, String, String) = conn.query_row(
-        "SELECT a.local_path, w.title, w.collection FROM asset a JOIN work w ON w.id = a.work_id
+    let (local, title, collection, source_name): (String, String, String, String) = conn
+        .query_row(
+            "SELECT a.local_path, w.title, w.collection, s.title
+         FROM asset a JOIN work w ON w.id = a.work_id JOIN source s ON s.id = w.source_id
          WHERE a.work_id = ?1 AND a.local_path IS NOT NULL LIMIT 1",
-        params![id],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    )?;
+            params![id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?;
     let root = PathBuf::from("data/inspiration");
     Ok((
         root.join(local),
         title,
-        format!("Designeer · {collection} · work #{id}"),
+        format!("{source_name} · {collection} · work #{id}"),
     ))
 }
 

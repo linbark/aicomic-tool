@@ -10,7 +10,9 @@
 | [个人美学内核设计](个人美学内核设计.md) | ToC 层：个人内核 vs 风格、层级效用模型、主动学习与内核卡、隐私与联邦 | 设计稿 v0.1；schema 迁移已就绪 |
 | [Designeer 数据源接入](Designeer数据源接入.md) | 首个数据源的端点实测、字段映射、归一化、刷新与降级 | 适配器规范 v0.1；目录层已实跑验证 |
 
-灵感引擎的数据资产：
+灵感引擎的样例与数据资产：
+
+- [examples/](examples/README.md)：三张真实炼化卡（界面 / 视觉设计 / 绘画），读完能看清「配方」长什么样。
 
 - [inspiration/schema.v2.sql](inspiration/schema.v2.sql)：领域无关核心库（33 张表 + 4 视图 + 6 触发器），`sqlite3 inspiration.db < schema.v2.sql` 可直接建库，已实测。
 - [inspiration/migrations/002-personal-layer.sql](inspiration/migrations/002-personal-layer.sql)：个人层迁移（人、会话、内核、内核卡、风格、出题队列），在 v2 上执行后 `schema_version=3`。

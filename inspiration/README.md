@@ -152,11 +152,11 @@ GEMINI_API_KEY=... ./inspiration/target/release/ie distill --image ~/Pictures/re
 
 硬规则：只有【实测】里的数字可以是确定值，其余必须写成范围并标「（估计）」，防止模型编造精确到个位的数值。
 
-样例（`data/inspiration/distills/`）：
+样例（已入仓，可直接读）：
 
-- `mobbin.md`：白底极简 SaaS 落地页
-- `0xurvish-….md`：散点圆形图标阵列
-- `1872-vereshchagin-….md`：19 世纪油画（跨域样例）
+- [01-saas-landing.md](../docs/design/examples/01-saas-landing.md)：白底极简 SaaS 落地页
+- [02-icon-grid.md](../docs/design/examples/02-icon-grid.md)：散点圆形图标阵列
+- [03-oil-painting-colonnade.md](../docs/design/examples/03-oil-painting-colonnade.md)：19 世纪油画（跨域样例）
 
 设计说明见 [灵感引擎设计](../docs/design/灵感引擎设计.md) §6.3 与 [个人美学内核设计](../docs/design/个人美学内核设计.md)。
 
