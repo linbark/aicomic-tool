@@ -127,6 +127,33 @@ retryDelay: 76003s    # 约 21 小时
 
 按免费层算，851 张需要 **3–6 周**（每天 20–40 次）。全量语义标注在免费层不可行，只能做**分层抽样**（finds 优先、高分海报优先），或者开计费后一次跑完（约 2.45M token）。
 
+## 导入导出（倒腾数据）
+
+```sh
+# 全量元数据（不含图片）
+ie export --db data/inspiration/inspiration.db --out corpus.json
+
+# 只导 finds，并把图片一起打进去
+ie export --db ... --out finds.json --collection finds --with-assets
+
+# 导进另一个库（可重复执行，不会产生副本）
+ie import --db /tmp/other.db --in finds.json --root /tmp/other --dry-run
+ie import --db /tmp/other.db --in finds.json --root /tmp/other
+```
+
+要点：
+
+- **用自然键而不是自增 id**：work = `source + collection + slug`，asset = `work + role + sha256`，
+  observation = `asset + extractor + version`。所以能导进任意库，不用对齐 id。
+- **幂等**：同一份包导入两次，各表行数不变（实测 865 作品 / 851 素材 / 897 观察 / 5106 度量 / 4921 证据）。
+- **图片可选**：默认只带 sha 与路径；`--with-assets` 把 blob 以 base64 塞进包（163 张 finds ≈ 8.6 MB），
+  导入端按 sha 落到 `<root>/blobs/xx/<sha>`，天然去重。
+- **个人数据默认不导出**：内核、判定、会话需要 `--with-personal` 显式打开。
+- **`--dry-run`** 会完整跑一遍再回滚，只报数量。
+
+一个已知差异：源库里 `work_primitive` 有 5026 行，导入后是 4921 行——多出的 105 行是早期"两路平均"逻辑留下的
+`source='mixed'` 记录，迁移 005 时没有回填证据。等单模型全量 pass 重跑后两边就一致了。
+
 ## 炼化：把一张图变成可复现的文字配方
 
 标注（基元分数）只是内部索引，不能直接复用。`ie distill` 产出的是**配方**：

@@ -6,6 +6,7 @@
 //!   ie fit      --db <db> --person demo
 //!   ie stats    --db <db>
 
+mod bundle;
 mod distill;
 mod extract;
 mod fit;
@@ -120,10 +121,43 @@ fn main() -> Result<()> {
                 thinking,
             })
         }
+        "export" => {
+            let out = PathBuf::from(
+                opts.get("out")
+                    .cloned()
+                    .unwrap_or_else(|| "ie-bundle.json".into()),
+            );
+            bundle::export(&bundle::ExportOpts {
+                db: &db,
+                out: &out,
+                with_assets: opts.contains_key("with-assets"),
+                with_personal: opts.contains_key("with-personal"),
+                collection: opts.get("collection").map(|s| s.as_str()),
+                domain: opts.get("domain").map(|s| s.as_str()),
+                since: opts.get("since").map(|s| s.as_str()),
+            })
+        }
+        "import" => {
+            let input = opts
+                .get("in")
+                .map(PathBuf::from)
+                .ok_or_else(|| anyhow::anyhow!("需要 --in <bundle.json>"))?;
+            let root = PathBuf::from(
+                opts.get("root")
+                    .cloned()
+                    .unwrap_or_else(|| "data/inspiration".to_string()),
+            );
+            bundle::import(&bundle::ImportOpts {
+                db: &db,
+                input: &input,
+                root: &root,
+                dry_run: opts.contains_key("dry-run"),
+            })
+        }
         "stats" => stats(&db),
         _ => {
             eprintln!(
-                "用法：ie <extract|vision|distill|simulate|fit|stats> --db <path> [--root DIR] [--limit N] [--person ID] [--n N] [--seed S] [--model M]"
+                "用法：ie <extract|vision|distill|export|import|simulate|fit|stats> --db <path> [--root DIR] [--limit N] [--person ID] [--n N] [--seed S] [--model M]"
             );
             Ok(())
         }
