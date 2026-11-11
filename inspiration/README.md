@@ -133,6 +133,10 @@ retryDelay: 76003s    # 约 21 小时
 # 全量元数据（不含图片）
 ie export --db data/inspiration/inspiration.db --out corpus.json
 
+# 同一份数据导出为 NDJSON（首行 header，之后一行一条，按依赖顺序）
+ie export --db ... --out corpus.ndjson            # 后缀自动识别
+ie export --db ... --out corpus.txt --format ndjson
+
 # 只导 finds，并把图片一起打进去
 ie export --db ... --out finds.json --collection finds --with-assets
 
@@ -150,6 +154,18 @@ ie import --db /tmp/other.db --in finds.json --root /tmp/other
   导入端按 sha 落到 `<root>/blobs/xx/<sha>`，天然去重。
 - **个人数据默认不导出**：内核、判定、会话需要 `--with-personal` 显式打开。
 - **`--dry-run`** 会完整跑一遍再回滚，只报数量。
+- **两种格式**：`.json`（一个 bundle 对象，便于肉眼查看）与 `.ndjson`（一行一条，导入端流式消费，
+  内存只占一行）。导入按首行 `{"_type":"header"}` 自动识别，不需要额外参数。
+
+实测（2026-11-11）：
+
+| 指标 | JSON bundle | NDJSON |
+| --- | --- | --- |
+| 体积 | 4.2 MB | 4.4 MB |
+| 行数 | — | 12866 |
+| 导入后作品/素材/观察/度量 | 865 / 851 / 897 / 5106 | 865 / 851 / 897 / 5106 |
+| 重复导入 | 不翻倍 | 不翻倍 |
+| `--with-assets`（8 张柱廊） | 可用 | 可用，导入后 8 个 blob 落盘 |
 
 一个已知差异：源库里 `work_primitive` 有 5026 行，导入后是 4921 行——多出的 105 行是早期"两路平均"逻辑留下的
 `source='mixed'` 记录，迁移 005 时没有回填证据。等单模型全量 pass 重跑后两边就一致了。

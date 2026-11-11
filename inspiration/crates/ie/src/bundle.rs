@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 pub struct ExportOpts<'a> {
     pub db: &'a str,
     pub out: &'a Path,
+    pub format: &'a str, // json | ndjson | auto
     pub with_assets: bool,
     pub with_personal: bool,
     pub collection: Option<&'a str>,
@@ -226,16 +227,31 @@ pub fn export(o: &ExportOpts<'_>) -> Result<()> {
         )?;
     }
 
-    let text = serde_json::to_string(&bundle)?;
     if let Some(parent) = o.out.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(o.out, &text)?;
+    let ext = o
+        .out
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let ndjson =
+        o.format == "ndjson" || (o.format == "auto" && matches!(ext.as_str(), "ndjson" | "jsonl"));
+    let text = if ndjson {
+        write_ndjson(&bundle, o.out)?;
+        String::new()
+    } else {
+        let t = serde_json::to_string(&bundle)?;
+        std::fs::write(o.out, &t)?;
+        t
+    };
     let stats = json!({
         "works": keys.len(),
         "assets": bundle["assets"].as_array().map(|a| a.len()).unwrap_or(0),
         "observations": bundle["observations"].as_array().map(|a| a.len()).unwrap_or(0),
-        "bytes": text.len(),
+        "bytes": if ndjson { std::fs::metadata(o.out).map(|m| m.len()).unwrap_or(0) as usize } else { text.len() },
+        "format": if ndjson { "ndjson" } else { "json" },
     });
     println!(
         "导出完成 {} 条作品 -> {}\n{}",
@@ -279,43 +295,236 @@ fn rows(conn: &Connection, sql: &str, params: &[&dyn rusqlite::ToSql]) -> Result
     Ok(out)
 }
 
+/// NDJSON：首行 header，其余按依赖顺序一行一条，导入端可单遍流式消费。
+fn write_ndjson(b: &Value, out: &Path) -> Result<usize> {
+    use std::io::Write;
+    let f = std::fs::File::create(out)?;
+    let mut w = std::io::BufWriter::new(f);
+    let header = json!({
+        "_type": "header",
+        "format": "ie-bundle",
+        "version": 1,
+        "schema_version": b["schema_version"],
+        "exported_at": b["exported_at"],
+        "includes": b["includes"],
+    });
+    writeln!(w, "{}", header)?;
+    const ORDER: &[(&str, &str)] = &[
+        ("packs", "pack"),
+        ("domains", "domain"),
+        ("domain_edges", "domain_edge"),
+        ("sources", "source"),
+        ("vocab_terms", "vocab_term"),
+        ("works", "work"),
+        ("assets", "asset"),
+        ("observations", "observation"),
+        ("measures", "measure"),
+        ("evidence", "evidence"),
+        ("device_usage", "device_usage"),
+        ("principles", "principle"),
+        ("principle_evidence", "principle_evidence"),
+        ("specs", "spec"),
+    ];
+    let mut n = 0usize;
+    for (key, kind) in ORDER {
+        if let Some(a) = b.get(*key).and_then(|x| x.as_array()) {
+            for row in a {
+                let mut r = row.clone();
+                r["_type"] = json!(kind);
+                writeln!(w, "{}", r)?;
+                n += 1;
+            }
+        }
+    }
+    w.flush()?;
+    Ok(n)
+}
+
 // ---------------------------------------------------------------- 导入
 
+const HANDLED: &[&str] = &[
+    "pack",
+    "domain",
+    "domain_edge",
+    "source",
+    "vocab_term",
+    "work",
+    "asset",
+    "observation",
+    "measure",
+    "evidence",
+    "device_usage",
+    "principle",
+    "principle_evidence",
+    "spec",
+];
+
+struct Imp<'a> {
+    tx: rusqlite::Transaction<'a>,
+    root: PathBuf,
+    work_map: HashMap<String, i64>,
+    term_map: HashMap<String, i64>,
+    principle_map: HashMap<String, i64>,
+    counts: HashMap<&'static str, usize>,
+}
+
 pub fn import(o: &ImportOpts<'_>) -> Result<()> {
-    let text = std::fs::read_to_string(o.input)
-        .with_context(|| format!("读不到 {}", o.input.display()))?;
-    let b: Value = serde_json::from_str(&text).context("不是合法的 ie-bundle JSON")?;
-    if b.get("format").and_then(|x| x.as_str()) != Some("ie-bundle") {
-        anyhow::bail!("不是 ie-bundle 格式");
-    }
+    // 用第一行判断格式：NDJSON 的首行是 {"_type":"header",...}
+    let ndjson = {
+        use std::io::BufRead;
+        let f = std::fs::File::open(o.input)
+            .with_context(|| format!("读不到 {}", o.input.display()))?;
+        let mut r = std::io::BufReader::new(f);
+        let mut line = String::new();
+        r.read_line(&mut line)?;
+        serde_json::from_str::<Value>(line.trim())
+            .ok()
+            .and_then(|v| {
+                v.get("_type")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string())
+            })
+            .as_deref()
+            == Some("header")
+    };
+
     let conn = Connection::open(o.db)?;
     conn.execute_batch("PRAGMA foreign_keys=ON;")?;
     conn.busy_timeout(std::time::Duration::from_secs(20))?;
     let tx = conn.unchecked_transaction()?;
-
-    let mut counts: HashMap<&str, usize> = HashMap::new();
-    let mut bump = |k: &'static str, n: usize| {
-        *counts.entry(k).or_insert(0) += n;
+    let mut imp = Imp {
+        tx,
+        root: o.root.to_path_buf(),
+        work_map: HashMap::new(),
+        term_map: HashMap::new(),
+        principle_map: HashMap::new(),
+        counts: HashMap::new(),
     };
+    if ndjson {
+        imp.load_ndjson(o.input)?;
+    } else {
+        imp.load_bundle(o.input)?;
+    }
+    let counts = imp.counts.clone();
+    if o.dry_run {
+        imp.tx.rollback()?;
+        println!("dry-run（已回滚）：{counts:?}");
+    } else {
+        imp.tx.commit()?;
+        println!("导入完成：{counts:?}");
+    }
+    Ok(())
+}
 
-    for p in arr(&b, "packs") {
-        tx.execute(
+impl Imp<'_> {
+    fn bump(&mut self, k: &'static str) {
+        *self.counts.entry(k).or_insert(0) += 1;
+    }
+
+    /// JSON bundle：按依赖顺序遍历各数组
+    fn load_bundle(&mut self, path: &Path) -> Result<()> {
+        let text = std::fs::read_to_string(path)?;
+        let b: Value = serde_json::from_str(&text).context("不是合法的 JSON")?;
+        if b.get("format").and_then(|x| x.as_str()) != Some("ie-bundle") {
+            anyhow::bail!("不是 ie-bundle 格式");
+        }
+        const ORDER: &[(&str, &str)] = &[
+            ("packs", "pack"),
+            ("domains", "domain"),
+            ("domain_edges", "domain_edge"),
+            ("sources", "source"),
+            ("vocab_terms", "vocab_term"),
+            ("works", "work"),
+            ("assets", "asset"),
+            ("observations", "observation"),
+            ("measures", "measure"),
+            ("evidence", "evidence"),
+            ("device_usage", "device_usage"),
+            ("principles", "principle"),
+            ("principle_evidence", "principle_evidence"),
+            ("specs", "spec"),
+        ];
+        for (key, kind) in ORDER {
+            if let Some(a) = b.get(*key).and_then(|x| x.as_array()) {
+                for row in a {
+                    self.dispatch(kind, row)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// NDJSON：逐行流式处理，内存只占一行
+    fn load_ndjson(&mut self, path: &Path) -> Result<()> {
+        use std::io::{BufRead, BufReader};
+        let f = std::fs::File::open(path)?;
+        let mut skipped = 0usize;
+        for (i, line) in BufReader::new(f).lines().enumerate() {
+            let line = line?;
+            let t = line.trim();
+            if t.is_empty() {
+                continue;
+            }
+            let v: Value =
+                serde_json::from_str(t).with_context(|| format!("第 {} 行不是 JSON", i + 1))?;
+            let kind = v.get("_type").and_then(|x| x.as_str()).unwrap_or("");
+            if kind.is_empty() || kind == "header" {
+                continue;
+            }
+            if !HANDLED.contains(&kind) {
+                skipped += 1;
+                continue;
+            }
+            self.dispatch(kind, &v)?;
+        }
+        if skipped > 0 {
+            println!("跳过 {skipped} 条未知类型（可能是 --with-personal 的个人数据）");
+        }
+        Ok(())
+    }
+
+    fn dispatch(&mut self, kind: &str, v: &Value) -> Result<()> {
+        match kind {
+            "pack" => self.pack(v),
+            "domain" => self.domain(v),
+            "domain_edge" => self.edge(v),
+            "source" => self.source(v),
+            "vocab_term" => self.vocab(v),
+            "work" => self.work(v),
+            "asset" => self.asset(v),
+            "observation" => self.observation(v),
+            "measure" => self.measure(v),
+            "evidence" => self.evidence(v),
+            "device_usage" => self.device_usage(v),
+            "principle" => self.principle(v),
+            "principle_evidence" => self.principle_evidence(v),
+            "spec" => self.spec(v),
+            _ => Ok(()),
+        }
+    }
+
+    fn pack(&mut self, p: &Value) -> Result<()> {
+        self.tx.execute(
             "INSERT INTO pack(id,title,version,spec_json,applied_at) VALUES(?1,?2,?3,?4,?5)
              ON CONFLICT(id) DO UPDATE SET title=excluded.title, version=excluded.version, spec_json=excluded.spec_json",
-            params![s(p,"id"), s(p,"title"), s(p,"version"), s(p,"spec_json"), opt_s(p,"applied_at")],
+            params![s(p, "id"), s(p, "title"), s(p, "version"), s(p, "spec_json"), opt_s(p, "applied_at")],
         )?;
-        bump("packs", 1);
+        self.bump("packs");
+        Ok(())
     }
-    for d in arr(&b, "domains") {
-        tx.execute(
+
+    fn domain(&mut self, d: &Value) -> Result<()> {
+        self.tx.execute(
             "INSERT INTO domain(id,title,medium,pack_id,note) VALUES(?1,?2,?3,?4,?5)
              ON CONFLICT(id) DO UPDATE SET title=excluded.title, medium=excluded.medium, pack_id=excluded.pack_id",
-            params![s(d,"id"), s(d,"title"), s(d,"medium"), s(d,"pack_id"), opt_s(d,"note")],
+            params![s(d, "id"), s(d, "title"), s(d, "medium"), s(d, "pack_id"), opt_s(d, "note")],
         )?;
-        bump("domains", 1);
+        self.bump("domains");
+        Ok(())
     }
-    for e in arr(&b, "domain_edges") {
-        tx.execute(
+
+    fn edge(&mut self, e: &Value) -> Result<()> {
+        self.tx.execute(
             "INSERT OR REPLACE INTO domain_edge(a,b,distance,rationale) VALUES(?1,?2,?3,?4)",
             params![
                 s(e, "a"),
@@ -324,10 +533,12 @@ pub fn import(o: &ImportOpts<'_>) -> Result<()> {
                 opt_s(e, "rationale")
             ],
         )?;
-        bump("domain_edges", 1);
+        self.bump("domain_edges");
+        Ok(())
     }
-    for sc in arr(&b, "sources") {
-        tx.execute(
+
+    fn source(&mut self, sc: &Value) -> Result<()> {
+        self.tx.execute(
             "INSERT INTO source(id,kind,title,homepage,licence_note,policy_json,created_at)
              VALUES(?1,?2,?3,?4,?5,?6,?7)
              ON CONFLICT(id) DO UPDATE SET title=excluded.title, homepage=excluded.homepage,
@@ -342,44 +553,41 @@ pub fn import(o: &ImportOpts<'_>) -> Result<()> {
                 s(sc, "created_at")
             ],
         )?;
-        bump("sources", 1);
+        self.bump("sources");
+        Ok(())
     }
-    // vocab 两趟：先不带 parent，再补 parent（导入库的 id 与导出库不同）
-    let mut term_map: HashMap<String, i64> = HashMap::new();
-    for t in arr(&b, "vocab_terms") {
-        tx.execute(
+
+    fn vocab(&mut self, t: &Value) -> Result<()> {
+        self.tx.execute(
             "INSERT INTO vocab_term(pack_id,kind,term,label,definition,parent_id,aliases,status)
              VALUES(?1,?2,?3,?4,?5,NULL,?6,?7)
              ON CONFLICT(pack_id,kind,term) DO UPDATE SET label=excluded.label, definition=excluded.definition,
                aliases=excluded.aliases, status=excluded.status",
-            params![s(t,"pack_id"), s(t,"kind"), s(t,"term"), s(t,"label"), s(t,"definition"),
-                    s(t,"aliases"), s(t,"status")],
+            params![
+                s(t, "pack_id"),
+                s(t, "kind"),
+                s(t, "term"),
+                s(t, "label"),
+                s(t, "definition"),
+                s(t, "aliases"),
+                s(t, "status")
+            ],
         )?;
-        let id: i64 = tx.query_row(
+        let id: i64 = self.tx.query_row(
             "SELECT id FROM vocab_term WHERE pack_id=?1 AND kind=?2 AND term=?3",
             params![s(t, "pack_id"), s(t, "kind"), s(t, "term")],
             |r| r.get(0),
         )?;
-        term_map.insert(
+        self.term_map.insert(
             format!("{}|{}|{}", s(t, "pack_id"), s(t, "kind"), s(t, "term")),
             id,
         );
-        bump("vocab_terms", 1);
-    }
-    for t in arr(&b, "vocab_terms") {
-        let key = format!("{}|{}|{}", s(t, "pack_id"), s(t, "kind"), s(t, "term"));
-        if let (Some(id), Some(pid)) = (
-            term_map.get(&key),
-            t.get("parent_id").and_then(|x| x.as_i64()),
-        ) {
-            let _ = pid; // parent 关系在跨库导入时按 id 不可靠，这里只保留结构，具体父子关系由 pack 重建
-            let _ = id;
-        }
+        self.bump("vocab_terms");
+        Ok(())
     }
 
-    let mut work_map: HashMap<String, i64> = HashMap::new();
-    for w in arr(&b, "works") {
-        tx.execute(
+    fn work(&mut self, w: &Value) -> Result<()> {
+        self.tx.execute(
             "INSERT INTO work(source_id,domain_id,collection,slug,canonical_url,title,subtitle_quoted,summary_derived,
                 creator_name,creator_url,origin_url,created_year,licence,rights_holder,status,payload_json,first_seen_at,last_seen_at)
              VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)
@@ -387,18 +595,33 @@ pub fn import(o: &ImportOpts<'_>) -> Result<()> {
                title=excluded.title, subtitle_quoted=excluded.subtitle_quoted,
                summary_derived=excluded.summary_derived, payload_json=excluded.payload_json,
                status=excluded.status, last_seen_at=excluded.last_seen_at",
-            params![s(w,"source_id"), s(w,"domain_id"), s(w,"collection"), s(w,"slug"),
-                    s(w,"canonical_url"), s(w,"title"), opt_s(w,"subtitle_quoted"), opt_s(w,"summary_derived"),
-                    opt_s(w,"creator_name"), opt_s(w,"creator_url"), opt_s(w,"origin_url"),
-                    w.get("created_year").and_then(|x| x.as_i64()), opt_s(w,"licence"), opt_s(w,"rights_holder"),
-                    s(w,"status"), s(w,"payload_json"), s(w,"first_seen_at"), s(w,"last_seen_at")],
+            params![
+                s(w, "source_id"),
+                s(w, "domain_id"),
+                s(w, "collection"),
+                s(w, "slug"),
+                s(w, "canonical_url"),
+                s(w, "title"),
+                opt_s(w, "subtitle_quoted"),
+                opt_s(w, "summary_derived"),
+                opt_s(w, "creator_name"),
+                opt_s(w, "creator_url"),
+                opt_s(w, "origin_url"),
+                w.get("created_year").and_then(|x| x.as_i64()),
+                opt_s(w, "licence"),
+                opt_s(w, "rights_holder"),
+                s(w, "status"),
+                s(w, "payload_json"),
+                s(w, "first_seen_at"),
+                s(w, "last_seen_at")
+            ],
         )?;
-        let id: i64 = tx.query_row(
+        let id: i64 = self.tx.query_row(
             "SELECT id FROM work WHERE source_id=?1 AND collection=?2 AND slug=?3",
             params![s(w, "source_id"), s(w, "collection"), s(w, "slug")],
             |r| r.get(0),
         )?;
-        work_map.insert(
+        self.work_map.insert(
             format!(
                 "{}|{}|{}",
                 s(w, "source_id"),
@@ -407,18 +630,19 @@ pub fn import(o: &ImportOpts<'_>) -> Result<()> {
             ),
             id,
         );
-        bump("works", 1);
+        self.bump("works");
+        Ok(())
     }
 
-    for a in arr(&b, "assets") {
+    fn asset(&mut self, a: &Value) -> Result<()> {
         let wk = &a["work"];
-        let Some(&wid) = work_map.get(&format!(
+        let Some(&wid) = self.work_map.get(&format!(
             "{}|{}|{}",
             s(wk, "source_id"),
             s(wk, "collection"),
             s(wk, "slug")
         )) else {
-            continue;
+            return Ok(());
         };
         let sha = a.get("sha256").and_then(|x| x.as_str()).unwrap_or("");
         let role = s(a, "role");
@@ -430,7 +654,7 @@ pub fn import(o: &ImportOpts<'_>) -> Result<()> {
             use base64::Engine;
             if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64) {
                 let rel = format!("blobs/{}/{}", &sha[..2.min(sha.len())], sha);
-                let full = o.root.join(&rel);
+                let full = self.root.join(&rel);
                 if let Some(parent) = full.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
@@ -438,81 +662,123 @@ pub fn import(o: &ImportOpts<'_>) -> Result<()> {
                 local = Some(rel);
             }
         }
-        tx.execute(
+        self.tx.execute(
             "INSERT INTO asset(work_id,role,url,local_path,sha256,width,height,bytes,fetched_at)
              VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)
              ON CONFLICT(work_id,role,sha256) DO UPDATE SET local_path=coalesce(excluded.local_path, asset.local_path)",
-            params![wid, role, opt_s(a,"url"), local, if sha.is_empty() { None } else { Some(sha.to_string()) },
-                    a.get("width").and_then(|x| x.as_i64()), a.get("height").and_then(|x| x.as_i64()),
-                    a.get("bytes").and_then(|x| x.as_i64()), s(a,"fetched_at")],
+            params![
+                wid,
+                role,
+                opt_s(a, "url"),
+                local,
+                if sha.is_empty() { None } else { Some(sha.to_string()) },
+                a.get("width").and_then(|x| x.as_i64()),
+                a.get("height").and_then(|x| x.as_i64()),
+                a.get("bytes").and_then(|x| x.as_i64()),
+                s(a, "fetched_at")
+            ],
         )?;
-        bump("assets", 1);
+        self.bump("assets");
+        Ok(())
     }
 
-    for ob in arr(&b, "observations") {
+    fn observation(&mut self, ob: &Value) -> Result<()> {
         let ak = &ob["asset"];
-        let Some(aid) = find_asset(&tx, &work_map, ak)? else {
-            continue;
+        let Some(aid) = find_asset(&self.tx, &self.work_map, ak)? else {
+            return Ok(());
         };
-        tx.execute(
+        self.tx.execute(
             "INSERT INTO observation(asset_id,extractor,extractor_version,payload_json,confidence,created_at)
              VALUES(?1,?2,?3,?4,?5,?6)
              ON CONFLICT(asset_id,extractor,extractor_version) WHERE fragment_id IS NULL
              DO UPDATE SET payload_json=excluded.payload_json, confidence=excluded.confidence",
-            params![aid, s(ob,"extractor"), s(ob,"extractor_version"), s(ob,"payload_json"),
-                    num(ob,"confidence", 0.5), s(ob,"created_at")],
+            params![
+                aid,
+                s(ob, "extractor"),
+                s(ob, "extractor_version"),
+                s(ob, "payload_json"),
+                num(ob, "confidence", 0.5),
+                s(ob, "created_at")
+            ],
         )?;
-        bump("observations", 1);
+        self.bump("observations");
+        Ok(())
     }
 
-    for m in arr(&b, "measures") {
+    fn measure(&mut self, m: &Value) -> Result<()> {
         let ak = &m["observation"]["asset"];
-        let Some(aid) = find_asset(&tx, &work_map, ak)? else {
-            continue;
+        let Some(aid) = find_asset(&self.tx, &self.work_map, ak)? else {
+            return Ok(());
         };
-        let obs: Option<i64> = tx.query_row(
-            "SELECT id FROM observation WHERE asset_id=?1 AND extractor=?2 AND extractor_version=?3 LIMIT 1",
-            params![aid, s(&m["observation"],"extractor"), s(&m["observation"],"extractor_version")],
-            |r| r.get(0),
-        ).ok();
-        let Some(oid) = obs else { continue };
-        let Some(&mid) = term_map.get(&format!("core|metric|{}", s(m, "metric"))) else {
-            continue;
+        let obs: Option<i64> = self
+            .tx
+            .query_row(
+                "SELECT id FROM observation WHERE asset_id=?1 AND extractor=?2 AND extractor_version=?3 LIMIT 1",
+                params![
+                    aid,
+                    s(&m["observation"], "extractor"),
+                    s(&m["observation"], "extractor_version")
+                ],
+                |r| r.get(0),
+            )
+            .ok();
+        let Some(oid) = obs else { return Ok(()) };
+        let Some(&mid) = self
+            .term_map
+            .get(&format!("core|metric|{}", s(m, "metric")))
+        else {
+            return Ok(());
         };
-        tx.execute(
-            // measure 没有自然唯一键：同观察同指标已存在就跳过，保证重复导入不翻倍
+        // measure 没有自然唯一键：同观察同指标已存在就跳过，保证重复导入不翻倍
+        self.tx.execute(
             "INSERT INTO measure(observation_id,metric_term_id,value,unit,confidence)
              SELECT ?1,?2,?3,?4,?5
              WHERE NOT EXISTS (SELECT 1 FROM measure WHERE observation_id=?1 AND metric_term_id=?2)",
-            params![oid, mid, num(m,"value", 0.0), opt_s(m,"unit"), num(m,"confidence", 0.5)],
+            params![
+                oid,
+                mid,
+                num(m, "value", 0.0),
+                opt_s(m, "unit"),
+                num(m, "confidence", 0.5)
+            ],
         )?;
-        bump("measures", 1);
+        self.bump("measures");
+        Ok(())
     }
 
-    for e in arr(&b, "evidence") {
+    fn evidence(&mut self, e: &Value) -> Result<()> {
         let wk = &e["work"];
-        let Some(&wid) = work_map.get(&format!(
+        let Some(&wid) = self.work_map.get(&format!(
             "{}|{}|{}",
             s(wk, "source_id"),
             s(wk, "collection"),
             s(wk, "slug")
         )) else {
-            continue;
+            return Ok(());
         };
-        let Some(&tid) = term_map.get(&format!("core|primitive|{}", s(e, "primitive"))) else {
-            continue;
+        let Some(&tid) = self
+            .term_map
+            .get(&format!("core|primitive|{}", s(e, "primitive")))
+        else {
+            return Ok(());
         };
-        tx.execute(
+        self.tx.execute(
             "INSERT INTO work_primitive_evidence(work_id,primitive_term_id,source,score,confidence,extractor_version,updated_at)
              VALUES(?1,?2,?3,?4,?5,?6,?7)
              ON CONFLICT(work_id,primitive_term_id,source) DO UPDATE SET
                score=excluded.score, confidence=excluded.confidence,
                extractor_version=excluded.extractor_version, updated_at=excluded.updated_at",
-            params![wid, tid, s(e,"source"), num(e,"score",0.0), num(e,"confidence",0.5),
-                    opt_s(e,"extractor_version"), s(e,"updated_at")],
+            params![
+                wid,
+                tid,
+                s(e, "source"),
+                num(e, "score", 0.0),
+                num(e, "confidence", 0.5),
+                opt_s(e, "extractor_version"),
+                s(e, "updated_at")
+            ],
         )?;
-        // 同步物化表：取置信度最高的一路
-        tx.execute(
+        self.tx.execute(
             "INSERT INTO work_primitive(work_id,primitive_term_id,score,confidence,source,extractor_version,updated_at)
              SELECT work_id,primitive_term_id,score,confidence,source,coalesce(extractor_version,''),updated_at
              FROM work_primitive_evidence WHERE work_id=?1 AND primitive_term_id=?2
@@ -522,101 +788,106 @@ pub fn import(o: &ImportOpts<'_>) -> Result<()> {
                extractor_version=excluded.extractor_version, updated_at=excluded.updated_at",
             params![wid, tid],
         )?;
-        bump("evidence", 1);
+        self.bump("evidence");
+        Ok(())
     }
 
-    for u in arr(&b, "device_usage") {
+    fn device_usage(&mut self, u: &Value) -> Result<()> {
         let wk = &u["work"];
-        let Some(&wid) = work_map.get(&format!(
+        let Some(&wid) = self.work_map.get(&format!(
             "{}|{}|{}",
             s(wk, "source_id"),
             s(wk, "collection"),
             s(wk, "slug")
         )) else {
-            continue;
+            return Ok(());
         };
-        let Some(&did) = term_map.get(&format!("ui|device|{}", s(u, "device"))) else {
-            continue;
+        let Some(&did) = self.term_map.get(&format!("ui|device|{}", s(u, "device"))) else {
+            return Ok(());
         };
-        tx.execute(
+        self.tx.execute(
             "INSERT OR IGNORE INTO device_usage(work_id,device_term_id,strength,note) VALUES(?1,?2,?3,?4)",
-            params![wid, did, num(u,"strength", 0.5), opt_s(u,"note")],
+            params![wid, did, num(u, "strength", 0.5), opt_s(u, "note")],
         )?;
-        bump("device_usage", 1);
+        self.bump("device_usage");
+        Ok(())
     }
 
-    let mut principle_map: HashMap<String, i64> = HashMap::new();
-    for p in arr(&b, "principles") {
-        tx.execute(
+    fn principle(&mut self, p: &Value) -> Result<()> {
+        self.tx.execute(
             "INSERT INTO principle(key,statement,rationale,context_json,boundary,counterexample,status,confidence,created_at,updated_at)
              VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
              ON CONFLICT(key) DO UPDATE SET statement=excluded.statement, rationale=excluded.rationale,
                context_json=excluded.context_json, boundary=excluded.boundary, counterexample=excluded.counterexample,
                status=excluded.status, confidence=excluded.confidence, updated_at=excluded.updated_at",
-            params![s(p,"key"), s(p,"statement"), opt_s(p,"rationale"), s(p,"context_json"),
-                    opt_s(p,"boundary"), opt_s(p,"counterexample"), s(p,"status"),
-                    num(p,"confidence", 0.4), s(p,"created_at"), s(p,"updated_at")],
+            params![
+                s(p, "key"),
+                s(p, "statement"),
+                opt_s(p, "rationale"),
+                s(p, "context_json"),
+                opt_s(p, "boundary"),
+                opt_s(p, "counterexample"),
+                s(p, "status"),
+                num(p, "confidence", 0.4),
+                s(p, "created_at"),
+                s(p, "updated_at")
+            ],
         )?;
-        let id: i64 = tx.query_row(
+        let id: i64 = self.tx.query_row(
             "SELECT id FROM principle WHERE key=?1",
             params![s(p, "key")],
             |r| r.get(0),
         )?;
-        principle_map.insert(s(p, "key"), id);
-        bump("principles", 1);
+        self.principle_map.insert(s(p, "key"), id);
+        self.bump("principles");
+        Ok(())
     }
-    for e in arr(&b, "principle_evidence") {
-        let Some(&pid) = principle_map.get(&s(e, "principle_key")) else {
-            continue;
+
+    fn principle_evidence(&mut self, e: &Value) -> Result<()> {
+        let Some(&pid) = self.principle_map.get(&s(e, "principle_key")) else {
+            return Ok(());
         };
         let wk = &e["work"];
-        let Some(&wid) = work_map.get(&format!(
+        let Some(&wid) = self.work_map.get(&format!(
             "{}|{}|{}",
             s(wk, "source_id"),
             s(wk, "collection"),
             s(wk, "slug")
         )) else {
-            continue;
+            return Ok(());
         };
-        tx.execute(
+        self.tx.execute(
             "INSERT OR IGNORE INTO principle_evidence(principle_id,work_id,role,note,weight) VALUES(?1,?2,?3,?4,?5)",
-            params![pid, wid, s(e,"role"), opt_s(e,"note"), num(e,"weight", 1.0)],
+            params![pid, wid, s(e, "role"), opt_s(e, "note"), num(e, "weight", 1.0)],
         )?;
-        bump("principle_evidence", 1);
+        self.bump("principle_evidence");
+        Ok(())
     }
 
-    for sp in arr(&b, "specs") {
-        let exists: i64 = tx.query_row(
+    fn spec(&mut self, sp: &Value) -> Result<()> {
+        let exists: i64 = self.tx.query_row(
             "SELECT count(*) FROM spec WHERE name=?1 AND created_at=?2",
             params![s(sp, "name"), s(sp, "created_at")],
             |r| r.get(0),
         )?;
         if exists == 0 {
-            tx.execute(
+            self.tx.execute(
                 "INSERT INTO spec(domain_id,name,profile_json,body_md,tokens_json,created_at,updated_at)
                  VALUES(?1,?2,?3,?4,?5,?6,?7)",
-                params![s(sp,"domain_id"), s(sp,"name"), s(sp,"profile_json"), s(sp,"body_md"),
-                        s(sp,"tokens_json"), s(sp,"created_at"), s(sp,"updated_at")],
+                params![
+                    s(sp, "domain_id"),
+                    s(sp, "name"),
+                    s(sp, "profile_json"),
+                    s(sp, "body_md"),
+                    s(sp, "tokens_json"),
+                    s(sp, "created_at"),
+                    s(sp, "updated_at")
+                ],
             )?;
-            bump("specs", 1);
+            self.bump("specs");
         }
+        Ok(())
     }
-
-    if o.dry_run {
-        tx.rollback()?;
-        println!("dry-run（已回滚）：{counts:?}");
-    } else {
-        tx.commit()?;
-        println!("导入完成：{counts:?}");
-    }
-    Ok(())
-}
-
-fn arr<'a>(b: &'a Value, key: &str) -> &'a [Value] {
-    b.get(key)
-        .and_then(|x| x.as_array())
-        .map(|v| v.as_slice())
-        .unwrap_or(&[])
 }
 
 fn opt_s(v: &Value, k: &str) -> Option<String> {

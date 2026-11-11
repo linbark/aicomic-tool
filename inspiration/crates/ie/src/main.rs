@@ -130,6 +130,7 @@ fn main() -> Result<()> {
             bundle::export(&bundle::ExportOpts {
                 db: &db,
                 out: &out,
+                format: opts.get("format").map(|s| s.as_str()).unwrap_or("auto"),
                 with_assets: opts.contains_key("with-assets"),
                 with_personal: opts.contains_key("with-personal"),
                 collection: opts.get("collection").map(|s| s.as_str()),
