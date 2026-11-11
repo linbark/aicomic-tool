@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 pub struct ExportOpts<'a> {
     pub db: &'a str,
     pub out: &'a Path,
+    pub root: &'a Path,
     pub format: &'a str, // json | ndjson | auto
     pub with_assets: bool,
     pub with_personal: bool,
@@ -34,6 +35,15 @@ pub struct ImportOpts<'a> {
 pub fn export(o: &ExportOpts<'_>) -> Result<()> {
     let conn = Connection::open(o.db)?;
     conn.busy_timeout(std::time::Duration::from_secs(10))?;
+    let ext0 = o
+        .out
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let ndjson =
+        o.format == "ndjson" || (o.format == "auto" && matches!(ext0.as_str(), "ndjson" | "jsonl"));
+
     let mut bundle = json!({
         "format": "ie-bundle",
         "version": 1,
@@ -117,6 +127,7 @@ pub fn export(o: &ExportOpts<'_>) -> Result<()> {
             let mut row = a.clone();
             row["work"] = wkey.clone();
             if o.with_assets
+                && !ndjson
                 && let Some(lp) = a.get("local_path").and_then(|x| x.as_str())
             {
                 let p = PathBuf::from("data/inspiration").join(lp);
@@ -239,7 +250,7 @@ pub fn export(o: &ExportOpts<'_>) -> Result<()> {
     let ndjson =
         o.format == "ndjson" || (o.format == "auto" && matches!(ext.as_str(), "ndjson" | "jsonl"));
     let text = if ndjson {
-        write_ndjson(&bundle, o.out)?;
+        write_ndjson(&bundle, o.out, o.root, o.with_assets)?;
         String::new()
     } else {
         let t = serde_json::to_string(&bundle)?;
@@ -295,8 +306,10 @@ fn rows(conn: &Connection, sql: &str, params: &[&dyn rusqlite::ToSql]) -> Result
     Ok(out)
 }
 
+const CHUNK: usize = 192 * 1024; // 192KB 原始字节 -> 约 256KB base64/行
+
 /// NDJSON：首行 header，其余按依赖顺序一行一条，导入端可单遍流式消费。
-fn write_ndjson(b: &Value, out: &Path) -> Result<usize> {
+fn write_ndjson(b: &Value, out: &Path, root: &Path, with_assets: bool) -> Result<usize> {
     use std::io::Write;
     let f = std::fs::File::create(out)?;
     let mut w = std::io::BufWriter::new(f);
@@ -338,6 +351,49 @@ fn write_ndjson(b: &Value, out: &Path) -> Result<usize> {
                 n += 1;
             }
         }
+        // 图片不塞进 asset 行，而是紧跟着输出成多条 blob 行（每行 ≤ 256KB base64）
+        if *key == "assets" && with_assets {
+            for a in b
+                .get("assets")
+                .and_then(|x| x.as_array())
+                .into_iter()
+                .flatten()
+            {
+                let sha = a.get("sha256").and_then(|x| x.as_str()).unwrap_or("");
+                let Some(lp) = a.get("local_path").and_then(|x| x.as_str()) else {
+                    continue;
+                };
+                if sha.len() < 2 {
+                    continue;
+                }
+                let path = root.join(lp);
+                let Ok(meta) = std::fs::metadata(&path) else {
+                    continue;
+                };
+                let total = (meta.len() as usize).div_ceil(CHUNK).max(1);
+                let Ok(file) = std::fs::File::open(&path) else {
+                    continue;
+                };
+                let mut rd = std::io::BufReader::new(file);
+                let mut idx = 0usize;
+                loop {
+                    let mut buf = vec![0u8; CHUNK];
+                    let read = std::io::Read::read(&mut rd, &mut buf)?;
+                    if read == 0 {
+                        break;
+                    }
+                    use base64::Engine;
+                    let data = base64::engine::general_purpose::STANDARD.encode(&buf[..read]);
+                    writeln!(
+                        w,
+                        "{}",
+                        json!({"_type":"blob","sha":sha,"index":idx,"total":total,"data":data})
+                    )?;
+                    idx += 1;
+                    n += 1;
+                }
+            }
+        }
     }
     w.flush()?;
     Ok(n)
@@ -360,11 +416,14 @@ const HANDLED: &[&str] = &[
     "principle",
     "principle_evidence",
     "spec",
+    "blob",
 ];
 
 struct Imp<'a> {
     tx: rusqlite::Transaction<'a>,
     root: PathBuf,
+    dry_run: bool,
+    blob_counts: HashMap<String, usize>,
     work_map: HashMap<String, i64>,
     term_map: HashMap<String, i64>,
     principle_map: HashMap<String, i64>,
@@ -398,6 +457,8 @@ pub fn import(o: &ImportOpts<'_>) -> Result<()> {
     let mut imp = Imp {
         tx,
         root: o.root.to_path_buf(),
+        dry_run: o.dry_run,
+        blob_counts: HashMap::new(),
         work_map: HashMap::new(),
         term_map: HashMap::new(),
         principle_map: HashMap::new(),
@@ -407,6 +468,9 @@ pub fn import(o: &ImportOpts<'_>) -> Result<()> {
         imp.load_ndjson(o.input)?;
     } else {
         imp.load_bundle(o.input)?;
+    }
+    if !o.dry_run {
+        imp.verify_assets()?;
     }
     let counts = imp.counts.clone();
     if o.dry_run {
@@ -516,6 +580,7 @@ impl Imp<'_> {
             "principle" => self.principle(v),
             "principle_evidence" => self.principle_evidence(v),
             "spec" => self.spec(v),
+            "blob" => self.blob(v),
             _ => Ok(()),
         }
     }
@@ -878,6 +943,79 @@ impl Imp<'_> {
             params![pid, wid, s(e, "role"), opt_s(e, "note"), num(e, "weight", 1.0)],
         )?;
         self.bump("principle_evidence");
+        Ok(())
+    }
+
+    /// 分块图片：按 sha 追加到临时文件，收齐最后一块才落到 blobs/xx/sha
+    fn blob(&mut self, v: &Value) -> Result<()> {
+        if self.dry_run {
+            self.bump("blobs");
+            return Ok(());
+        }
+        let sha = s(v, "sha");
+        if sha.len() < 2 {
+            return Ok(());
+        }
+        use base64::Engine;
+        use std::io::Write;
+        let data = v.get("data").and_then(|x| x.as_str()).unwrap_or("");
+        let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) else {
+            return Ok(());
+        };
+        let total = v.get("total").and_then(|x| x.as_u64()).unwrap_or(1) as usize;
+        let idx = v.get("index").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
+
+        let tmp_dir = self.root.join(".tmp");
+        std::fs::create_dir_all(&tmp_dir)?;
+        let part = tmp_dir.join(format!("{sha}.part"));
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&part)?;
+        f.write_all(&bytes)?;
+        drop(f);
+
+        let seen = self.blob_counts.entry(sha.clone()).or_insert(0);
+        *seen += 1;
+        if idx + 1 >= total {
+            let rel = format!("blobs/{}/{}", &sha[..2], sha);
+            let dest = self.root.join(&rel);
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::rename(&part, &dest)?;
+            self.tx.execute(
+                "UPDATE asset SET local_path=?1 WHERE sha256=?2 AND local_path IS NULL",
+                params![rel, sha],
+            )?;
+            self.bump("blobs");
+        }
+        Ok(())
+    }
+
+    /// 导入后自检：local_path 指向的文件不存在就置空，避免留下悬空路径
+    fn verify_assets(&mut self) -> Result<()> {
+        let mut stmt = self
+            .tx
+            .prepare("SELECT id, local_path FROM asset WHERE local_path IS NOT NULL")?;
+        let rows: Vec<(i64, String)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stmt);
+        let mut missing = 0usize;
+        for (id, lp) in rows {
+            if !self.root.join(&lp).exists() {
+                self.tx
+                    .execute("UPDATE asset SET local_path=NULL WHERE id=?1", params![id])?;
+                missing += 1;
+            }
+        }
+        if missing > 0 {
+            println!(
+                "提示：{missing} 个素材文件不在 {}/blobs，local_path 已置空（元数据保留）",
+                self.root.display()
+            );
+        }
         Ok(())
     }
 

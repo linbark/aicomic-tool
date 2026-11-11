@@ -167,6 +167,17 @@ ie import --db /tmp/other.db --in finds.json --root /tmp/other
 | 重复导入 | 不翻倍 | 不翻倍 |
 | `--with-assets`（8 张柱廊） | 可用 | 可用，导入后 8 个 blob 落盘 |
 
+带图片的 NDJSON **不把 base64 塞进 asset 行**，而是紧跟着输出多条 blob 行：
+
+```json
+{"_type":"blob","sha":"2c86…","index":0,"total":1,"data":"<base64 192KB 分块>"}
+```
+
+- 每行 ≤ 256 KB，导入端边读边写临时文件，收齐最后一块才 `rename` 到 `blobs/xx/<sha>`；
+- 实测 163 张 → 167 条 blob 行（4 张需要 2 块），最大行 262 KB，导入后 163 个文件、无临时残留；
+- `--dry-run` 不写任何文件（回滚前也不落地）；
+- 导入结束会自检：`local_path` 指向的文件不存在就置空并提示，不留悬空路径（实测元数据包导入后 851 条路径被清空但元数据保留）。
+
 一个已知差异：源库里 `work_primitive` 有 5026 行，导入后是 4921 行——多出的 105 行是早期"两路平均"逻辑留下的
 `source='mixed'` 记录，迁移 005 时没有回填证据。等单模型全量 pass 重跑后两边就一致了。
 

@@ -127,9 +127,15 @@ fn main() -> Result<()> {
                     .cloned()
                     .unwrap_or_else(|| "ie-bundle.json".into()),
             );
+            let root = PathBuf::from(
+                opts.get("root")
+                    .cloned()
+                    .unwrap_or_else(|| "data/inspiration".to_string()),
+            );
             bundle::export(&bundle::ExportOpts {
                 db: &db,
                 out: &out,
+                root: &root,
                 format: opts.get("format").map(|s| s.as_str()).unwrap_or("auto"),
                 with_assets: opts.contains_key("with-assets"),
                 with_personal: opts.contains_key("with-personal"),
