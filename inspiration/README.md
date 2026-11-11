@@ -404,6 +404,26 @@ run 状态：done
 
 第一次成对比较时，规格里混进了作品名（`以 30% 的版式骨架搭结构（COOLEST）`）——`t.layout` 的药液把作品标题写进了 `structure` 字段。盲评前现在会把所有候选的药材名替换成「（某作品）」，避免泄漏来源。
 
+## 端到端：丹药 → 产物 → 验收
+
+```sh
+ie brief  --pill 13 --out data/inspiration/briefs/pill-13   # 出简报 + 验收清单 + tokens.json
+ie verify --pill 13 --html path/to/index.html                # 静态验收，结果落 pill_check
+```
+
+引擎不写 HTML：它交付「可执行规格 + 验收清单」，产物由编码 agent 写，写完回来验收——这样规格才是真正的接口。
+
+`verify` 目前查四项：
+
+| 检查 | 判据 |
+| --- | --- |
+| palette | 药液色板在产物里出现的比例 ≥60% |
+| no_shadow | 禁忌里有投影时，产物不得出现 `box-shadow` |
+| contrast | `body` 的 background/color（支持 CSS 变量）≥4.5:1 |
+| type_scale | 最大/最小字号 ≥2× |
+
+完整样例（含目标、产物、截图、8 条规格缺口清单）见 [examples/pill13](../../docs/design/examples/pill13/README.md)。
+
 ## 内核卡（演练输出）
 
 ```text
