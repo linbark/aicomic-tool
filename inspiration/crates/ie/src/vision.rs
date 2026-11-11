@@ -507,6 +507,16 @@ pub(crate) fn extract_json(text: &str) -> Option<serde_json::Value> {
     serde_json::from_str::<serde_json::Value>(&t[start..=end]).ok()
 }
 
+/// 纯文本请求（评判、改写等不需要图片的场景）
+pub(crate) fn openai_text_body(prompt: &str, model: &str, max_tokens: u32) -> serde_json::Value {
+    serde_json::json!({
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.2,
+        "max_tokens": max_tokens
+    })
+}
+
 pub(crate) fn call_openai(
     client: &reqwest::blocking::Client,
     base_url: &str,

@@ -11,6 +11,7 @@ mod bundle;
 mod distill;
 mod extract;
 mod fit;
+mod judge;
 mod metrics;
 mod vector;
 mod vision;
@@ -23,11 +24,17 @@ fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let cmd = args.next().unwrap_or_default();
     let mut opts: HashMap<String, String> = HashMap::new();
+    let mut positional: Vec<String> = Vec::new();
     while let Some(a) = args.next() {
         if let Some(k) = a.strip_prefix("--") {
             let v = args.next().unwrap_or_default();
             opts.insert(k.to_string(), v);
+        } else {
+            positional.push(a);
         }
+    }
+    if cmd == "judge" && !positional.is_empty() {
+        opts.insert("sub".into(), positional[0].clone());
     }
     let db = opts
         .get("db")
@@ -306,6 +313,63 @@ fn main() -> Result<()> {
                 dimension: opts.get("dimension").map(|s| s.as_str()),
                 limit,
             })
+        }
+        "judge" => {
+            let sub = opts.get("sub").cloned().unwrap_or_default();
+            match sub.as_str() {
+                "run" => {
+                    let pills: Vec<i64> = opts
+                        .get("pills")
+                        .map(|s| s.split(',').filter_map(|x| x.trim().parse().ok()).collect())
+                        .unwrap_or_default();
+                    if pills.len() < 2 {
+                        anyhow::bail!("需要 --pills 12,13（至少两颗）");
+                    }
+                    let provider = opts
+                        .get("provider")
+                        .cloned()
+                        .unwrap_or_else(|| "gemini".into());
+                    let model = opts
+                        .get("model")
+                        .cloned()
+                        .unwrap_or_else(|| "gemini-3.1-flash-lite".into());
+                    let base_url = opts
+                        .get("base-url")
+                        .cloned()
+                        .unwrap_or_else(|| "https://generativelanguage.googleapis.com".into());
+                    let thinking: u32 = opts
+                        .get("thinking")
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0);
+                    let seed: u64 = opts.get("seed").and_then(|v| v.parse().ok()).unwrap_or(7);
+                    judge::run(&judge::RunOpts {
+                        db: &db,
+                        pills,
+                        provider: &provider,
+                        model: &model,
+                        base_url: &base_url,
+                        thinking,
+                        seed,
+                    })
+                }
+                "list" => judge::list(&db),
+                "review" => {
+                    let run_id: Option<i64> = opts.get("run").and_then(|v| v.parse().ok());
+                    judge::review(&db, run_id)
+                }
+                "record" => {
+                    let item: i64 = opts
+                        .get("item")
+                        .and_then(|v| v.parse().ok())
+                        .ok_or_else(|| anyhow::anyhow!("需要 --item"))?;
+                    let score: f64 = opts
+                        .get("score")
+                        .and_then(|v| v.parse().ok())
+                        .ok_or_else(|| anyhow::anyhow!("需要 --score 0-100"))?;
+                    judge::record(&db, item, score, opts.get("note").map(|s| s.as_str()))
+                }
+                _ => anyhow::bail!("用法：ie judge <run|list|review|record> ..."),
+            }
         }
         "stats" => stats(&db),
         _ => {
