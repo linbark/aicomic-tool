@@ -344,6 +344,11 @@ fn parse(
     if devices.is_empty() && prims.is_empty() {
         anyhow::bail!("模型没有返回任何词表内的条目");
     }
+    // 小模型常无视"最多 6/8 个"的约束，这里按置信度截断，避免一条作品刷满整张词表
+    devices.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    devices.truncate(6);
+    prims.sort_by(|a, b| (b.1 * b.2).partial_cmp(&(a.1 * a.2)).unwrap());
+    prims.truncate(8);
     let confidence = if confs.is_empty() {
         0.5
     } else {
