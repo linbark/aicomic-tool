@@ -104,6 +104,14 @@ pub fn run(opts: &Opts<'_>) -> Result<()> {
 
     let dev_index: HashMap<&str, i64> = devices.iter().map(|d| (d.term.as_str(), d.id)).collect();
     let prim_index: HashMap<&str, i64> = prims.iter().map(|d| (d.term.as_str(), d.id)).collect();
+    let dev_label: HashMap<String, String> = devices
+        .iter()
+        .map(|d| (d.label.clone(), d.term.clone()))
+        .collect();
+    let prim_label: HashMap<String, String> = prims
+        .iter()
+        .map(|p| (p.label.clone(), p.term.clone()))
+        .collect();
 
     let now = crate::now_iso();
     let mut ok = 0usize;
@@ -146,14 +154,15 @@ pub fn run(opts: &Opts<'_>) -> Result<()> {
             } {
                 CallOutcome::Ok(json, used) => {
                     tokens += used;
-                    let parsed = match parse(&json, &dev_index, &prim_index) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            eprintln!("  ✗ 解析 asset {asset_id}: {e}");
-                            failed += 1;
-                            break;
-                        }
-                    };
+                    let parsed =
+                        match parse(&json, &dev_index, &prim_index, &dev_label, &prim_label) {
+                            Ok(p) => p,
+                            Err(e) => {
+                                eprintln!("  ✗ 解析 asset {asset_id}: {e}");
+                                failed += 1;
+                                break;
+                            }
+                        };
                     let tx = conn.unchecked_transaction()?;
                     tx.execute(
                         "INSERT INTO observation(asset_id, extractor, extractor_version, payload_json, confidence, created_at)
@@ -280,32 +289,49 @@ fn parse(
     json: &serde_json::Value,
     dev_index: &HashMap<&str, i64>,
     prim_index: &HashMap<&str, i64>,
+    dev_label: &HashMap<String, String>,
+    prim_label: &HashMap<String, String>,
 ) -> Result<Parsed> {
     let mut devices = Vec::new();
     let mut prims = Vec::new();
     let mut confs = Vec::new();
     if let Some(arr) = json.get("devices").and_then(|v| v.as_array()) {
         for d in arr {
-            let term = d.get("term").and_then(|v| v.as_str()).unwrap_or_default();
-            if !dev_index.contains_key(term) {
+            // 兼容三种写法：对象 / 纯 term 字符串 / 中文 label
+            let (raw_term, conf, ev) = if let Some(s) = d.as_str() {
+                (s.to_string(), 0.6f32, String::new())
+            } else {
+                let term = d.get("term").and_then(|v| v.as_str()).unwrap_or_default();
+                let conf = d.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.5) as f32;
+                let ev = d
+                    .get("evidence")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                (term.to_string(), conf, ev)
+            };
+            let term = if dev_index.contains_key(raw_term.as_str()) {
+                raw_term
+            } else if let Some(t) = dev_label.get(&raw_term) {
+                t.clone()
+            } else {
                 continue; // 词表外的 term 一律丢弃
-            }
-            let conf = d.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.5) as f32;
-            let ev = d
-                .get("evidence")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string();
+            };
             confs.push(conf);
-            devices.push((term.to_string(), conf.clamp(0.0, 1.0), ev));
+            devices.push((term, conf.clamp(0.0, 1.0), ev));
         }
     }
     if let Some(arr) = json.get("primitives").and_then(|v| v.as_array()) {
         for p in arr {
-            let term = p.get("term").and_then(|v| v.as_str()).unwrap_or_default();
-            if !prim_index.contains_key(term) {
+            let raw = p.get("term").and_then(|v| v.as_str()).unwrap_or_default();
+            let term = if prim_index.contains_key(raw) {
+                raw.to_string()
+            } else if let Some(t) = prim_label.get(raw) {
+                t.clone()
+            } else {
                 continue;
-            }
+            };
+            let term = term.as_str();
             let score = p.get("score").and_then(|v| v.as_f64()).unwrap_or(0.5) as f32;
             let conf = p.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.5) as f32;
             prims.push((
@@ -314,6 +340,9 @@ fn parse(
                 conf.clamp(0.0, 1.0),
             ));
         }
+    }
+    if devices.is_empty() && prims.is_empty() {
+        anyhow::bail!("模型没有返回任何词表内的条目");
     }
     let confidence = if confs.is_empty() {
         0.5
@@ -365,7 +394,11 @@ fn build_prompt(devices: &[Term], prims: &[Term]) -> String {
          - 宁可少报：只报你有把握的，手法最多 6 个，基元最多 8 个；\n\
          - score 与 confidence 都是 0–1；\n\
          - evidence 用一句中文，指出图上的具体证据（位置、比例、颜色、元素），不要空话；\n\
-         - summary 一句话概括版式，不要评价好坏。\n\n",
+         - summary 一句话概括版式，不要评价好坏；\n\
+         - devices 的每个元素必须是对象，不能是字符串。\n\n\
+         输出结构必须是这样（字段名一字不差）：\n\
+         {\"summary\":\"…\",\"devices\":[{\"term\":\"ui.type-scale\",\"confidence\":0.8,\"evidence\":\"…\"}],\n\
+          \"primitives\":[{\"term\":\"rhythm.equal\",\"score\":0.7,\"confidence\":0.7}]}\n\n",
     );
     s.push_str("【可选手法】\n");
     for d in devices {
