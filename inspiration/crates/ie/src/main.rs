@@ -216,6 +216,20 @@ fn main() -> Result<()> {
                 to_bag: !opts.contains_key("no-bag"),
             })
         }
+        "brew" => {
+            let recipe = opts
+                .get("recipe")
+                .map(PathBuf::from)
+                .ok_or_else(|| anyhow::anyhow!("需要 --recipe <path>"))?;
+            let out_dir = opts.get("out").map(PathBuf::from);
+            alchemy::brew(&alchemy::BrewOpts {
+                db: &db,
+                recipe: &recipe,
+                allow_mixed: opts.contains_key("allow-mixed"),
+                force: opts.contains_key("force"),
+                out_dir: out_dir.as_deref(),
+            })
+        }
         "bag" => {
             let limit: usize = opts.get("limit").and_then(|v| v.parse().ok()).unwrap_or(30);
             alchemy::bag(&alchemy::BagOpts {

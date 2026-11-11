@@ -24,6 +24,14 @@ pub struct RefineOpts<'a> {
     pub to_bag: bool,
 }
 
+pub struct BrewOpts<'a> {
+    pub db: &'a str,
+    pub recipe: &'a Path,
+    pub allow_mixed: bool,
+    pub force: bool,
+    pub out_dir: Option<&'a Path>,
+}
+
 pub struct BagOpts<'a> {
     pub db: &'a str,
     pub dimension: Option<&'a str>,
@@ -207,6 +215,255 @@ fn pixel_extract(m: &metrics::Metrics) -> serde_json::Value {
         },
         "confidence": 0.85
     })
+}
+
+pub fn brew(o: &BrewOpts<'_>) -> Result<()> {
+    let text = std::fs::read_to_string(o.recipe)
+        .with_context(|| format!("读不到配方 {}", o.recipe.display()))?;
+    let r: serde_json::Value = serde_json::from_str(&text).context("配方不是合法 JSON")?;
+    let key = r["key"].as_str().context("配方缺 key")?.to_string();
+    let name = r["name"].as_str().unwrap_or(&key).to_string();
+    let goal = r["goal"].as_str().unwrap_or("").to_string();
+    let template = r["combination_prompt"].as_str().unwrap_or("").to_string();
+    let constraints = r
+        .get("constraints")
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
+    let components = r["components"].as_array().cloned().unwrap_or_default();
+
+    let conn = Connection::open(o.db)?;
+    conn.busy_timeout(Duration::from_secs(10))?;
+
+    // 配方入库（按 key upsert），便于后续统计与版本对比
+    conn.execute(
+        "INSERT INTO recipe(key,name,goal,combination_prompt,constraints_json,version,created_at)
+         VALUES(?1,?2,?3,?4,?5,?6,?7)
+         ON CONFLICT(key) DO UPDATE SET name=excluded.name, goal=excluded.goal,
+           combination_prompt=excluded.combination_prompt, constraints_json=excluded.constraints_json,
+           version=excluded.version",
+        params![
+            key,
+            name,
+            goal,
+            template,
+            constraints.to_string(),
+            r["version"].as_str().unwrap_or("1"),
+            crate::now_iso()
+        ],
+    )?;
+    let recipe_id: i64 =
+        conn.query_row("SELECT id FROM recipe WHERE key=?1", params![key], |row| {
+            row.get(0)
+        })?;
+    conn.execute(
+        "DELETE FROM recipe_component WHERE recipe_id=?1",
+        params![recipe_id],
+    )?;
+    for c in &components {
+        conn.execute(
+            "INSERT OR REPLACE INTO recipe_component(recipe_id,slot,dimension,ratio,required,fallback)
+             VALUES(?1,?2,?3,?4,?5,?6)",
+            params![
+                recipe_id,
+                c["slot"].as_str().unwrap_or("base"),
+                c["dimension"].as_str().context("组件缺 dimension")?,
+                c["ratio"].as_f64().unwrap_or(0.0),
+                c["required"].as_bool().unwrap_or(true) as i64,
+                c.get("fallback").and_then(|x| x.as_str())
+            ],
+        )?;
+    }
+
+    // 逐槽选药：同维度里质量最高的一瓶
+    struct Picked {
+        slot: String,
+        dimension: String,
+        ratio: f64,
+        extract_id: i64,
+        quality: f64,
+        fire: String,
+        material: String,
+        content: serde_json::Value,
+    }
+    let mut picked: Vec<Picked> = Vec::new();
+    let mut missing: Vec<String> = Vec::new();
+    for c in &components {
+        let slot = c["slot"].as_str().unwrap_or("base").to_string();
+        let dimension = c["dimension"].as_str().unwrap_or("").to_string();
+        let ratio = c["ratio"].as_f64().unwrap_or(0.0);
+        let required = c["required"].as_bool().unwrap_or(true);
+        let row: Option<(i64, f64, String, String, String)> = conn
+            .query_row(
+                "SELECT e.id, e.quality, e.fire_model, coalesce(w.title,'?'), e.content_json
+                 FROM inventory i JOIN extract e ON e.id=i.extract_id
+                 LEFT JOIN work w ON w.id=e.work_id
+                 WHERE e.dimension=?1 ORDER BY e.quality DESC, e.id DESC LIMIT 1",
+                params![dimension],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .ok();
+        match row {
+            Some((id, q, fire, material, content)) => picked.push(Picked {
+                slot,
+                dimension,
+                ratio,
+                extract_id: id,
+                quality: q,
+                fire,
+                material,
+                content: serde_json::from_str(&content).unwrap_or(serde_json::json!({})),
+            }),
+            None => {
+                if required {
+                    missing.push(format!("{slot}/{dimension}"));
+                }
+            }
+        }
+    }
+    if !missing.is_empty() {
+        bail!("配方缺药：{}（先用 ie refine 炼出来）", missing.join("、"));
+    }
+
+    // 相冲检测
+    let mut conflicts: Vec<serde_json::Value> = Vec::new();
+    let fires: std::collections::BTreeSet<String> = picked
+        .iter()
+        .filter(|p| p.fire != "pixel-proxy")
+        .map(|p| p.fire.clone())
+        .collect();
+    if fires.len() > 1 && !o.allow_mixed {
+        conflicts.push(serde_json::json!({
+            "rule": "fire.mixed", "severity": "error",
+            "detail": format!("一炉混了 {} 种火候：{}", fires.len(), fires.iter().cloned().collect::<Vec<_>>().join("、"))
+        }));
+    }
+    if let Some(p) = picked.iter().find(|p| p.dimension == "palette") {
+        let contrast = p.content["stats"]["contrast"].as_f64().unwrap_or(0.0);
+        let min = constraints["contrast_min"].as_f64().unwrap_or(4.5);
+        if contrast > 0.0 && contrast < min {
+            conflicts.push(serde_json::json!({
+                "rule": "contrast.min", "severity": "error",
+                "detail": format!("主色板明度对比 {contrast:.2}:1 低于配方要求 {min:.1}:1")
+            }));
+        }
+    }
+    for p in &picked {
+        if p.quality < 0.5 {
+            conflicts.push(serde_json::json!({
+                "rule": "quality.low", "severity": "warn",
+                "detail": format!("{} 药液质量仅 {:.2}", p.dimension, p.quality)
+            }));
+        }
+    }
+    let errors: Vec<&serde_json::Value> = conflicts
+        .iter()
+        .filter(|c| c["severity"] == "error")
+        .collect();
+    if !errors.is_empty() && !o.force {
+        let lines: Vec<String> = errors
+            .iter()
+            .map(|c| format!("- {}", c["detail"].as_str().unwrap_or("")))
+            .collect();
+        bail!("相冲，拒绝炼丹：\n{}", lines.join("\n"));
+    }
+
+    // 渲染合成提示词
+    let mut map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for p in &picked {
+        let prefix = format!("{}.{}", p.slot, p.dimension);
+        map.insert(
+            format!("{prefix}.ratio"),
+            format!("{:.0}%", p.ratio * 100.0),
+        );
+        map.insert(format!("{prefix}.content"), p.content.to_string());
+        if let Some(obj) = p.content.as_object() {
+            for (k, v) in obj {
+                let s = match v {
+                    serde_json::Value::Array(a) => a
+                        .iter()
+                        .map(|x| {
+                            if let (Some(hex), Some(share)) = (
+                                x.get("hex").and_then(|h| h.as_str()),
+                                x.get("share").and_then(|s| s.as_f64()),
+                            ) {
+                                format!("{hex} {:.0}%", share * 100.0)
+                            } else {
+                                x.as_str()
+                                    .map(|s| s.to_string())
+                                    .unwrap_or_else(|| x.to_string())
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("、"),
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                map.insert(format!("{prefix}.{k}"), s);
+            }
+        }
+    }
+    let mut rendered = template.clone();
+    for (k, v) in &map {
+        rendered = rendered.replace(&format!("{{{{{k}}}}}"), v);
+    }
+
+    // 组装丹药
+    let mut md = String::new();
+    md.push_str(&format!(
+        "# 丹药 · {name}\n\n> 配方 {key} ｜ 目标：{goal}\n\n"
+    ));
+    md.push_str("## 合成提示词（可直接投喂）\n\n");
+    md.push_str(&format!("> {rendered}\n\n"));
+    md.push_str("## 各味药液\n\n| 槽位 | 维度 | 配比 | 药材 | 质量 | 火候 |\n| --- | --- | --- | --- | --- | --- |\n");
+    for p in &picked {
+        md.push_str(&format!(
+            "| {} | {} | {:.0}% | {} | {:.2} | {} |\n",
+            p.slot,
+            p.dimension,
+            p.ratio * 100.0,
+            p.material,
+            p.quality,
+            p.fire
+        ));
+    }
+    md.push_str("\n## 相冲检查\n\n");
+    if conflicts.is_empty() {
+        md.push_str("- 无冲突\n");
+    } else {
+        for c in &conflicts {
+            md.push_str(&format!(
+                "- [{}] {}：{}\n",
+                c["severity"].as_str().unwrap_or("?"),
+                c["rule"].as_str().unwrap_or("?"),
+                c["detail"].as_str().unwrap_or("")
+            ));
+        }
+    }
+
+    let now = crate::now_iso();
+    let output_json = serde_json::json!({
+        "recipe": key,
+        "components": picked.iter().map(|p| serde_json::json!({
+            "slot": p.slot, "dimension": p.dimension, "ratio": p.ratio,
+            "extract_id": p.extract_id, "material": p.material, "quality": p.quality, "fire": p.fire
+        })).collect::<Vec<_>>(),
+        "conflicts": conflicts,
+        "prompt": rendered,
+    });
+    conn.execute(
+        "INSERT INTO pill(recipe_id,output_md,output_json,score_json,cost_json,created_at)
+         VALUES(?1,?2,?3,'{}','{\"tokens\":0}',?4)",
+        params![recipe_id, md, output_json.to_string(), now],
+    )?;
+    let pill_id = conn.last_insert_rowid();
+
+    if let Some(dir) = o.out_dir {
+        std::fs::create_dir_all(dir)?;
+        std::fs::write(dir.join(format!("{pill_id}-{key}.md")), &md)?;
+    }
+    println!("{md}");
+    println!("丹药 #{pill_id} 已入库");
+    Ok(())
 }
 
 pub fn bag(o: &BagOpts<'_>) -> Result<()> {

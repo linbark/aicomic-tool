@@ -273,6 +273,34 @@ GEMINI_API_KEY=... ./inspiration/target/release/ie distill --image ~/Pictures/re
 2. OpenAI 兼容端点加 `response_format: json_object` 会让 Ollama 上的 Qwen 陷入复读并截断 → OpenAI 路线不再发这个字段；
 3. 模型会把 `ratios` 写成 `{"a","b"}`（对象里裸字符串）→ 把该字段改成**字符串数组**。
 
+## 炼丹 D1：配方成丹与相冲检测
+
+```sh
+ie brew --recipe docs/design/inspiration/recipes/minimal-landing.recipe.json
+ie brew --recipe ... --force          # 带着冲突记录强制成丹
+ie brew --recipe ... --out data/inspiration/pills
+```
+
+流程：读配方 → 入库（按 key upsert）→ 逐槽挑质量最高的药液 → 相冲检测 → 渲染合成提示词 → 存 `pill`。
+
+实测（work 7 的四瓶药液）：
+
+```text
+$ ie brew --recipe minimal-landing.recipe.json
+Error: 相冲，拒绝炼丹：
+- 主色板明度对比 3.35:1 低于配方要求 4.5:1
+
+$ ie brew ... --force
+# 丹药 · 极简品牌落地页
+> 以 50% 的色彩语言定调（主色 #FFFFFF 75%、#F1F1F1 11%、#FDFDFD 11%、#AAB5A5 2%），
+  以 30% 的版式骨架搭结构（单页），15% 的字阶作为强调…
+## 相冲检查
+- [error] contrast.min：主色板明度对比 3.35:1 低于配方要求 4.5:1
+丹药 #2 已入库
+```
+
+检查项：`fire.mixed`（一炉混火候，默认拒绝）、`contrast.min`（对比不足）、`quality.low`（药液质量 <0.5 仅告警）。
+
 ## 内核卡（演练输出）
 
 ```text
