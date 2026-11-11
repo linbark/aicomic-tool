@@ -58,9 +58,12 @@ IE_API_KEY=sk-... ./inspiration/target/release/ie vision --provider openai \
 - 请求体带 `response_format: json_object`，解析时会去掉 ```` ```json ```` 代码围栏。
 - 这条路径已用本地 mock 服务验证：`distill` 能出完整卡片，`vision` 能写 observation/device_usage/evidence（2 张 2.1s，150 token/张）。
 - **本地 Qwen3-VL 注意**：Ollama 上的 `qwen3-vl:8b` 是**思考版**，长提示词下会把 token 全花在 reasoning 上、`content` 为空（实测 108s/张、0 成功）。要用 `qwen3-vl:8b-instruct`。
-  实测 instruct 版：单张视觉抽取约 **47–53 s**（M4/16GB），炼化卡约 **72 s**，JSON 合规但有两类毛病——解析器已处理：
+  实测 instruct 版：单张视觉抽取约 **35–53 s**（M4/16GB），炼化卡约 **72 s**，JSON 基本合规，但有三类问题——都已处理：
   1. 偶尔把 devices 写成字符串数组 → 两种形态都收，支持中文 label 反查 term；
-  2. 无视「最多 6 手法 / 8 基元」的约束，个别图会刷满 35 个基元 → 解析后按置信度截断（实测 10 张里有 2 张触发）。
+  2. **空白海报会诱发幻觉**：41 张纯白海报里，模型会给"纯白背景、无任何视觉元素"的图编出 35 个基元和 6 个手法。
+     现在 vision 直接跳过 `validation_result` 里标了 `asset.blank` 的素材（实测清理了 7 条幻觉标注）；
+  3. 提示词改成「示例 + 硬范围」后（手法 1–5、基元 2–6），输出稳定在 3–5 / 3–5，不再刷满词表；
+     解析层另加截断（6/8）作为兜底。
 - JSON 解析会剥离 `<think>…</think>`、代码围栏和前后废话，再退化为首尾花括号切片，兼容小模型的常见格式问题。
 
 `simulate` 是演练：用已知的个人内核生成合成判定，`fit` 再把它估回来，用来验证"判定 → 拟合 → 内核卡"的代码路径。**它不是真实用户数据。**

@@ -32,6 +32,7 @@ pub struct Opts<'a> {
     pub shard: (usize, usize),
     pub finds_first: bool,
     pub provider: &'a str, // gemini | openai
+    pub asset: Option<i64>,
 }
 
 pub fn run(opts: &Opts<'_>) -> Result<()> {
@@ -46,6 +47,7 @@ pub fn run(opts: &Opts<'_>) -> Result<()> {
         shard,
         finds_first,
         provider,
+        asset,
     } = *opts;
     let key = if provider == "openai" {
         std::env::var("IE_API_KEY").unwrap_or_default()
@@ -76,6 +78,9 @@ pub fn run(opts: &Opts<'_>) -> Result<()> {
         "SELECT a.id, a.work_id, a.local_path FROM asset a JOIN work w ON w.id = a.work_id
          WHERE a.local_path IS NOT NULL
            AND (?3 = 1 OR (a.id % ?4) = ?5)
+           AND (?6 = 0 OR a.id = ?6)
+           AND NOT EXISTS (SELECT 1 FROM validation_result v
+                           WHERE v.scope_table='asset' AND v.scope_id=a.id AND v.rule='asset.blank')
            AND NOT EXISTS (SELECT 1 FROM observation o
                            WHERE o.asset_id = a.id AND o.extractor = ?1)
          ORDER BY {order}
@@ -89,7 +94,8 @@ pub fn run(opts: &Opts<'_>) -> Result<()> {
                 limit.unwrap_or(1000) as i64,
                 if shard.1 <= 1 { 1 } else { 0 },
                 shard.1.max(1) as i64,
-                shard.0 as i64
+                shard.0 as i64,
+                asset.unwrap_or(0)
             ],
             |r| Ok((r.get(0)?, r.get(1)?, root.join(r.get::<_, String>(2)?))),
         )?
@@ -391,19 +397,24 @@ fn clip(s: &str, n: usize) -> String {
 fn build_prompt(devices: &[Term], prims: &[Term]) -> String {
     let mut s = String::new();
     s.push_str(
-        "你是设计分析器。看一张作品图，只做两件事：\n\
-         1) 判断它用了哪些「手法」（device）；\n\
-         2) 给它在各个「基元」（primitive）上的强度打分。\n\n\
-         硬规则：\n\
-         - term 只能从下面的列表里选，不得自造；\n\
-         - 宁可少报：只报你有把握的，手法最多 6 个，基元最多 8 个；\n\
-         - score 与 confidence 都是 0–1；\n\
-         - evidence 用一句中文，指出图上的具体证据（位置、比例、颜色、元素），不要空话；\n\
-         - summary 一句话概括版式，不要评价好坏；\n\
-         - devices 的每个元素必须是对象，不能是字符串。\n\n\
-         输出结构必须是这样（字段名一字不差）：\n\
-         {\"summary\":\"…\",\"devices\":[{\"term\":\"ui.type-scale\",\"confidence\":0.8,\"evidence\":\"…\"}],\n\
-          \"primitives\":[{\"term\":\"rhythm.equal\",\"score\":0.7,\"confidence\":0.7}]}\n\n",
+        "你是设计分析器。看一张作品图，完成两件事：\n\
+         A. 认出它用了哪些「手法」——具体、可检查的做法（字号阶梯、侧边导航轨、圆角系统…）。\n\
+         B. 给「基元」打分——抽象的美学性质（节奏、留白、对称…），只给图上确实突出的。\n\n\
+         规则（违反会被判为无效输出）：\n\
+         1. term 只能来自下面两个清单，原样复制，不得改写或自造；\n\
+         2. 手法 1–5 个，基元 2–6 个，宁可少报，不要凑数；\n\
+         3. 每个手法必须能指出图上的具体位置或尺寸，指不出来就不要报；\n\
+         4. evidence 一句话，含具体观察（位置/比例/颜色/元素），禁止「很高级」「有设计感」这类空话；\n\
+         5. score 与 confidence 是 0–1 的小数；\n\
+         6. 只输出一个 JSON 对象：不要 markdown 代码块，不要解释文字。\n\n\
+         示例（白底、居中大标题、一个绿色按钮的页面）：\n\
+         {\"summary\":\"白底居中单栏落地页，只有一个绿色强调色\",\n\
+          \"devices\":[{\"term\":\"ui.type-scale\",\"confidence\":0.9,\"evidence\":\"主标题字号约为正文的 3 倍\"},\n\
+                      {\"term\":\"ui.single-accent\",\"confidence\":0.85,\"evidence\":\"除绿色按钮外全页为黑白\"}],\n\
+          \"primitives\":[{\"term\":\"negative-space.active\",\"score\":0.8,\"confidence\":0.7},\n\
+                          {\"term\":\"contrast.value\",\"score\":0.7,\"confidence\":0.7}]}\n\n\
+         字段：summary 字符串；devices 对象数组 {term, confidence, evidence}；\n\
+         primitives 对象数组 {term, score, confidence}。\n\n",
     );
     s.push_str("【可选手法】\n");
     for d in devices {

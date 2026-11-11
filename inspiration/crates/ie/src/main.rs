@@ -84,6 +84,7 @@ fn main() -> Result<()> {
                 .and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?)))
                 .unwrap_or((0, 1));
             let finds_first = opts.get("priority").map(|v| v == "finds").unwrap_or(false);
+            let asset = opts.get("asset").and_then(|v| v.parse().ok());
             vision::run(&vision::Opts {
                 db: &db,
                 root: &root,
@@ -95,6 +96,7 @@ fn main() -> Result<()> {
                 shard,
                 finds_first,
                 provider: &provider,
+                asset,
             })
         }
         "distill" => {
