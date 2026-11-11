@@ -26,6 +26,10 @@ pub struct Metrics {
     pub alignment: f32,
     /// 主色板：(hex, 面积占比)，按占比降序
     pub palette: Vec<(String, f32)>,
+    /// 最深 2% 像素的平均色（正文/线条的候选）
+    pub ink: String,
+    /// 出现最多的颜色（底色候选）
+    pub paper: String,
 }
 
 pub fn compute(path: &std::path::Path) -> anyhow::Result<Metrics> {
@@ -53,6 +57,8 @@ pub fn compute(path: &std::path::Path) -> anyhow::Result<Metrics> {
         contrast: contrast_ratio(&luma),
         compactness: palette_compactness(&rgb),
         alignment: alignment(&gx, &gy, w, h),
+        ink: ink_color(&rgb),
+        paper: paper_color(&rgb),
         palette: palette(&rgb),
     })
 }
@@ -277,6 +283,57 @@ fn palette_compactness(rgb: &RgbImage) -> f32 {
     }
     let norm = spread / 160.0;
     (1.0 - norm.clamp(0.0, 1.0)).clamp(0.0, 1.0)
+}
+
+/// 最深 2% 像素的平均色：k-means 按面积取色会漏掉小面积文字色，这里单独补。
+fn ink_color(rgb: &RgbImage) -> String {
+    let mut px: Vec<([u8; 3], f64)> = rgb
+        .pixels()
+        .map(|p| {
+            let l = 0.2126 * p[0] as f64 + 0.7152 * p[1] as f64 + 0.0722 * p[2] as f64;
+            ([p[0], p[1], p[2]], l)
+        })
+        .collect();
+    px.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+    let n = (px.len() / 50).max(1);
+    let mut sum = [0f64; 3];
+    for (c, _) in px.iter().take(n) {
+        for i in 0..3 {
+            sum[i] += c[i] as f64;
+        }
+    }
+    format!(
+        "#{:02X}{:02X}{:02X}",
+        (sum[0] / n as f64).round() as u8,
+        (sum[1] / n as f64).round() as u8,
+        (sum[2] / n as f64).round() as u8
+    )
+}
+
+/// 出现最多的颜色：比"最亮色"稳，深色页面也成立。
+fn paper_color(rgb: &RgbImage) -> String {
+    let mut bins = [[0u32; 3]; 512];
+    let mut counts = [0u32; 512];
+    for p in rgb.pixels() {
+        let b = ((p[0] >> 5) as usize) << 6 | ((p[1] >> 5) as usize) << 3 | (p[2] >> 5) as usize;
+        for i in 0..3 {
+            bins[b][i] += p[i] as u32;
+        }
+        counts[b] += 1;
+    }
+    let best = counts
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, c)| **c)
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    let n = counts[best].max(1);
+    format!(
+        "#{:02X}{:02X}{:02X}",
+        (bins[best][0] / n) as u8,
+        (bins[best][1] / n) as u8,
+        (bins[best][2] / n) as u8
+    )
 }
 
 /// 主色板：k-means 的簇心 + 面积占比。颜色是复现里最不能靠形容词的部分，必须给 hex。

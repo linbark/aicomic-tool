@@ -11,6 +11,7 @@ mod bundle;
 mod distill;
 mod extract;
 mod fit;
+mod forge;
 mod judge;
 mod metrics;
 mod vector;
@@ -21,16 +22,30 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 fn main() -> Result<()> {
-    let mut args = std::env::args().skip(1);
-    let cmd = args.next().unwrap_or_default();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let cmd = if args.is_empty() {
+        String::new()
+    } else {
+        args.remove(0)
+    };
     let mut opts: HashMap<String, String> = HashMap::new();
     let mut positional: Vec<String> = Vec::new();
-    while let Some(a) = args.next() {
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
         if let Some(k) = a.strip_prefix("--") {
-            let v = args.next().unwrap_or_default();
-            opts.insert(k.to_string(), v);
+            // 布尔开关不吞下一个参数：后面紧跟另一个 --flag 或没有值时记作 "1"
+            let has_value = i + 1 < args.len() && !args[i + 1].starts_with("--");
+            if has_value {
+                opts.insert(k.to_string(), args[i + 1].clone());
+                i += 2;
+            } else {
+                opts.insert(k.to_string(), "1".to_string());
+                i += 1;
+            }
         } else {
-            positional.push(a);
+            positional.push(a.clone());
+            i += 1;
         }
     }
     if cmd == "judge" && !positional.is_empty() {
@@ -221,6 +236,7 @@ fn main() -> Result<()> {
                 base_url: &base_url,
                 thinking,
                 to_bag: !opts.contains_key("no-bag"),
+                refresh: opts.contains_key("refresh"),
             })
         }
         "brew" => {
@@ -388,6 +404,29 @@ fn main() -> Result<()> {
                 }
                 _ => anyhow::bail!("用法：ie judge <run|list|review|screen|fill|record> ..."),
             }
+        }
+        "brief" => {
+            let pill: i64 = opts
+                .get("pill")
+                .and_then(|v| v.parse().ok())
+                .ok_or_else(|| anyhow::anyhow!("需要 --pill <id>"))?;
+            let out = PathBuf::from(
+                opts.get("out")
+                    .cloned()
+                    .unwrap_or_else(|| format!("data/inspiration/briefs/pill-{pill}")),
+            );
+            forge::brief(&db, pill, &out)
+        }
+        "verify" => {
+            let pill: i64 = opts
+                .get("pill")
+                .and_then(|v| v.parse().ok())
+                .ok_or_else(|| anyhow::anyhow!("需要 --pill <id>"))?;
+            let html = opts
+                .get("html")
+                .map(PathBuf::from)
+                .ok_or_else(|| anyhow::anyhow!("需要 --html <file>"))?;
+            forge::verify(&db, pill, &html)
         }
         "stats" => stats(&db),
         _ => {

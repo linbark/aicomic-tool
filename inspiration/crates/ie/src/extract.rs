@@ -77,6 +77,7 @@ pub fn run(db: &str, root: &Path, limit: Option<usize>) -> Result<()> {
             "edge_density": m.edge_density, "symmetry": m.symmetry,
             "whitespace": m.whitespace, "contrast": m.contrast,
             "compactness": m.compactness, "alignment": m.alignment,
+            "palette": m.palette,
         });
         tx.execute(
             "INSERT OR IGNORE INTO observation(asset_id, extractor, extractor_version, payload_json, confidence, created_at)

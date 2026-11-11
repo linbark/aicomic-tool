@@ -424,6 +424,38 @@ ie verify --pill 13 --html path/to/index.html                # 静态验收，�
 
 完整样例（含目标、产物、截图、8 条规格缺口清单）见 [examples/pill13](../../docs/design/examples/pill13/README.md)。
 
+## 规格数值化：把形容词变成可执行参数
+
+端到端样例暴露的 8 条缺口里，前 4 条都是「药液没给数值」，现已补：
+
+| 手法 | 版本 | 新增输出 |
+| --- | --- | --- |
+| `t.palette` | 计算增强 | `roles: {bg,text,muted,border,accent,text_contrast}`，由 ink/paper 与对比度推断，不调模型 |
+| `t.type` | v3 | `base_px` + `steps[{name,size_px,weight,tracking}]` |
+| `t.spacing` | 新增 | `base_px`、`steps[]`、`page_margin_px`、`section_gap_px` |
+| `t.donts` | v3 | 每条带 `applies_to` 语境标签 |
+| `t.layout` | v4 | `structure` 限定为六个枚举，禁止写作品名 |
+
+丹药 #23 的合成规格现在是：
+
+```text
+以 42% 的色彩语言定调（底 #FDFCFD、字 #2B2B2B、强调 #90A1A2、线 #DBE0E1，正文对比 13.83:1）；
+以 22% 的骨架搭结构（单列）；间距用 13% 的模数（8px，档位 4、8、12、16、24、32、48、64，
+页边 40px，段距 88px）；13% 的字阶作为强调（display 72px/600、body 18px/400）。
+```
+
+### 顺手修的 CLI bug
+
+参数解析把**任何 `--flag` 都当成要带值**，所以 `--refresh --provider openai` 会把 `--provider` 吃掉、
+`openai` 变成位置参数，provider 悄悄退回默认的 gemini。已改成：`--flag` 后面若紧跟另一个 `--xxx` 或没有值，
+就按布尔开关处理。
+
+### 还没修的：禁忌仍然"就图论图"
+
+实测 t.donts 抽出来的是「登陆页使用模糊背景国旗图标」——源图的具体内容，不是可迁移的规则。
+单图抽取天然做不到抽象；正确做法是**多图归纳**：拿同类页面的 3–5 张，让模型找共同禁忌。
+`applies_to` 语境标签只是第一步，内容抽象还差一次归纳。
+
 ## 内核卡（演练输出）
 
 ```text

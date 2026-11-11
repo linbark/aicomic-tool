@@ -22,6 +22,7 @@ pub struct RefineOpts<'a> {
     pub base_url: &'a str,
     pub thinking: u32,
     pub to_bag: bool,
+    pub refresh: bool,
 }
 
 pub struct BrewOpts<'a> {
@@ -109,12 +110,14 @@ pub fn refine(o: &RefineOpts<'_>) -> Result<()> {
         } else {
             o.model.to_string()
         };
-        if let Ok((eid, q)) = conn.query_row(
-            "SELECT id, quality FROM extract
+        if !o.refresh
+            && let Ok((eid, q)) = conn.query_row(
+                "SELECT id, quality FROM extract
              WHERE work_id=?1 AND technique_id=?2 AND dimension=?3 AND fire_model=?4",
-            params![o.work, t.id, t.dimension, fire_hint],
-            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?)),
-        ) {
+                params![o.work, t.id, t.dimension, fire_hint],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?)),
+            )
+        {
             if o.to_bag {
                 conn.execute(
                     "INSERT OR IGNORE INTO inventory(extract_id,added_at) VALUES(?1,?2)",
@@ -245,9 +248,87 @@ fn request_body(
     }
 }
 
+/// 从实测色板推断角色：谁是底、谁是字、谁是线、谁是强调。
+/// 纯计算，不调模型——颜色角色是最不该让模型"猜"的东西。
+fn palette_roles(colors: &[(String, f32)], paper: &str, ink: &str) -> serde_json::Value {
+    fn rgb(hex: &str) -> (f64, f64, f64) {
+        let h = hex.trim_start_matches('#');
+        let v = |i: usize| u8::from_str_radix(&h[i..i + 2], 16).unwrap_or(0) as f64 / 255.0;
+        (v(0), v(2), v(4))
+    }
+    fn lum(hex: &str) -> f64 {
+        let f = |c: f64| {
+            if c <= 0.03928 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let (r, g, b) = rgb(hex);
+        0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b)
+    }
+    fn contrast(a: &str, b: &str) -> f64 {
+        let (l1, l2) = (lum(a), lum(b));
+        let (hi, lo) = if l1 > l2 { (l1, l2) } else { (l2, l1) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+    fn sat(hex: &str) -> f64 {
+        let (r, g, b) = rgb(hex);
+        let mx = r.max(g).max(b);
+        let mn = r.min(g).min(b);
+        if mx <= 0.0 { 0.0 } else { (mx - mn) / mx }
+    }
+    let bg = if paper.is_empty() {
+        colors
+            .first()
+            .map(|(h, _)| h.clone())
+            .unwrap_or_else(|| "#FFFFFF".into())
+    } else {
+        paper.to_string()
+    };
+    let mut text = if ink.is_empty() {
+        bg.clone()
+    } else {
+        ink.to_string()
+    };
+    let mut best = contrast(&bg, &text);
+    for (hex, _) in colors {
+        let c = contrast(&bg, hex);
+        if c > best {
+            best = c;
+            text = hex.clone();
+        }
+    }
+    let muted = colors
+        .iter()
+        .map(|(h, _)| (h.clone(), contrast(&bg, h)))
+        .filter(|(h, c)| *c > 1.6 && *c < best * 0.75 && h != &text)
+        .min_by(|a, b| (a.1 - 3.4).abs().partial_cmp(&(b.1 - 3.4).abs()).unwrap())
+        .map(|(h, _)| h)
+        .unwrap_or_else(|| text.clone());
+    let border = colors
+        .iter()
+        .map(|(h, _)| (h.clone(), contrast(&bg, h)))
+        .filter(|(h, c)| *c >= 1.2 && *c <= 2.6 && h != &text && h != &muted)
+        .min_by(|a, b| (a.1 - 1.6).abs().partial_cmp(&(b.1 - 1.6).abs()).unwrap())
+        .map(|(h, _)| h)
+        .unwrap_or_else(|| muted.clone());
+    let accent = colors
+        .iter()
+        .filter(|(h, _)| h != &bg && h != &text)
+        .max_by(|a, b| sat(&a.0).partial_cmp(&sat(&b.0)).unwrap())
+        .map(|(h, _)| h.clone())
+        .unwrap_or_else(|| text.clone());
+    serde_json::json!({
+        "bg": bg, "text": text, "muted": muted, "border": border, "accent": accent,
+        "text_contrast": (contrast(&bg, &text) * 100.0).round() / 100.0,
+    })
+}
+
 fn pixel_extract(m: &metrics::Metrics) -> serde_json::Value {
     serde_json::json!({
         "colors": m.palette.iter().map(|(hex, share)| serde_json::json!({"hex": hex, "share": share})).collect::<Vec<_>>(),
+        "roles": palette_roles(&m.palette, &m.paper, &m.ink),
         "stats": {
             "whitespace": m.whitespace,
             "contrast": m.contrast,
@@ -271,6 +352,11 @@ pub fn brew(o: &BrewOpts<'_>) -> Result<()> {
         .get("constraints")
         .cloned()
         .unwrap_or(serde_json::json!({}));
+    let page_type = r
+        .get("page_type")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
     let components = r["components"].as_array().cloned().unwrap_or_default();
 
     let conn = Connection::open(o.db)?;
@@ -378,6 +464,26 @@ pub fn brew(o: &BrewOpts<'_>) -> Result<()> {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(stmt);
+        if dimension == "donts" && !page_type.is_empty() {
+            // 优先选明确标注适用于本页面的药液；没有显式标注的（旧数据）作为兜底
+            let explicit: Vec<_> = cands
+                .iter()
+                .filter(|c| {
+                    let v: serde_json::Value = serde_json::from_str(&c.4).unwrap_or_default();
+                    v["donts"]
+                        .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .any(|d| d["applies_to"].as_str() == Some(page_type.as_str()))
+                        })
+                        .unwrap_or(false)
+                })
+                .cloned()
+                .collect();
+            if !explicit.is_empty() {
+                cands = explicit;
+            }
+        }
         if dimension == "palette" {
             let min = constraints["contrast_min"].as_f64().unwrap_or(0.0);
             if min > 0.0 {
@@ -472,41 +578,52 @@ pub fn brew(o: &BrewOpts<'_>) -> Result<()> {
         map.insert(format!("{prefix}.content"), p.content.to_string());
         if let Some(obj) = p.content.as_object() {
             for (k, v) in obj {
-                let s = match v {
-                    serde_json::Value::Array(a) => a
-                        .iter()
-                        .map(|x| {
-                            if let (Some(hex), Some(share)) = (
-                                x.get("hex").and_then(|h| h.as_str()),
-                                x.get("share").and_then(|s| s.as_f64()),
-                            ) {
-                                format!("{hex} {:.0}%", share * 100.0)
-                            } else {
-                                x.as_str()
-                                    .map(|s| s.to_string())
-                                    .unwrap_or_else(|| x.to_string())
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join("、"),
-                    serde_json::Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                };
+                let s = stringify(v);
                 let s = if p.polarity == "negative" {
                     s.split('、')
-                        .map(|x| format!("禁止{x}"))
+                        .map(|x| {
+                            if x.starts_with('禁') || x.starts_with('不') {
+                                x.to_string()
+                            } else {
+                                format!("禁止{x}")
+                            }
+                        })
                         .collect::<Vec<_>>()
                         .join("；")
                 } else {
                     s
                 };
                 map.insert(format!("{prefix}.{k}"), s);
+                // 嵌套对象（如 palette.roles）摊平成 prefix.key.subkey
+                if let Some(sub) = v.as_object() {
+                    for (sk, sv) in sub {
+                        // palette.roles 直接摊成 base.palette.bg，模板里才好写
+                        let key = if k == "roles" {
+                            format!("{prefix}.{sk}")
+                        } else {
+                            format!("{prefix}.{k}.{sk}")
+                        };
+                        map.insert(key, stringify(sv));
+                    }
+                }
             }
         }
     }
     let mut rendered = template.clone();
     for (k, v) in &map {
         rendered = rendered.replace(&format!("{{{{{k}}}}}"), v);
+    }
+    // 清掉没解析的占位符，避免把 {{base.palette.bg}} 原样交给生成器
+    let mut unresolved = 0;
+    while let Some(start) = rendered.find("{{") {
+        let Some(end) = rendered[start..].find("}}") else {
+            break;
+        };
+        rendered.replace_range(start..start + end + 2, "（未提供）");
+        unresolved += 1;
+    }
+    if unresolved > 0 {
+        println!("  ⚠ {unresolved} 个占位符没有对应字段，已替换为（未提供）");
     }
 
     // 组装丹药
@@ -736,6 +853,7 @@ pub fn formula_run(o: &FormulaOpts<'_>) -> Result<()> {
                     base_url: o.base_url,
                     thinking: o.thinking,
                     to_bag: true,
+                    refresh: false,
                 })?;
                 let tid: i64 = conn.query_row(
                     "SELECT id FROM technique WHERE key=?1",
@@ -970,6 +1088,42 @@ pub fn bag(o: &BagOpts<'_>) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn stringify(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Array(a) => a
+            .iter()
+            .map(|x| {
+                if let (Some(hex), Some(share)) = (
+                    x.get("hex").and_then(|h| h.as_str()),
+                    x.get("share").and_then(|s| s.as_f64()),
+                ) {
+                    format!("{hex} {:.0}%", share * 100.0)
+                } else if let Some(name) = x.get("name").and_then(|n| n.as_str()) {
+                    format!(
+                        "{} {}px/{}",
+                        name,
+                        x["size_px"].as_f64().unwrap_or(0.0),
+                        x["weight"].as_i64().unwrap_or(400)
+                    )
+                } else if let Some(text) = x.get("text").and_then(|n| n.as_str()) {
+                    text.to_string()
+                } else {
+                    stringify(x)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("、"),
+        serde_json::Value::Object(o) => o
+            .iter()
+            .map(|(k, v)| format!("{k} {v}"))
+            .collect::<Vec<_>>()
+            .join("、"),
+        other => other.to_string(),
+    }
 }
 
 fn hash_of(s: &str) -> String {
