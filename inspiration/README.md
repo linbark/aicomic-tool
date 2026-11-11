@@ -37,7 +37,26 @@ ie simulate --db <db> --person demo --n 200 [--seed 7] [--mode random|active]
 ie fit      --db <db> --person demo
 ```
 
-`ie vision` 需要环境变量 `GEMINI_API_KEY`，只在进程内读取，不写库、不落盘、不打印。
+`ie vision` 默认走 Gemini，需要环境变量 `GEMINI_API_KEY`；只在进程内读取，不写库、不落盘、不打印。
+
+### 换模型：OpenAI 兼容端点
+
+`vision` / `distill` 都支持 `--provider openai`，指向任何 OpenAI 兼容服务（Ollama、vLLM、DashScope compatible-mode、OpenRouter）：
+
+```sh
+# 本地 Qwen-VL（Ollama）
+ollama pull qwen2.5vl:7b
+./inspiration/target/release/ie distill --image ref.jpg \
+  --provider openai --base-url http://127.0.0.1:11434/v1 --model qwen2.5vl:7b
+
+# 云端（DashScope 兼容模式）
+IE_API_KEY=sk-... ./inspiration/target/release/ie vision --provider openai \
+  --base-url https://dashscope.aliyuncs.com/compatible-mode/v1 --model qwen-vl-max --limit 20
+```
+
+- OpenAI 路线不强制密钥（本地不需要）；需要时用 `IE_API_KEY` 传 `Authorization: Bearer`。
+- 请求体带 `response_format: json_object`，解析时会去掉 ```` ```json ```` 代码围栏。
+- 这条路径已用本地 mock 服务验证：`distill` 能出完整卡片，`vision` 能写 observation/device_usage/evidence（2 张 2.1s，150 token/张）。
 
 `simulate` 是演练：用已知的个人内核生成合成判定，`fit` 再把它估回来，用来验证"判定 → 拟合 → 内核卡"的代码路径。**它不是真实用户数据。**
 

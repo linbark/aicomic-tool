@@ -31,6 +31,7 @@ pub struct Opts<'a> {
     pub rpm: u32,
     pub shard: (usize, usize),
     pub finds_first: bool,
+    pub provider: &'a str, // gemini | openai
 }
 
 pub fn run(opts: &Opts<'_>) -> Result<()> {
@@ -44,9 +45,14 @@ pub fn run(opts: &Opts<'_>) -> Result<()> {
         rpm,
         shard,
         finds_first,
+        provider,
     } = *opts;
-    let key = std::env::var("GEMINI_API_KEY")
-        .context("缺少环境变量 GEMINI_API_KEY（只在运行时读取，不写入任何文件）")?;
+    let key = if provider == "openai" {
+        std::env::var("IE_API_KEY").unwrap_or_default()
+    } else {
+        std::env::var("GEMINI_API_KEY")
+            .context("缺少环境变量 GEMINI_API_KEY（只在运行时读取，不写入任何文件）")?
+    };
     let conn = Connection::open(db)?;
     conn.execute_batch("PRAGMA foreign_keys=ON;")?;
     conn.busy_timeout(std::time::Duration::from_secs(30))?;
@@ -125,11 +131,19 @@ pub fn run(opts: &Opts<'_>) -> Result<()> {
             }
         };
         let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-        let body = request_body(&prompt, &b64, "image/jpeg", thinking);
+        let body = if provider == "openai" {
+            openai_body(&prompt, &b64, model, thinking, 1024)
+        } else {
+            request_body(&prompt, &b64, "image/jpeg", thinking)
+        };
 
         let mut attempt = 0;
         loop {
-            match call(&client, base_url, model, &key, &body) {
+            match if provider == "openai" {
+                call_openai(&client, base_url, &key, &body)
+            } else {
+                call(&client, base_url, model, &key, &body)
+            } {
                 CallOutcome::Ok(json, used) => {
                     tokens += used;
                     let parsed = match parse(&json, &dev_index, &prim_index) {
@@ -392,6 +406,104 @@ fn response_schema() -> serde_json::Value {
         },
         "required": ["summary", "devices", "primitives"]
     })
+}
+
+/// OpenAI 兼容（Ollama / vLLM / DashScope compatible-mode / OpenRouter）
+pub(crate) fn openai_body(
+    prompt: &str,
+    b64: &str,
+    model: &str,
+    thinking: u32,
+    max_tokens: u32,
+) -> serde_json::Value {
+    serde_json::json!({
+        "model": model,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": format!("data:image/jpeg;base64,{b64}")}}
+            ]
+        }],
+        "temperature": 0.2,
+        "max_tokens": max_tokens,
+        "response_format": {"type": "json_object"},
+        "chat_template_kwargs": {"enable_thinking": thinking > 0}
+    })
+}
+
+pub(crate) fn call_openai(
+    client: &reqwest::blocking::Client,
+    base_url: &str,
+    key: &str,
+    body: &serde_json::Value,
+) -> CallOutcome {
+    let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+    let mut last = String::new();
+    for attempt in 0..4 {
+        let mut req = client.post(&url).json(body);
+        if !key.is_empty() {
+            req = req.header("Authorization", format!("Bearer {key}"));
+        }
+        match req.send() {
+            Ok(r) => {
+                let status = r.status();
+                let text = r.text().unwrap_or_default();
+                if status.is_success() {
+                    let v: serde_json::Value = match serde_json::from_str(&text) {
+                        Ok(v) => v,
+                        Err(e) => return CallOutcome::Failed(format!("响应非 JSON: {e}")),
+                    };
+                    let used = v
+                        .pointer("/usage/total_tokens")
+                        .and_then(|x| x.as_i64())
+                        .unwrap_or(0);
+                    let content = v
+                        .pointer("/choices/0/message/content")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("");
+                    if content.is_empty() {
+                        return CallOutcome::Failed(format!(
+                            "响应里没有文本：{}",
+                            &text[..text.len().min(200)]
+                        ));
+                    }
+                    // 小模型常把 JSON 包在 ```json 块里
+                    let cleaned = content
+                        .trim()
+                        .trim_start_matches("```json")
+                        .trim_start_matches("```")
+                        .trim_end_matches("```")
+                        .trim();
+                    return match serde_json::from_str::<serde_json::Value>(cleaned) {
+                        Ok(p) => CallOutcome::Ok(p, used),
+                        Err(e) => CallOutcome::Failed(format!(
+                            "模型输出不是 JSON（{e}）：{}",
+                            &content[..content.len().min(200)]
+                        )),
+                    };
+                }
+                if status.as_u16() == 429 {
+                    return CallOutcome::RateLimited(LimitInfo {
+                        body: format!("HTTP 429: {}", &text[..text.len().min(160)]),
+                        retry_after: 20.0,
+                        per_day: false,
+                    });
+                }
+                last = format!("HTTP {status}: {}", &text[..text.len().min(200)]);
+                if status.as_u16() >= 500 {
+                    std::thread::sleep(Duration::from_secs(2 + attempt * 3));
+                    continue;
+                }
+                break;
+            }
+            Err(e) => {
+                last = e.to_string();
+                std::thread::sleep(Duration::from_secs(1 + attempt));
+            }
+        }
+    }
+    CallOutcome::Failed(last)
 }
 
 fn request_body(prompt: &str, b64: &str, mime: &str, thinking: u32) -> serde_json::Value {

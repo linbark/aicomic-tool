@@ -74,6 +74,10 @@ fn main() -> Result<()> {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0);
             let rpm: u32 = opts.get("rpm").and_then(|v| v.parse().ok()).unwrap_or(5);
+            let provider = opts
+                .get("provider")
+                .cloned()
+                .unwrap_or_else(|| "gemini".to_string());
             let shard: (usize, usize) = opts
                 .get("shard")
                 .and_then(|s| s.split_once('/'))
@@ -90,6 +94,7 @@ fn main() -> Result<()> {
                 rpm,
                 shard,
                 finds_first,
+                provider: &provider,
             })
         }
         "distill" => {
@@ -111,6 +116,10 @@ fn main() -> Result<()> {
                 .get("thinking")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0);
+            let provider = opts
+                .get("provider")
+                .cloned()
+                .unwrap_or_else(|| "gemini".to_string());
             distill::run(&distill::Opts {
                 db: &db,
                 image: opts.get("image").map(|s| s.as_str()),
@@ -119,6 +128,7 @@ fn main() -> Result<()> {
                 base_url: &base_url,
                 out_dir: &out_dir,
                 thinking,
+                provider: &provider,
             })
         }
         "export" => {

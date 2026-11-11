@@ -21,21 +21,35 @@ pub struct Opts<'a> {
     pub base_url: &'a str,
     pub out_dir: &'a Path,
     pub thinking: u32,
+    pub provider: &'a str,
 }
 
 pub fn run(opts: &Opts<'_>) -> Result<()> {
-    let key = std::env::var("GEMINI_API_KEY").context("缺少 GEMINI_API_KEY")?;
+    let key = if opts.provider == "openai" {
+        std::env::var("IE_API_KEY").unwrap_or_default()
+    } else {
+        std::env::var("GEMINI_API_KEY").context("缺少 GEMINI_API_KEY")?
+    };
     let (path, title, source) = resolve(opts)?;
     let m = compute(&path)?;
     let img_bytes = prepare_image(&path)?;
     let b64 = base64::engine::general_purpose::STANDARD.encode(&img_bytes);
     let prompt = build_prompt(&title, &m);
-    let body = request_body(&prompt, &b64, opts.thinking);
+    let body = if opts.provider == "openai" {
+        crate::vision::openai_body(&prompt, &b64, opts.model, opts.thinking, 3072)
+    } else {
+        request_body(&prompt, &b64, opts.thinking)
+    };
 
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(180))
         .build()?;
-    let json = match call(&client, opts.base_url, opts.model, &key, &body) {
+    let outcome = if opts.provider == "openai" {
+        crate::vision::call_openai(&client, opts.base_url, &key, &body)
+    } else {
+        call(&client, opts.base_url, opts.model, &key, &body)
+    };
+    let json = match outcome {
         CallOutcome::Ok(v, _) => v,
         CallOutcome::RateLimited(i) => {
             anyhow::bail!("限流：{}（约 {}s 后重试）", i.body, i.retry_after)
