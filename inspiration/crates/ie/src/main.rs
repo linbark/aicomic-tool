@@ -357,6 +357,24 @@ fn main() -> Result<()> {
                     let run_id: Option<i64> = opts.get("run").and_then(|v| v.parse().ok());
                     judge::review(&db, run_id)
                 }
+                "screen" => {
+                    let run_id: i64 = opts
+                        .get("run")
+                        .and_then(|v| v.parse().ok())
+                        .ok_or_else(|| anyhow::anyhow!("需要 --run <id>"))?;
+                    judge::screen(&db, run_id)
+                }
+                "fill" => {
+                    let run_id: i64 = opts
+                        .get("run")
+                        .and_then(|v| v.parse().ok())
+                        .ok_or_else(|| anyhow::anyhow!("需要 --run <id>"))?;
+                    let scores = opts
+                        .get("scores")
+                        .cloned()
+                        .ok_or_else(|| anyhow::anyhow!("需要 --scores \"A=82,B=70\""))?;
+                    judge::fill(&db, run_id, &scores, opts.get("note").map(|s| s.as_str()))
+                }
                 "record" => {
                     let item: i64 = opts
                         .get("item")
@@ -368,7 +386,7 @@ fn main() -> Result<()> {
                         .ok_or_else(|| anyhow::anyhow!("需要 --score 0-100"))?;
                     judge::record(&db, item, score, opts.get("note").map(|s| s.as_str()))
                 }
-                _ => anyhow::bail!("用法：ie judge <run|list|review|record> ..."),
+                _ => anyhow::bail!("用法：ie judge <run|list|review|screen|fill|record> ..."),
             }
         }
         "stats" => stats(&db),

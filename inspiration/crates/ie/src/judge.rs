@@ -28,6 +28,7 @@ struct Candidate {
     label: String,
     precheck: f64,
     prompt: String,
+    materials: Vec<String>,
 }
 
 pub fn run(o: &RunOpts<'_>) -> Result<()> {
@@ -53,11 +54,22 @@ pub fn run(o: &RunOpts<'_>) -> Result<()> {
             println!("  跳过 #{pid}：预检有 error，先修配方");
             continue;
         }
+        let materials: Vec<String> = out["components"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|c| c["material"].as_str())
+                    .filter(|m| *m != "?")
+                    .map(|m| m.to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
         cands.push(Candidate {
             pill_id: *pid,
             label: String::new(),
             precheck,
             prompt: out["prompt"].as_str().unwrap_or("").to_string(),
+            materials,
         });
         let _ = i;
     }
@@ -78,6 +90,21 @@ pub fn run(o: &RunOpts<'_>) -> Result<()> {
     let labels = ["A", "B", "C", "D", "E", "F"];
     for (pos, idx) in order.iter().enumerate() {
         cands[*idx].label = labels[pos].to_string();
+    }
+
+    // 盲评前抹掉材料名：规格里可能混入了作品标题（实测出现过 "COOLEST"），会泄漏来源
+    let all_names: Vec<String> = cands
+        .iter()
+        .flat_map(|c| c.materials.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    for c in &mut cands {
+        for name in &all_names {
+            if !name.is_empty() {
+                c.prompt = c.prompt.replace(name.as_str(), "（某作品）");
+            }
+        }
     }
 
     let key = if o.provider == "openai" {
@@ -404,6 +431,168 @@ pub fn review(db: &str, run_id: Option<i64>) -> Result<()> {
         );
     }
     println!("\n回填：ie judge record --item <item_id> --score 0-100 [--note ...] [--approve]");
+    Ok(())
+}
+
+/// 一屏审阅：把一次 run 的所有候选、分数、规格摘要和成对理由放在同一屏。
+pub fn screen(db: &str, run_id: i64) -> Result<()> {
+    let conn = Connection::open(db)?;
+    let (status, seed, judge_json): (String, i64, Option<String>) = conn.query_row(
+        "SELECT status, coalesce(json_extract(input_json,'$.seed'),0), judge_json FROM judge_run WHERE id=?1",
+        params![run_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    let j: Value = judge_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
+
+    println!("══ run #{run_id} · {status} · seed {seed} ══");
+    if let Some(pairs) = j["pairs"].as_array() {
+        for p in pairs {
+            let winner = if p["win_i"].as_f64().unwrap_or(0.5) > 0.5 {
+                p["i"].as_str().unwrap_or("?")
+            } else if p["win_i"].as_f64().unwrap_or(0.5) < 0.5 {
+                p["j"].as_str().unwrap_or("?")
+            } else {
+                "平"
+            };
+            println!(
+                "  {} vs {} → {}   （{}）",
+                p["i"].as_str().unwrap_or("?"),
+                p["j"].as_str().unwrap_or("?"),
+                winner,
+                p["reason"].as_str().unwrap_or("")
+            );
+        }
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT i.id, i.label, i.pill_id, i.machine_total, i.precheck, i.human_score, i.status,
+                p.output_json, p.output_md
+         FROM judge_item i JOIN pill p ON p.id=i.pill_id
+         WHERE i.run_id=?1 ORDER BY i.display_order",
+    )?;
+    type ScreenRow = (
+        i64,
+        String,
+        i64,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+        String,
+        String,
+        String,
+    );
+    let rows: Vec<ScreenRow> = stmt
+        .query_map(params![run_id], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+                r.get(8)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    for (item_id, label, pill_id, machine, precheck, human, status, output_json, md) in rows {
+        let out: Value = serde_json::from_str(&output_json).unwrap_or_default();
+        let prompt = out["prompt"].as_str().unwrap_or("");
+        let excerpt: String = prompt.chars().take(180).collect();
+        println!("──────────────────────────────────────────────");
+        println!(
+            "[{label}] item#{item_id} pill#{pill_id}  机器 {}  预检 {}  人工 {}  {}",
+            machine.map(|v| format!("{v:.1}")).unwrap_or("-".into()),
+            precheck.map(|v| format!("{v:.3}")).unwrap_or("-".into()),
+            human.map(|v| format!("{v:.0}")).unwrap_or("-".into()),
+            status
+        );
+        if prompt.is_empty() {
+            let plain: String = md.chars().take(180).collect();
+            println!("  规格：{plain}");
+        } else {
+            println!("  规格：{excerpt}");
+        }
+    }
+    println!("──────────────────────────────────────────────");
+    println!("批量回填：ie judge fill --run {run_id} --scores \"A=82,B=70,C=75\" [--note \"...\"]");
+    Ok(())
+}
+
+/// 批量回填：一次把这一屏所有候选的人工分写进去。
+pub fn fill(db: &str, run_id: i64, scores: &str, note: Option<&str>) -> Result<()> {
+    let conn = Connection::open(db)?;
+    let mut stmt = conn.prepare("SELECT id, label FROM judge_item WHERE run_id=?1")?;
+    let items: Vec<(i64, String)> = stmt
+        .query_map(params![run_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if items.is_empty() {
+        bail!("run #{run_id} 没有条目");
+    }
+
+    let mut applied = 0usize;
+    for part in scores.split([',', ';', '、']) {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let Some((label, val)) = part.split_once('=') else {
+            bail!("看不懂 \"{part}\"，格式应为 A=82");
+        };
+        let label = label.trim().to_uppercase();
+        let score: f64 = val.trim().parse().context("分数不是数字")?;
+        if !(0.0..=100.0).contains(&score) {
+            bail!("{label} 的分数 {score} 超出 0–100");
+        }
+        let Some((item_id, _)) = items.iter().find(|(_, l)| *l == label) else {
+            bail!("run #{run_id} 里没有标签 {label}");
+        };
+        conn.execute(
+            "UPDATE judge_item SET human_score=?1, human_note=?2, status='done' WHERE id=?3",
+            params![score, note, item_id],
+        )?;
+        applied += 1;
+    }
+    if applied == 0 {
+        bail!("没有解析到任何分数");
+    }
+    recompute(&conn, run_id)?;
+
+    let mut stmt = conn.prepare(
+        "SELECT label, pill_id, machine_total, human_score, final_total FROM judge_item WHERE run_id=?1 ORDER BY display_order",
+    )?;
+    type FillRow = (String, i64, Option<f64>, Option<f64>, Option<f64>);
+    let rows: Vec<FillRow> = stmt
+        .query_map(params![run_id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    println!("已回填 {applied} 条，run #{run_id} 重算：");
+    println!(
+        "{:<6} {:<8} {:>8} {:>6} {:>8}",
+        "标签", "丹药", "机器分", "人工", "最终分"
+    );
+    for (label, pid, m, h, f) in rows {
+        println!(
+            "{:<6} {:<8} {:>8} {:>6} {:>8}",
+            label,
+            pid,
+            m.map(|v| format!("{v:.1}")).unwrap_or("-".into()),
+            h.map(|v| format!("{v:.0}")).unwrap_or("-".into()),
+            f.map(|v| format!("{v:.1}")).unwrap_or("-".into())
+        );
+    }
+    let status: String = conn.query_row(
+        "SELECT status FROM judge_run WHERE id=?1",
+        params![run_id],
+        |r| r.get(0),
+    )?;
+    println!("run 状态：{status}");
     Ok(())
 }
 
