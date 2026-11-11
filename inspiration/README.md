@@ -57,6 +57,8 @@ IE_API_KEY=sk-... ./inspiration/target/release/ie vision --provider openai \
 - OpenAI 路线不强制密钥（本地不需要）；需要时用 `IE_API_KEY` 传 `Authorization: Bearer`。
 - 请求体带 `response_format: json_object`，解析时会去掉 ```` ```json ```` 代码围栏。
 - 这条路径已用本地 mock 服务验证：`distill` 能出完整卡片，`vision` 能写 observation/device_usage/evidence（2 张 2.1s，150 token/张）。
+- **本地 Qwen3-VL 注意**：Ollama 上的 `qwen3-vl:8b` 是**思考版**，长提示词下会把 token 全花在 reasoning 上、`content` 为空（实测 108s/张、0 成功）。要用 `qwen3-vl:8b-instruct`。
+- JSON 解析会剥离 `<think>…</think>`、代码围栏和前后废话，再退化为首尾花括号切片，兼容小模型的常见格式问题。
 
 `simulate` 是演练：用已知的个人内核生成合成判定，`fit` 再把它估回来，用来验证"判定 → 拟合 → 内核卡"的代码路径。**它不是真实用户数据。**
 

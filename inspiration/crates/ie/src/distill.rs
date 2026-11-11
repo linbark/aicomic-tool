@@ -36,7 +36,7 @@ pub fn run(opts: &Opts<'_>) -> Result<()> {
     let b64 = base64::engine::general_purpose::STANDARD.encode(&img_bytes);
     let prompt = build_prompt(&title, &m);
     let body = if opts.provider == "openai" {
-        crate::vision::openai_body(&prompt, &b64, opts.model, opts.thinking, 3072)
+        crate::vision::openai_body(&prompt, &b64, opts.model, opts.thinking, 4096)
     } else {
         request_body(&prompt, &b64, opts.thinking)
     };

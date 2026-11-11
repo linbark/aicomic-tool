@@ -132,7 +132,7 @@ pub fn run(opts: &Opts<'_>) -> Result<()> {
         };
         let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
         let body = if provider == "openai" {
-            openai_body(&prompt, &b64, model, thinking, 1024)
+            openai_body(&prompt, &b64, model, thinking, 2048)
         } else {
             request_body(&prompt, &b64, "image/jpeg", thinking)
         };
@@ -432,6 +432,33 @@ pub(crate) fn openai_body(
     })
 }
 
+/// 从模型输出里抠出 JSON：去掉思考块、代码围栏、前后废话，再退化为首尾花括号切片。
+pub(crate) fn extract_json(text: &str) -> Option<serde_json::Value> {
+    let mut t = text.to_string();
+    while let (Some(a), Some(b)) = (t.find("<think>"), t.find("</think>")) {
+        if b > a {
+            t.replace_range(a..b + "</think>".len(), "");
+        } else {
+            break;
+        }
+    }
+    let t = t.trim();
+    let t = t
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(t) {
+        return Some(v);
+    }
+    let start = t.find('{')?;
+    let end = t.rfind('}')?;
+    if end <= start {
+        return None;
+    }
+    serde_json::from_str::<serde_json::Value>(&t[start..=end]).ok()
+}
+
 pub(crate) fn call_openai(
     client: &reqwest::blocking::Client,
     base_url: &str,
@@ -468,17 +495,10 @@ pub(crate) fn call_openai(
                             &text[..text.len().min(200)]
                         ));
                     }
-                    // 小模型常把 JSON 包在 ```json 块里
-                    let cleaned = content
-                        .trim()
-                        .trim_start_matches("```json")
-                        .trim_start_matches("```")
-                        .trim_end_matches("```")
-                        .trim();
-                    return match serde_json::from_str::<serde_json::Value>(cleaned) {
-                        Ok(p) => CallOutcome::Ok(p, used),
-                        Err(e) => CallOutcome::Failed(format!(
-                            "模型输出不是 JSON（{e}）：{}",
+                    return match extract_json(content) {
+                        Some(p) => CallOutcome::Ok(p, used),
+                        None => CallOutcome::Failed(format!(
+                            "模型输出不是 JSON：{}",
                             &content[..content.len().min(200)]
                         )),
                     };
