@@ -14,19 +14,23 @@ BASE=${BASE:-http://127.0.0.1:11434/v1}
 CHUNK=${CHUNK:-20}
 GAP=${GAP:-300}
 RPM=${RPM:-4}
+PRIORITY=${PRIORITY:-none}
 ROUNDS=${ROUNDS:-20}
 BIN=./inspiration/target/release/ie
 
 for r in $(seq 1 "$ROUNDS"); do
   before=$(sqlite3 "$DB" "SELECT count(*) FROM observation WHERE extractor='vision-llm' AND extractor_version='$MODEL';")
   echo "== 第 $r 块：当前 $before 张已标注，跑 $CHUNK 张 =="
+  extra=()
+  if [ "$PRIORITY" != "none" ]; then extra+=(--priority "$PRIORITY"); fi
   nice -n 15 "$BIN" vision --db "$DB" --root "$ROOT" \
     --provider openai --base-url "$BASE" --model "$MODEL" \
-    --rpm "$RPM" --limit "$CHUNK" || true
+    --rpm "$RPM" --limit "$CHUNK" "${extra[@]}" || true
   # 卸载模型，释放内存与 GPU
   curl -sS -m 10 http://127.0.0.1:11434/api/generate \
     -d "{\"model\":\"$MODEL\",\"keep_alive\":0}" >/dev/null 2>&1 || true
   after=$(sqlite3 "$DB" "SELECT count(*) FROM observation WHERE extractor='vision-llm' AND extractor_version='$MODEL';")
   echo "== 本块完成：+$((after - before))，累计 $after =="
-  [ "$r" -lt "$ROUNDS" ] && sleep "$GAP"
+  if [ "$r" -lt "$ROUNDS" ]; then sleep "$GAP"; fi
 done
+exit 0

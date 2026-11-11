@@ -347,7 +347,7 @@ pub fn run(db: &str, person: &str, seed: u64) -> Result<()> {
         params![
             kernel_id,
             format!(
-                "{maturity}：当前只覆盖像素可测的 {} 个基元，语义手法待视觉抽取",
+                "{maturity}：当前有证据的基元共 {} 个（像素代理 + 视觉标注），其余待补",
                 covered.len()
             ),
             n as i64
