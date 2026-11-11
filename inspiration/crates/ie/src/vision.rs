@@ -476,7 +476,6 @@ pub(crate) fn openai_body(
         }],
         "temperature": 0.2,
         "max_tokens": max_tokens,
-        "response_format": {"type": "json_object"},
         "chat_template_kwargs": {"enable_thinking": thinking > 0}
     })
 }
@@ -547,8 +546,10 @@ pub(crate) fn call_openai(
                     return match extract_json(content) {
                         Some(p) => CallOutcome::Ok(p, used),
                         None => CallOutcome::Failed(format!(
-                            "模型输出不是 JSON：{}",
-                            &content[..content.len().min(200)]
+                            "模型输出不是 JSON（{} 字符）：头 {} … 尾 {}",
+                            content.len(),
+                            &content[..content.len().min(120)],
+                            &content[content.len().saturating_sub(120)..]
                         )),
                     };
                 }

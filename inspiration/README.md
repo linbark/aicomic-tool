@@ -243,6 +243,36 @@ GEMINI_API_KEY=... ./inspiration/target/release/ie distill --image ~/Pictures/re
 
 设计说明见 [灵感引擎设计](../docs/design/灵感引擎设计.md) §6.3 与 [个人美学内核设计](../docs/design/个人美学内核设计.md)。
 
+## 炼丹 D0：炼药与背包
+
+```sh
+# 炼药：像素类手法不需要密钥
+./inspiration/target/release/ie refine --work 7 --technique t.palette
+
+# 视觉类手法：本地 Qwen3-VL 或 Gemini
+./inspiration/target/release/ie refine --work 7 --technique t.layout,t.type \
+  --provider openai --base-url http://127.0.0.1:11434/v1 --model qwen3-vl:8b-instruct
+
+# 看背包
+./inspiration/target/release/ie bag [--dimension palette]
+```
+
+实测（work 7，Mobbin 海报）：
+
+| 手法 | 维度 | 火候 | 质量 | 耗时 |
+| --- | --- | --- | --- | --- |
+| `t.palette` | palette | pixel-proxy | 0.85 | 毫秒级（纯计算） |
+| `t.layout` | layout | qwen3-vl:8b-instruct | 0.85 | 16 s |
+| `t.type` | type | qwen3-vl:8b-instruct | 0.90 | 13 s |
+
+药液按 `(work, technique, dimension, fire_model)` 唯一，重复炼会更新而不新建；`hash` 记录内容指纹，便于缓存与复现。
+
+### 三个小模型上的坑（都在迁移 007–009 里修了）
+
+1. 模板里写 `"confidence":0.0`，模型会**照抄 0.0**，质量分变 0 → 示例改成正数并说明含义；
+2. OpenAI 兼容端点加 `response_format: json_object` 会让 Ollama 上的 Qwen 陷入复读并截断 → OpenAI 路线不再发这个字段；
+3. 模型会把 `ratios` 写成 `{"a","b"}`（对象里裸字符串）→ 把该字段改成**字符串数组**。
+
 ## 内核卡（演练输出）
 
 ```text

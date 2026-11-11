@@ -6,6 +6,7 @@
 //!   ie fit      --db <db> --person demo
 //!   ie stats    --db <db>
 
+mod alchemy;
 mod bundle;
 mod distill;
 mod extract;
@@ -173,10 +174,60 @@ fn main() -> Result<()> {
                 dry_run: opts.contains_key("dry-run"),
             })
         }
+        "refine" => {
+            let work: i64 = opts
+                .get("work")
+                .and_then(|v| v.parse().ok())
+                .ok_or_else(|| anyhow::anyhow!("需要 --work <id>"))?;
+            let techniques: Vec<String> = opts
+                .get("technique")
+                .map(|s| s.split(',').map(|x| x.trim().to_string()).collect())
+                .unwrap_or_else(|| vec!["t.palette".into()]);
+            let provider = opts
+                .get("provider")
+                .cloned()
+                .unwrap_or_else(|| "gemini".to_string());
+            let model = opts
+                .get("model")
+                .cloned()
+                .unwrap_or_else(|| "gemini-3.1-flash-lite".to_string());
+            let base_url = opts
+                .get("base-url")
+                .cloned()
+                .unwrap_or_else(|| "https://generativelanguage.googleapis.com".to_string());
+            let root = PathBuf::from(
+                opts.get("root")
+                    .cloned()
+                    .unwrap_or_else(|| "data/inspiration".to_string()),
+            );
+            let thinking: u32 = opts
+                .get("thinking")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            alchemy::refine(&alchemy::RefineOpts {
+                db: &db,
+                root: &root,
+                work,
+                techniques,
+                provider: &provider,
+                model: &model,
+                base_url: &base_url,
+                thinking,
+                to_bag: !opts.contains_key("no-bag"),
+            })
+        }
+        "bag" => {
+            let limit: usize = opts.get("limit").and_then(|v| v.parse().ok()).unwrap_or(30);
+            alchemy::bag(&alchemy::BagOpts {
+                db: &db,
+                dimension: opts.get("dimension").map(|s| s.as_str()),
+                limit,
+            })
+        }
         "stats" => stats(&db),
         _ => {
             eprintln!(
-                "用法：ie <extract|vision|distill|export|import|simulate|fit|stats> --db <path> [--root DIR] [--limit N] [--person ID] [--n N] [--seed S] [--model M]"
+                "用法：ie <extract|vision|distill|refine|bag|export|import|simulate|fit|stats> --db <path> [--root DIR] [--limit N] [--person ID] [--n N] [--seed S] [--model M]"
             );
             Ok(())
         }
