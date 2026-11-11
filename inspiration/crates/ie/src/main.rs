@@ -225,9 +225,54 @@ fn main() -> Result<()> {
             alchemy::brew(&alchemy::BrewOpts {
                 db: &db,
                 recipe: &recipe,
+                pinned: None,
+                formula_id: None,
                 allow_mixed: opts.contains_key("allow-mixed"),
                 force: opts.contains_key("force"),
                 out_dir: out_dir.as_deref(),
+            })
+        }
+        "formula" => {
+            let formula = opts
+                .get("in")
+                .or_else(|| opts.get("formula"))
+                .map(PathBuf::from)
+                .ok_or_else(|| anyhow::anyhow!("需要 --in <formula.json>"))?;
+            let recipes_dir = PathBuf::from(
+                opts.get("recipes-dir")
+                    .cloned()
+                    .unwrap_or_else(|| "docs/design/inspiration/recipes".to_string()),
+            );
+            let root = PathBuf::from(
+                opts.get("root")
+                    .cloned()
+                    .unwrap_or_else(|| "data/inspiration".to_string()),
+            );
+            let provider = opts
+                .get("provider")
+                .cloned()
+                .unwrap_or_else(|| "gemini".to_string());
+            let model = opts
+                .get("model")
+                .cloned()
+                .unwrap_or_else(|| "gemini-3.1-flash-lite".to_string());
+            let base_url = opts
+                .get("base-url")
+                .cloned()
+                .unwrap_or_else(|| "https://generativelanguage.googleapis.com".to_string());
+            let thinking: u32 = opts
+                .get("thinking")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            alchemy::formula_run(&alchemy::FormulaOpts {
+                db: &db,
+                formula: &formula,
+                recipes_dir: &recipes_dir,
+                root: &root,
+                provider: &provider,
+                model: &model,
+                base_url: &base_url,
+                thinking,
             })
         }
         "bag" => {

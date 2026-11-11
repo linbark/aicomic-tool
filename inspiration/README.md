@@ -301,6 +301,27 @@ $ ie brew ... --force
 
 检查项：`fire.mixed`（一炉混火候，默认拒绝）、`contrast.min`（对比不足）、`quality.low`（药液质量 <0.5 仅告警）。
 
+## 炼丹 D2：丹方
+
+```sh
+ie formula --in docs/design/inspiration/recipes/brand-page.formula.json \
+  --provider openai --base-url http://127.0.0.1:11434/v1 --model qwen3-vl:8b-instruct
+```
+
+丹方按步骤执行，`refine` 步会**同火候复用**已有药液（不重复调用模型），`brew` 步用丹方钉死的输入而不是"背包里挑最好的"。
+
+实测这一炉：
+
+| 步 | 做什么 | 结果 |
+| --- | --- | --- |
+| s1 | refine(work 7, t.layout) | 复用 #2 |
+| s2 | refine(work 632, t.palette) | 复用 #1（palette 是像素手法，不耗模型） |
+| s3 | refine(work 679, t.type) | 该图无文字 → 跳过，brew 时回落到背包 |
+| s4 | brew(recipe.minimal-landing, [s1,s2,s3]) | 无冲突，丹药 #6 |
+| s5 | render | 已由 brew 输出 markdown |
+
+第一次跑时 s2 钉的是 work 7（白底海报，对比 3.35:1），brew 直接拒绝："主色板明度对比 3.35:1 低于配方要求 4.5:1"——**丹方把材料写死，材料不行就当场暴露**，这正是丹方该有的价值。
+
 ## 内核卡（演练输出）
 
 ```text

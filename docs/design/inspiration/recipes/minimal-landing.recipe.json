@@ -9,25 +9,29 @@
       "slot": "base",
       "dimension": "palette",
       "ratio": 0.5,
-      "required": true
+      "required": true,
+      "polarity": "positive"
     },
     {
       "slot": "base",
       "dimension": "layout",
       "ratio": 0.3,
-      "required": true
+      "required": true,
+      "polarity": "positive"
     },
     {
       "slot": "accent",
       "dimension": "type",
       "ratio": 0.15,
-      "required": false
+      "required": false,
+      "polarity": "positive"
     },
     {
       "slot": "anti",
       "dimension": "donts",
       "ratio": 0.05,
-      "required": true
+      "required": true,
+      "polarity": "negative"
     }
   ],
   "constraints": {

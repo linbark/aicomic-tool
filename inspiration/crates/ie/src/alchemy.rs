@@ -27,6 +27,8 @@ pub struct RefineOpts<'a> {
 pub struct BrewOpts<'a> {
     pub db: &'a str,
     pub recipe: &'a Path,
+    pub pinned: Option<&'a std::collections::HashMap<String, i64>>,
+    pub formula_id: Option<i64>,
     pub allow_mixed: bool,
     pub force: bool,
     pub out_dir: Option<&'a Path>,
@@ -101,6 +103,29 @@ pub fn refine(o: &RefineOpts<'_>) -> Result<()> {
 
     let now = crate::now_iso();
     for t in &techniques {
+        let fire_hint = if t.params.contains("\"kind\":\"pixel\"") {
+            "pixel-proxy".to_string()
+        } else {
+            o.model.to_string()
+        };
+        if let Ok((eid, q)) = conn.query_row(
+            "SELECT id, quality FROM extract
+             WHERE work_id=?1 AND technique_id=?2 AND dimension=?3 AND fire_model=?4",
+            params![o.work, t.id, t.dimension, fire_hint],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?)),
+        ) {
+            if o.to_bag {
+                conn.execute(
+                    "INSERT OR IGNORE INTO inventory(extract_id,added_at) VALUES(?1,?2)",
+                    params![eid, now],
+                )?;
+            }
+            println!(
+                "  · {}「{}」已有同火候药液 #{}（质量 {:.2}），复用",
+                t.key, t.title, eid, q
+            );
+            continue;
+        }
         let (content, fire) = if t.params.contains("\"kind\":\"pixel\"") {
             (pixel_extract(&m), "pixel-proxy".to_string())
         } else {
@@ -125,6 +150,22 @@ pub fn refine(o: &RefineOpts<'_>) -> Result<()> {
             .and_then(|x| x.as_f64())
             .map(|c| c.clamp(0.0, 1.0) as f32)
             .unwrap_or(if fire == "pixel-proxy" { 0.85 } else { 0.6 });
+
+        // 图上确实没有该维度（例如无文字作品的「字」）：不入库，避免空药液污染背包
+        let empty = content
+            .as_object()
+            .map(|o| {
+                o.iter().all(|(k, v)| {
+                    k == "confidence"
+                        || v.as_str().map(|s| s.trim().is_empty()).unwrap_or(false)
+                        || v.as_array().map(|a| a.is_empty()).unwrap_or(false)
+                })
+            })
+            .unwrap_or(true);
+        if empty && quality < 0.1 {
+            println!("  · {}「{}」无内容，跳过", t.key, t.title);
+            continue;
+        }
 
         let hash = hash_of(&format!(
             "{}|{}|{}|{}|{}",
@@ -261,15 +302,16 @@ pub fn brew(o: &BrewOpts<'_>) -> Result<()> {
     )?;
     for c in &components {
         conn.execute(
-            "INSERT OR REPLACE INTO recipe_component(recipe_id,slot,dimension,ratio,required,fallback)
-             VALUES(?1,?2,?3,?4,?5,?6)",
+            "INSERT OR REPLACE INTO recipe_component(recipe_id,slot,dimension,ratio,required,fallback,polarity)
+             VALUES(?1,?2,?3,?4,?5,?6,?7)",
             params![
                 recipe_id,
                 c["slot"].as_str().unwrap_or("base"),
                 c["dimension"].as_str().context("组件缺 dimension")?,
                 c["ratio"].as_f64().unwrap_or(0.0),
                 c["required"].as_bool().unwrap_or(true) as i64,
-                c.get("fallback").and_then(|x| x.as_str())
+                c.get("fallback").and_then(|x| x.as_str()),
+                c.get("polarity").and_then(|x| x.as_str()).unwrap_or("positive")
             ],
         )?;
     }
@@ -284,6 +326,7 @@ pub fn brew(o: &BrewOpts<'_>) -> Result<()> {
         fire: String,
         material: String,
         content: serde_json::Value,
+        polarity: String,
     }
     let mut picked: Vec<Picked> = Vec::new();
     let mut missing: Vec<String> = Vec::new();
@@ -292,16 +335,65 @@ pub fn brew(o: &BrewOpts<'_>) -> Result<()> {
         let dimension = c["dimension"].as_str().unwrap_or("").to_string();
         let ratio = c["ratio"].as_f64().unwrap_or(0.0);
         let required = c["required"].as_bool().unwrap_or(true);
-        let row: Option<(i64, f64, String, String, String)> = conn
-            .query_row(
-                "SELECT e.id, e.quality, e.fire_model, coalesce(w.title,'?'), e.content_json
-                 FROM inventory i JOIN extract e ON e.id=i.extract_id
-                 LEFT JOIN work w ON w.id=e.work_id
-                 WHERE e.dimension=?1 ORDER BY e.quality DESC, e.id DESC LIMIT 1",
-                params![dimension],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-            )
-            .ok();
+        let polarity = c
+            .get("polarity")
+            .and_then(|x| x.as_str())
+            .unwrap_or("positive")
+            .to_string();
+        if let Some(pin) = o.pinned.and_then(|m| m.get(&dimension)).copied() {
+            let row: Option<(i64, f64, String, String, String)> = conn
+                .query_row(
+                    "SELECT e.id, e.quality, e.fire_model, coalesce(w.title,'?'), e.content_json
+                     FROM extract e LEFT JOIN work w ON w.id=e.work_id WHERE e.id=?1",
+                    params![pin],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                )
+                .ok();
+            if let Some((id, q, fire, material, content)) = row {
+                picked.push(Picked {
+                    slot,
+                    dimension,
+                    ratio,
+                    extract_id: id,
+                    quality: q,
+                    fire,
+                    material,
+                    content: serde_json::from_str(&content).unwrap_or(serde_json::json!({})),
+                    polarity,
+                });
+                continue;
+            }
+        }
+        // 取候选（最多 20 瓶），palette 先按配方的对比度约束过滤，再按质量排
+        let mut stmt = conn.prepare(
+            "SELECT e.id, e.quality, e.fire_model, coalesce(w.title,'?'), e.content_json
+             FROM inventory i JOIN extract e ON e.id=i.extract_id
+             LEFT JOIN work w ON w.id=e.work_id
+             WHERE e.dimension=?1 ORDER BY e.quality DESC, e.id DESC LIMIT 20",
+        )?;
+        let mut cands: Vec<(i64, f64, String, String, String)> = stmt
+            .query_map(params![dimension], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stmt);
+        if dimension == "palette" {
+            let min = constraints["contrast_min"].as_f64().unwrap_or(0.0);
+            if min > 0.0 {
+                let passing: Vec<_> = cands
+                    .iter()
+                    .filter(|c| {
+                        let v: serde_json::Value = serde_json::from_str(&c.4).unwrap_or_default();
+                        v["stats"]["contrast"].as_f64().unwrap_or(0.0) >= min
+                    })
+                    .cloned()
+                    .collect();
+                if !passing.is_empty() {
+                    cands = passing;
+                }
+            }
+        }
+        let row = cands.into_iter().next();
         match row {
             Some((id, q, fire, material, content)) => picked.push(Picked {
                 slot,
@@ -312,6 +404,7 @@ pub fn brew(o: &BrewOpts<'_>) -> Result<()> {
                 fire,
                 material,
                 content: serde_json::from_str(&content).unwrap_or(serde_json::json!({})),
+                polarity,
             }),
             None => {
                 if required {
@@ -398,6 +491,14 @@ pub fn brew(o: &BrewOpts<'_>) -> Result<()> {
                     serde_json::Value::String(s) => s.clone(),
                     other => other.to_string(),
                 };
+                let s = if p.polarity == "negative" {
+                    s.split('、')
+                        .map(|x| format!("禁止{x}"))
+                        .collect::<Vec<_>>()
+                        .join("；")
+                } else {
+                    s
+                };
                 map.insert(format!("{prefix}.{k}"), s);
             }
         }
@@ -451,9 +552,9 @@ pub fn brew(o: &BrewOpts<'_>) -> Result<()> {
         "prompt": rendered,
     });
     conn.execute(
-        "INSERT INTO pill(recipe_id,output_md,output_json,score_json,cost_json,created_at)
-         VALUES(?1,?2,?3,'{}','{\"tokens\":0}',?4)",
-        params![recipe_id, md, output_json.to_string(), now],
+        "INSERT INTO pill(formula_id,recipe_id,output_md,output_json,score_json,cost_json,created_at)
+         VALUES(?1,?2,?3,?4,'{}','{\"tokens\":0}',?5)",
+        params![o.formula_id, recipe_id, md, output_json.to_string(), now],
     )?;
     let pill_id = conn.last_insert_rowid();
 
@@ -464,6 +565,129 @@ pub fn brew(o: &BrewOpts<'_>) -> Result<()> {
     println!("{md}");
     println!("丹药 #{pill_id} 已入库");
     Ok(())
+}
+
+pub struct FormulaOpts<'a> {
+    pub db: &'a str,
+    pub formula: &'a Path,
+    pub recipes_dir: &'a Path,
+    pub root: &'a Path,
+    pub provider: &'a str,
+    pub model: &'a str,
+    pub base_url: &'a str,
+    pub thinking: u32,
+}
+
+pub fn formula_run(o: &FormulaOpts<'_>) -> Result<()> {
+    let text = std::fs::read_to_string(o.formula)
+        .with_context(|| format!("读不到丹方 {}", o.formula.display()))?;
+    let f: serde_json::Value = serde_json::from_str(&text).context("丹方不是合法 JSON")?;
+    let key = f["key"].as_str().context("丹方缺 key")?.to_string();
+    let name = f["name"].as_str().unwrap_or(&key).to_string();
+    let steps = f["steps"].as_array().cloned().unwrap_or_default();
+    if steps.is_empty() {
+        bail!("丹方没有步骤");
+    }
+
+    let conn = Connection::open(o.db)?;
+    conn.busy_timeout(Duration::from_secs(10))?;
+    conn.execute(
+        "INSERT INTO formula(key,name,steps_json,created_at) VALUES(?1,?2,?3,?4)
+         ON CONFLICT(key) DO UPDATE SET name=excluded.name, steps_json=excluded.steps_json",
+        params![key, name, f["steps"].to_string(), crate::now_iso()],
+    )?;
+    let fid: i64 = conn.query_row("SELECT id FROM formula WHERE key=?1", params![key], |r| {
+        r.get(0)
+    })?;
+    println!("丹方 {key}「{name}」共 {} 步", steps.len());
+
+    let mut produced: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    for (i, step) in steps.iter().enumerate() {
+        let sid = step["id"].as_str().unwrap_or("?");
+        let op = step["op"].as_str().unwrap_or("");
+        println!("[{}/{}] {} {}", i + 1, steps.len(), sid, op);
+        match op {
+            "refine" => {
+                let work = step["material"].as_i64().context("refine 缺 material")?;
+                let technique = step["technique"].as_str().context("refine 缺 technique")?;
+                refine(&RefineOpts {
+                    db: o.db,
+                    root: o.root,
+                    work,
+                    techniques: vec![technique.to_string()],
+                    provider: o.provider,
+                    model: o.model,
+                    base_url: o.base_url,
+                    thinking: o.thinking,
+                    to_bag: true,
+                })?;
+                let tid: i64 = conn.query_row(
+                    "SELECT id FROM technique WHERE key=?1",
+                    params![technique],
+                    |r| r.get(0),
+                )?;
+                let eid: Option<i64> = conn
+                    .query_row(
+                        "SELECT id FROM extract WHERE work_id=?1 AND technique_id=?2 ORDER BY id DESC LIMIT 1",
+                        params![work, tid],
+                        |r| r.get(0),
+                    )
+                    .ok();
+                if let Some(eid) = eid {
+                    produced.insert(sid.to_string(), eid);
+                } else {
+                    println!(
+                        "  ! {} 没炼出药液（该图无此维度），后续步骤会回落到背包选药",
+                        sid
+                    );
+                }
+            }
+            "brew" => {
+                let rkey = step["recipe"].as_str().context("brew 缺 recipe")?;
+                let path = find_recipe(o.recipes_dir, rkey)?;
+                let mut pinned = std::collections::HashMap::new();
+                for input in step["inputs"].as_array().cloned().unwrap_or_default() {
+                    if let Some(eid) = input.as_str().and_then(|s| produced.get(s)).copied() {
+                        let dim: String = conn.query_row(
+                            "SELECT dimension FROM extract WHERE id=?1",
+                            params![eid],
+                            |r| r.get(0),
+                        )?;
+                        pinned.insert(dim, eid);
+                    }
+                }
+                brew(&BrewOpts {
+                    db: o.db,
+                    recipe: &path,
+                    pinned: Some(&pinned),
+                    formula_id: Some(fid),
+                    allow_mixed: false,
+                    force: false,
+                    out_dir: None,
+                })?;
+            }
+            "render" => println!("  （brew 已输出 markdown，render 步骤先空转）"),
+            other => bail!("未知步骤类型 {other}"),
+        }
+    }
+    println!("丹方 {key} 执行完毕");
+    Ok(())
+}
+
+fn find_recipe(dir: &Path, key: &str) -> Result<PathBuf> {
+    for entry in std::fs::read_dir(dir).with_context(|| format!("读不到 {}", dir.display()))? {
+        let p = entry?.path();
+        if p.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        if let Ok(s) = std::fs::read_to_string(&p)
+            && let Ok(v) = serde_json::from_str::<serde_json::Value>(&s)
+            && v["key"].as_str() == Some(key)
+        {
+            return Ok(p);
+        }
+    }
+    bail!("在 {} 里找不到 key={key} 的配方", dir.display())
 }
 
 pub fn bag(o: &BagOpts<'_>) -> Result<()> {
