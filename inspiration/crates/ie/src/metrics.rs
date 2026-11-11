@@ -30,6 +30,14 @@ pub struct Metrics {
     pub ink: String,
     /// 出现最多的颜色（底色候选）
     pub paper: String,
+    /// 间距模数（按 1200px 宽折算），从行/列空白带推断
+    pub spacing_base: u32,
+    /// 观察到的间距档位（模数倍数）
+    pub spacing_steps: Vec<u32>,
+    /// 页边（左右空白带较小者，折算到 1200 宽）
+    pub page_margin: u32,
+    /// 段间距（竖向空白带中位数，折算到 1200 宽）
+    pub section_gap: u32,
 }
 
 pub fn compute(path: &std::path::Path) -> anyhow::Result<Metrics> {
@@ -48,6 +56,7 @@ pub fn compute(path: &std::path::Path) -> anyhow::Result<Metrics> {
     let (w, h) = rgb.dimensions();
     let luma = luma_of(&rgb);
     let (gx, gy) = sobel(&luma, w, h);
+    let spacing = spacing_of(&gx, &gy, w, h);
     Ok(Metrics {
         width: ow,
         height: oh,
@@ -59,6 +68,10 @@ pub fn compute(path: &std::path::Path) -> anyhow::Result<Metrics> {
         alignment: alignment(&gx, &gy, w, h),
         ink: ink_color(&rgb),
         paper: paper_color(&rgb),
+        spacing_base: spacing.base,
+        spacing_steps: spacing.steps.clone(),
+        page_margin: spacing.margin,
+        section_gap: spacing.section_gap,
         palette: palette(&rgb),
     })
 }
@@ -183,6 +196,114 @@ fn whitespace(rgb: &RgbImage) -> f32 {
         return 0.0;
     }
     (empty / total) as f32
+}
+
+struct Spacing {
+    base: u32,
+    steps: Vec<u32>,
+    margin: u32,
+    section_gap: u32,
+}
+
+/// 从空白带推断间距模数：行/列方向的"内容带"之间的空隙，折算到 1200px 宽。
+fn spacing_of(gx: &[f32], gy: &[f32], w: u32, h: u32) -> Spacing {
+    let scale = 1200.0 / w as f32;
+    let row_energy: Vec<f32> = (0..h)
+        .map(|y| {
+            let mut s = 0.0;
+            for x in 0..w {
+                s += gy[idx(x, y, w)].abs();
+            }
+            s / w as f32
+        })
+        .collect();
+    let col_energy: Vec<f32> = (0..w)
+        .map(|x| {
+            let mut s = 0.0;
+            for y in 0..h {
+                s += gx[idx(x, y, w)].abs();
+            }
+            s / h as f32
+        })
+        .collect();
+    let thresh = 0.02;
+
+    // 页边 = 首尾连续空白列（真正的留白边距，不含内容之间的空隙）
+    let leading = col_energy.iter().take_while(|e| **e < thresh).count();
+    let trailing = col_energy.iter().rev().take_while(|e| **e < thresh).count();
+    let margin = (((leading.min(trailing)) as f32 * scale).round() as u32).clamp(8, 240);
+
+    // 内容带之间的竖向空隙
+    let mut gaps: Vec<u32> = Vec::new();
+    let mut run = 0u32;
+    let mut started = false;
+    for e in &row_energy {
+        if *e < thresh {
+            if !started {
+                run = 0;
+                started = true;
+            }
+            run += 1;
+        } else if started {
+            if run >= 2 {
+                gaps.push(((run as f32 * scale).round() as u32).max(1));
+            }
+            started = false;
+            run = 0;
+        }
+    }
+    let usable: Vec<u32> = gaps
+        .iter()
+        .copied()
+        .filter(|g| (8..=160).contains(g))
+        .collect();
+    let section_gap = {
+        let mut s = usable.clone();
+        s.sort();
+        if s.is_empty() {
+            64
+        } else {
+            s[s.len() / 2].clamp(16, 160)
+        }
+    };
+
+    // 模数：在常见候选里挑拟合最好的；打平时偏向 8
+    let mut base = 8u32;
+    if !usable.is_empty() {
+        let mut best = (8u32, f32::MAX);
+        for b in [4u32, 6, 8, 10, 12, 16, 20] {
+            let score: f32 = usable
+                .iter()
+                .map(|g| {
+                    let m = *g % b;
+                    m.min(b - m) as f32
+                })
+                .sum::<f32>()
+                / usable.len() as f32
+                + (b as f32 - 8.0).abs() * 0.05; // 轻微偏向 8
+            if score < best.1 {
+                best = (b, score);
+            }
+        }
+        base = best.0;
+    }
+    let mut steps: Vec<u32> = usable
+        .iter()
+        .map(|g| ((g + base / 2) / base).max(1) * base)
+        .filter(|s| (8..=160).contains(s))
+        .collect();
+    steps.sort();
+    steps.dedup();
+    steps.truncate(8);
+    if steps.is_empty() {
+        steps = vec![base, base * 2, base * 3, base * 4];
+    }
+    Spacing {
+        base,
+        steps,
+        margin,
+        section_gap,
+    }
 }
 
 fn contrast_ratio(luma: &[f32]) -> f32 {

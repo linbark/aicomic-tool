@@ -50,5 +50,6 @@
     "type_scale_conflict": 0.2,
     "density_conflict": 0.4
   },
-  "page_type": "landing"
+  "page_type": "landing",
+  "domain": "ui"
 }

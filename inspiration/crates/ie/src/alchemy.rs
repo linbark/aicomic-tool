@@ -64,6 +64,13 @@ pub fn refine(o: &RefineOpts<'_>) -> Result<()> {
         )
         .with_context(|| format!("work {} 没有可用素材", o.work))?;
     let path = PathBuf::from(o.root).join(asset_path);
+    let work_domain: String = conn
+        .query_row(
+            "SELECT domain_id FROM work WHERE id=?1",
+            params![o.work],
+            |r| r.get(0),
+        )
+        .unwrap_or_default();
     let m = metrics::compute(&path)?;
 
     let mut techniques = Vec::new();
@@ -131,7 +138,12 @@ pub fn refine(o: &RefineOpts<'_>) -> Result<()> {
             continue;
         }
         let (content, fire) = if t.params.contains("\"kind\":\"pixel\"") {
-            (pixel_extract(&m), "pixel-proxy".to_string())
+            let content = if t.dimension == "spacing" {
+                spacing_extract(&m, &work_domain)
+            } else {
+                pixel_extract(&m)
+            };
+            (content, "pixel-proxy".to_string())
         } else {
             let bytes = prepare_image(&path)?;
             let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
@@ -325,6 +337,18 @@ fn palette_roles(colors: &[(String, f32)], paper: &str, ink: &str) -> serde_json
     })
 }
 
+fn spacing_extract(m: &metrics::Metrics, domain: &str) -> serde_json::Value {
+    serde_json::json!({
+        "domain": domain,
+        "base_px": m.spacing_base,
+        "steps": m.spacing_steps,
+        "page_margin_px": m.page_margin,
+        "section_gap_px": m.section_gap,
+        "confidence": 0.7,
+        "method": "whitespace-bands"
+    })
+}
+
 fn pixel_extract(m: &metrics::Metrics) -> serde_json::Value {
     serde_json::json!({
         "colors": m.palette.iter().map(|(hex, share)| serde_json::json!({"hex": hex, "share": share})).collect::<Vec<_>>(),
@@ -354,6 +378,11 @@ pub fn brew(o: &BrewOpts<'_>) -> Result<()> {
         .unwrap_or(serde_json::json!({}));
     let page_type = r
         .get("page_type")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    let recipe_domain = r
+        .get("domain")
         .and_then(|x| x.as_str())
         .unwrap_or("")
         .to_string();
@@ -482,6 +511,20 @@ pub fn brew(o: &BrewOpts<'_>) -> Result<()> {
                 .collect();
             if !explicit.is_empty() {
                 cands = explicit;
+            }
+        }
+        if dimension == "spacing" && !recipe_domain.is_empty() {
+            // 间距必须跟媒介：油画的页边距不能拿去当落地页的边距
+            let matching: Vec<_> = cands
+                .iter()
+                .filter(|c| {
+                    let v: serde_json::Value = serde_json::from_str(&c.4).unwrap_or_default();
+                    v["domain"].as_str() == Some(recipe_domain.as_str())
+                })
+                .cloned()
+                .collect();
+            if !matching.is_empty() {
+                cands = matching;
             }
         }
         if dimension == "palette" {
