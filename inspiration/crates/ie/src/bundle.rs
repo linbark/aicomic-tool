@@ -324,6 +324,9 @@ fn write_ndjson(b: &Value, out: &Path) -> Result<usize> {
         ("principles", "principle"),
         ("principle_evidence", "principle_evidence"),
         ("specs", "spec"),
+        ("persons", "person"),
+        ("kernels", "kernel"),
+        ("kernel_claims", "kernel_claim"),
     ];
     let mut n = 0usize;
     for (key, kind) in ORDER {
@@ -450,6 +453,20 @@ impl Imp<'_> {
                     self.dispatch(kind, row)?;
                 }
             }
+        }
+        let personal = ["persons", "kernels", "kernel_claims"]
+            .iter()
+            .map(|k| {
+                b.get(*k)
+                    .and_then(|x| x.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0)
+            })
+            .sum::<usize>();
+        if personal > 0 {
+            println!(
+                "注意：包含 {personal} 条个人数据（内核/主张），当前版本不导入，如需迁移请用 --with-personal 的 JSON 包手工处理"
+            );
         }
         Ok(())
     }
