@@ -76,18 +76,8 @@ pub fn run(o: &RunOpts<'_>) -> Result<()> {
         order.swap(i, j);
     }
     let labels = ["A", "B", "C", "D", "E", "F"];
-    let mut prompt = String::from(
-        "你是设计评审。下面是几份**设计规格**（只有文字，没有图）。请按四项各打 0–10 分：\
-         hierarchy（层级是否清楚）、consistency（体系是否自洽）、restraint（克制，有没有堆砌）、executability（能否被直接执行）。\
-         只输出一个 JSON 对象：{\"items\":[{\"label\":\"A\",\"hierarchy\":0,\"consistency\":0,\"restraint\":0,\"executability\":0,\"reason\":\"一句话\"}],\"confidence\":0.0}。\
-         不要解释，不要 markdown。\n\n",
-    );
     for (pos, idx) in order.iter().enumerate() {
         cands[*idx].label = labels[pos].to_string();
-        prompt.push_str(&format!(
-            "【候选 {}】\n{}\n\n",
-            labels[pos], cands[*idx].prompt
-        ));
     }
 
     let key = if o.provider == "openai" {
@@ -98,63 +88,112 @@ pub fn run(o: &RunOpts<'_>) -> Result<()> {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(180))
         .build()?;
-    let body = if o.provider == "openai" {
-        openai_text_body(&prompt, o.model, 1200)
-    } else {
-        json!({
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "responseMimeType": "application/json",
-                "temperature": 0.2,
-                "maxOutputTokens": 1200,
-                "thinkingConfig": {"thinkingBudget": o.thinking}
+
+    // 成对比较：每对问一次，左右顺序随机，抵消位置偏差
+    let mut pair_results: Vec<(usize, usize, f64, String)> = Vec::new();
+    for i in 0..cands.len() {
+        for j in (i + 1)..cands.len() {
+            rng = rng
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let flip = (rng >> 11) % 2 == 1;
+            let (left, right) = if flip { (j, i) } else { (i, j) };
+            let prompt = format!(
+                "你是设计评审。下面是两份设计规格，只有文字。\n\n【候选 1】\n{}\n\n【候选 2】\n{}\n\n                 哪一份更好？标准：层级更清楚、体系更自洽、更克制、更可执行。\n                 只输出 JSON：{{\"winner\":\"1\"|\"2\"|\"tie\",\"reason\":\"一句话\",\"confidence\":0.0}}，不要解释文字。",
+                cands[left].prompt, cands[right].prompt
+            );
+            let body = if o.provider == "openai" {
+                openai_text_body(&prompt, o.model, 400)
+            } else {
+                json!({
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {"responseMimeType":"application/json","temperature":0.2,"maxOutputTokens":400,"thinkingConfig":{"thinkingBudget":o.thinking}}
+                })
+            };
+            let outcome = if o.provider == "openai" {
+                call_openai(&client, o.base_url, &key, &body)
+            } else {
+                call(&client, o.base_url, o.model, &key, &body)
+            };
+            let v = match outcome {
+                CallOutcome::Ok(v, _) => v,
+                CallOutcome::RateLimited(i) => bail!("限流：{}", i.body),
+                CallOutcome::Failed(e) => bail!("成对评判失败：{e}"),
+            };
+            let winner = v["winner"].as_str().unwrap_or("tie");
+            let reason = v["reason"].as_str().unwrap_or("").to_string();
+            let win_for_left = match winner {
+                "1" => 1.0,
+                "2" => 0.0,
+                _ => 0.5,
+            };
+            // 转回 (i, j) 顺序：win for i
+            let win_for_i = if flip {
+                1.0 - win_for_left
+            } else {
+                win_for_left
+            };
+            println!(
+                "  对比 {} vs {} → {}",
+                cands[i].label,
+                cands[j].label,
+                if win_for_i > 0.5 {
+                    cands[i].label.clone()
+                } else if win_for_i < 0.5 {
+                    cands[j].label.clone()
+                } else {
+                    "平".into()
+                }
+            );
+            pair_results.push((i, j, win_for_i, reason));
+        }
+    }
+
+    // Bradley-Terry 拟合（MM 迭代），得到相对强弱
+    let n = cands.len();
+    let mut s = vec![1.0f64; n];
+    for _ in 0..300 {
+        let mut next = vec![0.0f64; n];
+        for (k, slot) in next.iter_mut().enumerate() {
+            // 先验：每个候选有一场对"平均对手"的虚拟胜利，避免一两场全输就掉到 0
+            let (mut w, mut denom) = (0.5f64, 1.0 / (s[k] + 1.0));
+            for (a, b, wa, _) in &pair_results {
+                if *a == k {
+                    w += wa;
+                    denom += 1.0 / (s[*a] + s[*b]);
+                } else if *b == k {
+                    w += 1.0 - wa;
+                    denom += 1.0 / (s[*a] + s[*b]);
+                }
             }
-        })
-    };
-    let outcome = if o.provider == "openai" {
-        call_openai(&client, o.base_url, &key, &body)
-    } else {
-        call(&client, o.base_url, o.model, &key, &body)
-    };
-    let judged = match outcome {
-        CallOutcome::Ok(v, _) => v,
-        CallOutcome::RateLimited(i) => bail!("限流：{}", i.body),
-        CallOutcome::Failed(e) => bail!("评判调用失败：{e}"),
-    };
+            *slot = if denom > 0.0 { w / denom } else { 1.0 };
+        }
+        let mx = next.iter().cloned().fold(0.0f64, f64::max).max(1e-9);
+        s = next.iter().map(|x| x / mx).collect();
+    }
+    let totals: Vec<f64> = s.iter().map(|x| (x * 10000.0).round() / 100.0).collect();
 
     let now = crate::now_iso();
+    let judge_json = json!({
+        "method": "pairwise+bt",
+        "pairs": pair_results.iter().map(|(a,b,w,r)| json!({"i": cands[*a].label, "j": cands[*b].label, "win_i": w, "reason": r})).collect::<Vec<_>>(),
+        "strengths": totals,
+    });
     conn.execute(
         "INSERT INTO judge_run(status,stage,input_json,precheck_json,judge_json,created_at,updated_at)
          VALUES('judging','machine',?1,?2,?3,?4,?4)",
         params![
             json!({"pills": o.pills, "seed": o.seed}).to_string(),
             json!(cands.iter().map(|c| json!({"pill": c.pill_id, "precheck": c.precheck})).collect::<Vec<_>>()).to_string(),
-            judged.to_string(),
+            judge_json.to_string(),
             now
         ],
     )?;
     let run_id = conn.last_insert_rowid();
 
-    let items = judged["items"].as_array().cloned().unwrap_or_default();
-    let mut totals: Vec<(i64, String, f64)> = Vec::new();
-    for c in &cands {
-        let item = items
-            .iter()
-            .find(|x| x["label"].as_str() == Some(c.label.as_str()));
-        let (machine, total) = match item {
-            Some(x) => {
-                // 模型有时按 0–1 打分，有时按 0–10；按最大值判断量纲
-                let vals: Vec<f64> = ["hierarchy", "consistency", "restraint", "executability"]
-                    .iter()
-                    .filter_map(|k| x[*k].as_f64())
-                    .collect();
-                let max = vals.iter().cloned().fold(0.0f64, f64::max);
-                let scale = if max <= 1.0 { 10.0 } else { 1.0 };
-                let sum: f64 = vals.iter().sum::<f64>() * scale;
-                (x.clone(), (sum / 40.0 * 100.0 * 100.0).round() / 100.0)
-            }
-            None => (json!({}), 0.0),
-        };
+    let mut scores: Vec<(i64, String, f64)> = Vec::new();
+    for (i, c) in cands.iter().enumerate() {
+        let total = totals[i];
         conn.execute(
             "INSERT INTO judge_item(run_id,pill_id,label,display_order,precheck,machine_json,machine_total,status)
              VALUES(?1,?2,?3,?4,?5,?6,?7,'machine_done')",
@@ -162,23 +201,36 @@ pub fn run(o: &RunOpts<'_>) -> Result<()> {
                 run_id,
                 c.pill_id,
                 c.label,
-                c.pill_id as i32,
+                i as i64,
                 c.precheck,
-                machine.to_string(),
+                json!({"strength": s[i], "total": total}).to_string(),
                 total
             ],
         )?;
-        totals.push((c.pill_id, c.label.clone(), total));
+        scores.push((c.pill_id, c.label.clone(), total));
     }
 
+    // 孔多塞检查：若没有任何候选人赢下所有对手，说明偏好成环，BT 的"平局"是真实情况
+    let condorcet: Option<usize> = (0..cands.len()).find(|k| {
+        pair_results.iter().all(|(a, b, w, _)| {
+            if a == k {
+                *w > 0.5
+            } else if b == k {
+                *w < 0.5
+            } else {
+                true
+            }
+        })
+    });
+
     // 升级规则：分差太小判不出、分数过低、随机 20% 抽检
-    let machine_vals: Vec<f64> = totals.iter().map(|t| t.2).collect();
+    let machine_vals: Vec<f64> = scores.iter().map(|t| t.2).collect();
     let spread = machine_vals
         .iter()
         .fold((f64::MAX, f64::MIN), |(mn, mx), v| (mn.min(*v), mx.max(*v)));
-    let indistinguishable = spread.1 - spread.0 < 3.0;
+    let indistinguishable = spread.1 - spread.0 < 3.0 || condorcet.is_none();
     let mut human_needed = 0usize;
-    for (i, (pid, _label, total)) in totals.iter().enumerate() {
+    for (i, (pid, _label, total)) in scores.iter().enumerate() {
         let low = *total < 40.0;
         let sample = i == 0; // 固定抽第一颗做人工校准
         if indistinguishable || low || sample {
@@ -200,9 +252,12 @@ pub fn run(o: &RunOpts<'_>) -> Result<()> {
     )?;
     recompute(&conn, run_id)?;
 
-    println!("盲评 run #{run_id}（seed {}）", o.seed);
+    println!(
+        "盲评 run #{run_id}（seed {}，成对比较 + Bradley-Terry）",
+        o.seed
+    );
     println!("{:<5} {:<6} {:>8} {:>6}", "丹药", "标签", "机器分", "预检");
-    for (pid, label, total) in &totals {
+    for (pid, label, total) in &scores {
         println!(
             "{:<5} {:<6} {:>8.1} {:>6.3}",
             pid,
@@ -215,7 +270,9 @@ pub fn run(o: &RunOpts<'_>) -> Result<()> {
                 .unwrap_or(0.0)
         );
     }
-    if indistinguishable {
+    if condorcet.is_none() {
+        println!("⚠ 无孔多塞胜者：成对偏好成环（A>B>C>A），判不出优劣 → 全部转人工");
+    } else if indistinguishable {
         println!("⚠ 机器分差 < 3 分，判不出优劣 → 全部转人工");
     }
     println!("需要人工干预的条目：{human_needed}（见 ie judge review --run {run_id}）");
