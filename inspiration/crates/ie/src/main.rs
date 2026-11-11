@@ -230,6 +230,7 @@ fn main() -> Result<()> {
                 allow_mixed: opts.contains_key("allow-mixed"),
                 force: opts.contains_key("force"),
                 out_dir: out_dir.as_deref(),
+                quiet: false,
             })
         }
         "formula" => {
@@ -274,6 +275,29 @@ fn main() -> Result<()> {
                 base_url: &base_url,
                 thinking,
             })
+        }
+        "mutate" => {
+            let recipe = opts
+                .get("recipe")
+                .map(PathBuf::from)
+                .ok_or_else(|| anyhow::anyhow!("需要 --recipe <path>"))?;
+            let runs: usize = opts.get("runs").and_then(|v| v.parse().ok()).unwrap_or(3);
+            let delta: f64 = opts
+                .get("delta")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0.1);
+            let seed: u64 = opts.get("seed").and_then(|v| v.parse().ok()).unwrap_or(7);
+            alchemy::mutate(&alchemy::MutateOpts {
+                db: &db,
+                recipe: &recipe,
+                runs,
+                delta,
+                seed,
+            })
+        }
+        "pills" => {
+            let limit: usize = opts.get("limit").and_then(|v| v.parse().ok()).unwrap_or(20);
+            alchemy::pills(&db, limit)
         }
         "bag" => {
             let limit: usize = opts.get("limit").and_then(|v| v.parse().ok()).unwrap_or(30);

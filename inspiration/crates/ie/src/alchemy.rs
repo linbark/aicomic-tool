@@ -32,6 +32,7 @@ pub struct BrewOpts<'a> {
     pub allow_mixed: bool,
     pub force: bool,
     pub out_dir: Option<&'a Path>,
+    pub quiet: bool,
 }
 
 pub struct BagOpts<'a> {
@@ -557,13 +558,128 @@ pub fn brew(o: &BrewOpts<'_>) -> Result<()> {
         params![o.formula_id, recipe_id, md, output_json.to_string(), now],
     )?;
     let pill_id = conn.last_insert_rowid();
+    let score = score_pill(&conn, pill_id)?;
+    conn.execute(
+        "UPDATE pill SET score_json=?1 WHERE id=?2",
+        params![score.to_string(), pill_id],
+    )?;
 
     if let Some(dir) = o.out_dir {
         std::fs::create_dir_all(dir)?;
         std::fs::write(dir.join(format!("{pill_id}-{key}.md")), &md)?;
     }
-    println!("{md}");
-    println!("丹药 #{pill_id} 已入库");
+    if o.quiet {
+        println!(
+            "  · #{} 预检分 {:.2}（{}）",
+            pill_id,
+            score["total"].as_f64().unwrap_or(0.0),
+            key
+        );
+    } else {
+        println!("{md}");
+        println!(
+            "丹药 #{pill_id} 已入库｜预检分 {}",
+            score["total"].as_f64().unwrap_or(0.0)
+        );
+    }
+    Ok(())
+}
+
+pub struct MutateOpts<'a> {
+    pub db: &'a str,
+    pub recipe: &'a Path,
+    pub runs: usize,
+    pub delta: f64,
+    pub seed: u64,
+}
+
+pub fn mutate(o: &MutateOpts<'_>) -> Result<()> {
+    let text = std::fs::read_to_string(o.recipe)?;
+    let base: serde_json::Value = serde_json::from_str(&text).context("配方不是合法 JSON")?;
+    let base_key = base["key"].as_str().unwrap_or("recipe").to_string();
+    let mut results: Vec<(String, i64, f64, f64)> = Vec::new();
+    let mut rng = o.seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+
+    for i in 0..o.runs {
+        let mut v = base.clone();
+        v["key"] = serde_json::json!(format!("{base_key}.v{i}"));
+        let comps = v["components"].as_array_mut().cloned().unwrap_or_default();
+        let mut total = 0.0f64;
+        let mut mutated = Vec::new();
+        for c in comps {
+            let mut c = c.clone();
+            rng = rng
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let u = ((rng >> 11) % 2001) as f64 / 1000.0 - 1.0; // -1..1
+            let r = c["ratio"].as_f64().unwrap_or(0.0) * (1.0 + o.delta * u);
+            let r = r.max(0.01);
+            c["ratio"] = serde_json::json!(r);
+            total += r;
+            mutated.push(c);
+        }
+        for c in &mut mutated {
+            let r = c["ratio"].as_f64().unwrap_or(0.0) / total;
+            c["ratio"] = serde_json::json!((r * 1000.0).round() / 1000.0);
+        }
+        v["components"] = serde_json::Value::Array(mutated);
+        v["name"] = serde_json::json!(format!("{}（变异 v{i}）", v["name"].as_str().unwrap_or("")));
+
+        let tmp = std::env::temp_dir().join(format!("ie-mutate-{}-{i}.json", std::process::id()));
+        std::fs::write(&tmp, serde_json::to_string_pretty(&v)?)?;
+        let before: i64 =
+            Connection::open(o.db)?
+                .query_row("SELECT coalesce(max(id),0) FROM pill", [], |r| r.get(0))?;
+        brew(&BrewOpts {
+            db: o.db,
+            recipe: &tmp,
+            pinned: None,
+            formula_id: None,
+            allow_mixed: true,
+            force: true,
+            out_dir: None,
+            quiet: true,
+        })?;
+        let _ = std::fs::remove_file(&tmp);
+        let conn = Connection::open(o.db)?;
+        let (pid, score): (i64, String) = conn.query_row(
+            "SELECT id, score_json FROM pill WHERE id > ?1 ORDER BY id DESC LIMIT 1",
+            params![before],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let s: serde_json::Value = serde_json::from_str(&score).unwrap_or_default();
+        let ratios: Vec<String> = v["components"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| {
+                format!(
+                    "{}={:.2}",
+                    c["dimension"].as_str().unwrap_or("?"),
+                    c["ratio"].as_f64().unwrap_or(0.0)
+                )
+            })
+            .collect();
+        results.push((
+            format!("v{i}"),
+            pid,
+            s["total"].as_f64().unwrap_or(0.0),
+            s["quality"].as_f64().unwrap_or(0.0),
+        ));
+        println!("  v{i}: pill #{pid}  配比 {}", ratios.join(" "));
+    }
+
+    println!("\n{:<6} {:<8} {:>6} {:>6}", "变异", "丹药", "总分", "质量");
+    let mut best = (String::new(), 0i64, -1.0);
+    for (name, pid, total, quality) in &results {
+        println!("{:<6} {:<8} {:>6.2} {:>6.2}", name, pid, total, quality);
+        if *total > best.2 {
+            best = (name.clone(), *pid, *total);
+        }
+    }
+    if !best.0.is_empty() {
+        println!("\n最佳变异：{}（丹药 #{}，{:.2}）", best.0, best.1, best.2);
+    }
     Ok(())
 }
 
@@ -664,6 +780,7 @@ pub fn formula_run(o: &FormulaOpts<'_>) -> Result<()> {
                     allow_mixed: false,
                     force: false,
                     out_dir: None,
+                    quiet: false,
                 })?;
             }
             "render" => println!("  （brew 已输出 markdown，render 步骤先空转）"),
@@ -688,6 +805,130 @@ fn find_recipe(dir: &Path, key: &str) -> Result<PathBuf> {
         }
     }
     bail!("在 {} 里找不到 key={key} 的配方", dir.display())
+}
+
+/// 丹药预检评分：只衡量"这颗丹药是否合乎配方、材料是否够用"，不衡量美。
+pub fn score_pill(conn: &Connection, pill_id: i64) -> Result<serde_json::Value> {
+    let (recipe_id, output_json): (Option<i64>, String) = conn.query_row(
+        "SELECT recipe_id, output_json FROM pill WHERE id=?1",
+        params![pill_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let out: serde_json::Value = serde_json::from_str(&output_json).unwrap_or_default();
+    let comps = out["components"].as_array().cloned().unwrap_or_default();
+    let conflicts = out["conflicts"].as_array().cloned().unwrap_or_default();
+    let prompt = out["prompt"].as_str().unwrap_or("");
+
+    // 必需槽位是否齐全
+    let (mut req_total, mut req_have) = (0usize, 0usize);
+    if let Some(rid) = recipe_id {
+        let mut stmt = conn.prepare(
+            "SELECT slot, dimension FROM recipe_component WHERE recipe_id=?1 AND required=1",
+        )?;
+        let req: Vec<(String, String)> = stmt
+            .query_map(params![rid], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        req_total = req.len();
+        for (slot, dim) in &req {
+            if comps
+                .iter()
+                .any(|c| c["slot"] == *slot && c["dimension"] == *dim)
+            {
+                req_have += 1;
+            }
+        }
+    }
+    let completeness = if req_total == 0 {
+        1.0
+    } else {
+        req_have as f64 / req_total as f64
+    };
+
+    let weight_sum: f64 = comps.iter().filter_map(|c| c["ratio"].as_f64()).sum();
+    let quality: f64 = if weight_sum > 0.0 {
+        comps
+            .iter()
+            .filter_map(|c| Some(c["ratio"].as_f64()? * c["quality"].as_f64()?))
+            .sum::<f64>()
+            / weight_sum
+    } else {
+        0.0
+    };
+
+    let materials: std::collections::BTreeSet<&str> = comps
+        .iter()
+        .filter_map(|c| c["material"].as_str())
+        .collect();
+    let diversity = if comps.is_empty() {
+        0.0
+    } else {
+        (materials.len() as f64 / comps.len() as f64).min(1.0)
+    };
+
+    let ratio_ok = (1.0 - (weight_sum - 1.0).abs()).clamp(0.0, 1.0);
+    let prompt_ok = if !prompt.contains("{{") && prompt.chars().count() >= 40 {
+        1.0
+    } else {
+        0.0
+    };
+    let errors = conflicts
+        .iter()
+        .filter(|c| c["severity"] == "error")
+        .count() as f64;
+    let warns = conflicts.iter().filter(|c| c["severity"] == "warn").count() as f64;
+
+    let total = (0.25 * quality
+        + 0.30 * completeness
+        + 0.15 * diversity
+        + 0.15 * ratio_ok
+        + 0.15 * prompt_ok
+        - 0.5 * errors
+        - 0.1 * warns)
+        .clamp(0.0, 1.0);
+
+    Ok(serde_json::json!({
+        "total": (total * 1000.0).round() / 1000.0,
+        "quality": (quality * 1000.0).round() / 1000.0,
+        "completeness": (completeness * 1000.0).round() / 1000.0,
+        "diversity": (diversity * 1000.0).round() / 1000.0,
+        "ratio_ok": (ratio_ok * 1000.0).round() / 1000.0,
+        "prompt_ok": prompt_ok,
+        "errors": errors as i64,
+        "warns": warns as i64,
+        "note": "预检分：衡量合规与材料可用性，不衡量美"
+    }))
+}
+
+pub fn pills(db: &str, limit: usize) -> Result<()> {
+    let conn = Connection::open(db)?;
+    let mut stmt = conn.prepare(
+        "SELECT p.id, coalesce(r.key,'-'), p.score_json, length(p.output_md), p.created_at
+         FROM pill p LEFT JOIN recipe r ON r.id=p.recipe_id ORDER BY p.id DESC LIMIT ?1",
+    )?;
+    let rows: Vec<(i64, String, String, i64, String)> = stmt
+        .query_map(params![limit as i64], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    println!(
+        "{:<5} {:<26} {:>6} {:>6} {:>6} {:>5} {:>5}",
+        "id", "配方", "总分", "质量", "完整", "冲突", "长度"
+    );
+    for (id, recipe, score, len, _at) in rows {
+        let s: serde_json::Value = serde_json::from_str(&score).unwrap_or_default();
+        let g = |k: &str| s[k].as_f64().unwrap_or(0.0);
+        println!(
+            "{:<5} {:<26} {:>6.2} {:>6.2} {:>6.2} {:>6} {:>6}",
+            id,
+            recipe,
+            g("total"),
+            g("quality"),
+            g("completeness"),
+            s["errors"].as_i64().unwrap_or(0),
+            len
+        );
+    }
+    Ok(())
 }
 
 pub fn bag(o: &BagOpts<'_>) -> Result<()> {
