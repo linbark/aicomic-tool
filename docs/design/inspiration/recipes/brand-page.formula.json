@@ -1,0 +1,11 @@
+{
+  "key": "formula.brand-page",
+  "name": "品牌落地页丹方",
+  "steps": [
+    {"id": "s1", "op": "refine", "material": 7, "technique": "t.layout"},
+    {"id": "s2", "op": "refine", "material": 7, "technique": "t.palette"},
+    {"id": "s3", "op": "refine", "material": 679, "technique": "t.type"},
+    {"id": "s4", "op": "brew", "recipe": "recipe.minimal-landing", "inputs": ["s1", "s2", "s3"]},
+    {"id": "s5", "op": "render", "inputs": ["s4"], "format": "md"}
+  ]
+}

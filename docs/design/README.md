@@ -8,6 +8,7 @@
 | [星晴工作流与界面设计](星晴工作流与界面设计.md) | 制作阶段与闸门、信息架构、页面规格、视觉系统、实现范围与验收 | v1 已实现；后续里程碑标注为规划 |
 | [灵感引擎设计](灵感引擎设计.md) | 领域无关的灵感引擎：审美基元与领域包、跨域迁移与融合、判美模型、DSH 接入 | 设计稿 v1.1；M1 像素层与 P0 演练已实测 |
 | [个人美学内核设计](个人美学内核设计.md) | ToC 层：个人内核 vs 风格、层级效用模型、主动学习与内核卡、隐私与联邦 | 设计稿 v0.1；schema 迁移已就绪 |
+| [炼丹模型](炼丹模型.md) | 药材/药液/配方/丹方的数据流：维度化药液、结构化配比、相冲检测、丹方可重放 | 设计稿 v0.1；迁移 006 已就绪 |
 | [Designeer 数据源接入](Designeer数据源接入.md) | 首个数据源的端点实测、字段映射、归一化、刷新与降级 | 适配器规范 v0.1；目录层已实跑验证 |
 
 灵感引擎的样例与数据资产：
@@ -18,6 +19,8 @@
 - [inspiration/migrations/002-personal-layer.sql](inspiration/migrations/002-personal-layer.sql)：个人层迁移（人、会话、内核、内核卡、风格、出题队列），在 v2 上执行后 `schema_version=3`。
 - [inspiration/packs/core.pack.json](inspiration/packs/core.pack.json)：38 个跨域审美基元 + 10 个可测度量。
 - [inspiration/packs/ui.pack.json](inspiration/packs/ui.pack.json)、[inspiration/packs/architecture.pack.json](inspiration/packs/architecture.pack.json)：两个领域包（12 + 10 个手法）。
+- [inspiration/migrations/006-alchemy.sql](inspiration/migrations/006-alchemy.sql)：药液/背包/配方/丹方/丹药七张表 + `v_bag`。
+- [inspiration/recipes/](inspiration/recipes/)：示例配方与丹方（JSON）。
 - [../inspiration/README.md](../../inspiration/README.md)：M1/P0 的 Rust 研究原型（`ie extract / simulate / fit`），含实测结果与已知限制。
 
 阅读顺序：先看设计文档的 §0 一页结论；需要外部依据再回到研究文档的 §1 与 §12；实现与验收细节看设计文档 §8。
