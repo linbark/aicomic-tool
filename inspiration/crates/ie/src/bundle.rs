@@ -983,6 +983,18 @@ impl Imp<'_> {
             if let Some(parent) = dest.parent() {
                 std::fs::create_dir_all(parent)?;
             }
+            // 校验：分块拼完后必须与 sha 一致，否则删掉并报错（防止半包/损坏静默入库）
+            {
+                use sha2::{Digest, Sha256};
+                let mut h = Sha256::new();
+                let mut src = std::fs::File::open(&part)?;
+                std::io::copy(&mut src, &mut h)?;
+                let got = format!("{:x}", h.finalize());
+                if got != sha {
+                    let _ = std::fs::remove_file(&part);
+                    anyhow::bail!("blob 校验失败：期望 {sha}，实得 {got}");
+                }
+            }
             std::fs::rename(&part, &dest)?;
             self.tx.execute(
                 "UPDATE asset SET local_path=?1 WHERE sha256=?2 AND local_path IS NULL",
