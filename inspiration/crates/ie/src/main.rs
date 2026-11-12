@@ -8,6 +8,7 @@
 
 mod alchemy;
 mod bundle;
+mod db;
 mod distill;
 mod extract;
 mod fit;
@@ -56,7 +57,27 @@ fn main() -> Result<()> {
         .get("db")
         .cloned()
         .unwrap_or_else(|| "data/inspiration/inspiration.db".to_string());
+    if matches!(
+        cmd.as_str(),
+        "refine" | "brew" | "formula" | "mutate" | "judge" | "brief" | "verify" | "motion" | "bag"
+    ) {
+        db::require_current(std::path::Path::new(&db))?;
+    }
     match cmd.as_str() {
+        "migrate" => {
+            let path = opts
+                .get("db")
+                .filter(|p| p.as_str() != "1")
+                .map(PathBuf::from)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("迁移必须显式指定 --db <path>；不会自动修改默认用户库")
+                })?;
+            if let Some(backup) = db::migrate_path(&path)? {
+                println!("迁移前备份：{}", backup.display());
+            }
+            println!("数据库 schema {} 已就绪", db::LATEST_SCHEMA);
+            Ok(())
+        }
         "extract" => {
             let root = PathBuf::from(
                 opts.get("root")
@@ -436,7 +457,22 @@ fn main() -> Result<()> {
                         .get("scores")
                         .cloned()
                         .ok_or_else(|| anyhow::anyhow!("需要 --scores \"A=82,B=70\""))?;
-                    judge::fill(&db, run_id, &scores, opts.get("note").map(|s| s.as_str()))
+                    let source = opts
+                        .get("source")
+                        .map(String::as_str)
+                        .unwrap_or("demo")
+                        .parse()?;
+                    judge::fill_with_opts(&judge::FillOpts {
+                        db: &db,
+                        run_id,
+                        scores: &scores,
+                        note: opts.get("note").map(String::as_str),
+                        provenance: judge::ReviewProvenance {
+                            source,
+                            reviewer: opts.get("reviewer").map(String::as_str),
+                            dimension: opts.get("dimension").map(String::as_str),
+                        },
+                    })
                 }
                 "record" => {
                     let item: i64 = opts
@@ -447,9 +483,26 @@ fn main() -> Result<()> {
                         .get("score")
                         .and_then(|v| v.parse().ok())
                         .ok_or_else(|| anyhow::anyhow!("需要 --score 0-100"))?;
-                    judge::record(&db, item, score, opts.get("note").map(|s| s.as_str()))
+                    let source = opts
+                        .get("source")
+                        .map(String::as_str)
+                        .unwrap_or("demo")
+                        .parse()?;
+                    judge::record_with_provenance(
+                        &db,
+                        item,
+                        score,
+                        opts.get("note").map(String::as_str),
+                        &judge::ReviewProvenance {
+                            source,
+                            reviewer: opts.get("reviewer").map(String::as_str),
+                            dimension: opts.get("dimension").map(String::as_str),
+                        },
+                    )
                 }
-                _ => anyhow::bail!("用法：ie judge <run|list|review|screen|fill|record> ..."),
+                _ => anyhow::bail!(
+                    "用法：ie judge <run|panel|list|review|screen|fill|record|calibrate|models> ...；真人回填需 --source human --reviewer <id>"
+                ),
             }
         }
         "motion" => {
@@ -508,7 +561,7 @@ fn main() -> Result<()> {
         "stats" => stats(&db),
         _ => {
             eprintln!(
-                "用法：ie <extract|vision|distill|refine|bag|export|import|simulate|fit|stats> --db <path> [--root DIR] [--limit N] [--person ID] [--n N] [--seed S] [--model M]"
+                "用法：ie <migrate|extract|vision|distill|refine|brew|formula|mutate|bag|pills|judge|motion|brief|verify|export|import|simulate|fit|stats> --db <path> [options]"
             );
             Ok(())
         }

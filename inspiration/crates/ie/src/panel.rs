@@ -9,7 +9,7 @@
 //! 这条规则不假装能消解分歧：它只负责把「裁判打架」变成「人工任务」。
 
 use anyhow::{Context, Result, bail};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use std::time::Duration;
 
@@ -42,6 +42,30 @@ struct Cand {
     prompt: String,
 }
 
+/// panel 实际使用的离线权重解析入口；不调用任何裁判。
+pub fn calibrated_weight(conn: &Connection, name: &str, default: f64) -> Result<f64> {
+    if !default.is_finite() || default <= 0.0 {
+        bail!("裁判 {name} 的默认权重必须为正有限数字");
+    }
+    let calibrated: Option<f64> = conn
+        .query_row(
+            "SELECT weight FROM judge_model WHERE name=?1 AND calibration_source='human'
+             AND calibration_trusted=1 AND samples>=?2",
+            params![name, crate::judge::MIN_CALIBRATION_SAMPLES],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(calibrated
+        .filter(|w| w.is_finite() && *w > 0.0)
+        .unwrap_or(default))
+}
+
+/// 持久化的合议输入快照，裁判详情仅含身份和实际权重，不含密钥。
+pub fn input_metadata(o: &PanelOpts<'_>, judge_configs: Vec<Value>) -> Value {
+    json!({"pills": o.pills, "seed": o.seed, "judges": o.judges,
+        "dimension":o.dimension, "repeats":o.repeats.max(1), "judge_configs":judge_configs})
+}
+
 pub fn run(o: &PanelOpts<'_>) -> Result<()> {
     if o.pills.len() < 2 {
         bail!("至少两颗丹药");
@@ -72,15 +96,8 @@ pub fn run(o: &PanelOpts<'_>) -> Result<()> {
     let conn = Connection::open(o.db)?;
     conn.busy_timeout(Duration::from_secs(10))?;
 
-    // 若人工校准过，用库里的权重覆盖配置
     for j in &mut judges {
-        if let Ok(w) = conn.query_row(
-            "SELECT weight FROM judge_model WHERE name=?1",
-            params![j.name],
-            |r| r.get::<_, f64>(0),
-        ) {
-            j.weight = w;
-        }
+        j.weight = calibrated_weight(&conn, &j.name, j.weight)?;
     }
     let mut cands: Vec<Cand> = Vec::new();
     let mut names: std::collections::BTreeSet<String> = Default::default();
@@ -272,7 +289,9 @@ pub fn run(o: &PanelOpts<'_>) -> Result<()> {
         "INSERT INTO judge_run(status,stage,input_json,precheck_json,judge_json,created_at,updated_at)
          VALUES('judging','panel',?1,?2,?3,?4,?4)",
         params![
-            json!({"pills": o.pills, "seed": o.seed, "judges": o.judges}).to_string(),
+            input_metadata(o, judges.iter().map(|j| json!({
+                "name":j.name, "provider":j.provider, "model":j.model, "weight":j.weight,
+            })).collect()).to_string(),
             json!(cands.iter().map(|c| json!({"pill": c.pill_id, "precheck": c.precheck})).collect::<Vec<_>>()).to_string(),
             judge_json.to_string(),
             now

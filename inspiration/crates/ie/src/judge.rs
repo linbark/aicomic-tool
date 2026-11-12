@@ -1,7 +1,7 @@
 //! 评判流水线：预检 → 机器盲评 → 人工干预 → 归并。
 //!
 //! 设计要点：
-//! - 每一步都写库，可中断、可重放；
+//! - 机器评判完成后落库；机器调用目前没有断点恢复能力；
 //! - 机器盲评打乱标签（A/B/C），不告诉模型材料来源；
 //! - 判不出差别、分歧过大、随机抽检的条目进人工队列；
 //! - 人工结论回填后重算最终分，作为后续校准依据。
@@ -26,12 +26,89 @@ pub struct RunOpts<'a> {
     pub rpm: u32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReviewSource {
+    Human,
+    Ai,
+    Demo,
+    Legacy,
+}
+
+impl ReviewSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Human => "human",
+            Self::Ai => "ai",
+            Self::Demo => "demo",
+            Self::Legacy => "legacy",
+        }
+    }
+}
+
+impl std::str::FromStr for ReviewSource {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "human" => Ok(Self::Human),
+            "ai" => Ok(Self::Ai),
+            "demo" => Ok(Self::Demo),
+            "legacy" => Ok(Self::Legacy),
+            _ => bail!("评分来源应为 human/ai/demo/legacy"),
+        }
+    }
+}
+
+pub struct ReviewProvenance<'a> {
+    pub source: ReviewSource,
+    pub reviewer: Option<&'a str>,
+    pub dimension: Option<&'a str>,
+}
+
+impl ReviewProvenance<'_> {
+    #[allow(
+        dead_code,
+        reason = "兼容旧 fill/record 包装器；CLI 使用显式 provenance"
+    )]
+    pub fn demo() -> Self {
+        Self {
+            source: ReviewSource::Demo,
+            reviewer: None,
+            dimension: None,
+        }
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.source == ReviewSource::Human && self.reviewer.is_none_or(|r| r.trim().is_empty()) {
+            bail!("human 评分必须显式指定非空 reviewer；AI/演示评分请用 ai/demo");
+        }
+        if self.dimension.is_some_and(|d| d.trim().is_empty()) {
+            bail!("评分维度不能是空字符串");
+        }
+        Ok(())
+    }
+}
+
+pub struct FillOpts<'a> {
+    pub db: &'a str,
+    pub run_id: i64,
+    pub scores: &'a str,
+    pub note: Option<&'a str>,
+    pub provenance: ReviewProvenance<'a>,
+}
+
 struct Candidate {
     pill_id: i64,
     label: String,
     precheck: f64,
     prompt: String,
     materials: Vec<String>,
+}
+
+/// 持久化的运行输入快照，不含密钥。
+pub fn input_metadata(o: &RunOpts<'_>) -> Value {
+    json!({"pills": o.pills, "seed": o.seed, "dimension":o.dimension,
+        "provider":o.provider, "model":o.model, "repeats":o.repeats.max(1)})
 }
 
 pub fn run(o: &RunOpts<'_>) -> Result<()> {
@@ -230,7 +307,7 @@ pub fn run(o: &RunOpts<'_>) -> Result<()> {
         "INSERT INTO judge_run(status,stage,input_json,precheck_json,judge_json,created_at,updated_at)
          VALUES('judging','machine',?1,?2,?3,?4,?4)",
         params![
-            json!({"pills": o.pills, "seed": o.seed}).to_string(),
+            input_metadata(o).to_string(),
             json!(cands.iter().map(|c| json!({"pill": c.pill_id, "precheck": c.precheck})).collect::<Vec<_>>()).to_string(),
             judge_json.to_string(),
             now
@@ -327,8 +404,17 @@ pub fn run(o: &RunOpts<'_>) -> Result<()> {
 }
 
 pub(crate) fn recompute(conn: &Connection, run_id: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE judge_item SET status='human_needed' WHERE run_id=?1
+        AND status='done' AND human_score IS NOT NULL
+        AND NOT (human_source='human' AND length(trim(coalesce(human_reviewer,'')))>0)",
+        [run_id],
+    )?;
     let mut stmt = conn.prepare(
-        "SELECT id, precheck, machine_total, human_score FROM judge_item WHERE run_id=?1",
+        "SELECT id, precheck, machine_total,
+                CASE WHEN human_source='human' AND length(trim(coalesce(human_reviewer,'')))>0
+                     THEN human_score ELSE NULL END
+         FROM judge_item WHERE run_id=?1",
     )?;
     type Row = (i64, Option<f64>, Option<f64>, Option<f64>);
     let rows: Vec<Row> = stmt
@@ -338,6 +424,7 @@ pub(crate) fn recompute(conn: &Connection, run_id: i64) -> Result<()> {
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut finals = Vec::new();
     for (item_id, pre, machine, human) in rows {
+        let human = human.filter(|h| h.is_finite() && (0.0..=100.0).contains(h));
         let m = machine.unwrap_or(0.0);
         let p = pre.unwrap_or(0.0) * 100.0;
         let final_total = match human {
@@ -378,44 +465,62 @@ pub(crate) fn recompute(conn: &Connection, run_id: i64) -> Result<()> {
     Ok(())
 }
 
-/// 用人工裁决校准裁判权重：每个裁判的裁决与人工结论逐对比较，算一致率。
+pub const MIN_CALIBRATION_SAMPLES: i64 = 20;
+
+/// 仅用真实、同审核人的成对评分校准；少样本仅展示，不自动应用。
 pub fn calibrate(db: &str) -> Result<()> {
-    let conn = Connection::open(db)?;
+    let mut connection = Connection::open(db)?;
+    connection.busy_timeout(Duration::from_secs(10))?;
+    let conn = connection.transaction()?;
     let mut stmt = conn.prepare(
         "SELECT id, judge_json FROM judge_run WHERE stage='panel' AND judge_json IS NOT NULL",
     )?;
     let runs: Vec<(i64, String)> = stmt
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
 
     // 裁判名 -> (样本数, 一致数)
     let mut stats: std::collections::BTreeMap<String, (i64, i64)> = Default::default();
     let mut used_pairs = 0usize;
     for (run_id, judge_json) in runs {
         let j: Value = serde_json::from_str(&judge_json).unwrap_or_default();
-        let mut labels: std::collections::HashMap<String, (i64, Option<f64>)> = Default::default();
+        let mut labels: std::collections::HashMap<String, (String, Option<f64>)> =
+            Default::default();
         {
-            let mut s =
-                conn.prepare("SELECT label, pill_id, human_score FROM judge_item WHERE run_id=?1")?;
+            let mut s = conn.prepare(
+                "SELECT label, human_reviewer, human_score FROM judge_item WHERE run_id=?1
+                    AND human_source='human' AND human_reviewer IS NOT NULL
+                    AND length(trim(human_reviewer)) > 0",
+            )?;
             for row in s.query_map(params![run_id], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
-                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(1)?,
                     r.get::<_, Option<f64>>(2)?,
                 ))
             })? {
-                let (label, pill, human) = row?;
-                labels.insert(label, (pill, human));
+                let (label, reviewer, human) = row?;
+                labels.insert(label, (reviewer, human));
             }
         }
         for p in j["pairs"].as_array().cloned().unwrap_or_default() {
             let (Some(li), Some(lj)) = (p["i"].as_str(), p["j"].as_str()) else {
                 continue;
             };
-            let (Some((_, Some(hi))), Some((_, Some(hj)))) = (labels.get(li), labels.get(lj))
+            let (Some((ri, Some(hi))), Some((rj, Some(hj)))) = (labels.get(li), labels.get(lj))
             else {
                 continue;
             };
+            if ri.trim().is_empty()
+                || ri.trim() != rj.trim()
+                || !hi.is_finite()
+                || !hj.is_finite()
+                || !(0.0..=100.0).contains(hi)
+                || !(0.0..=100.0).contains(hj)
+            {
+                continue;
+            }
             // 人工结论：分差 >3 才算分出胜负
             let human = if (hi - hj).abs() <= 3.0 {
                 None
@@ -453,54 +558,96 @@ pub fn calibrate(db: &str) -> Result<()> {
         }
     }
 
+    // 每次从真实样本完整重建；不允许无样本时继续沿用旧/演示权重。
+    // 迁移的存档触发器会保存被替换的原始权重及其来源。
+    conn.execute(
+        "UPDATE judge_model SET samples=0, agreements=0, weight=1.0,
+        calibration_source='human', calibration_trusted=0, updated_at=?1",
+        [crate::now_iso()],
+    )?;
+
     println!("可用于校准的成对样本：{used_pairs}");
     println!(
-        "{:<14} {:>6} {:>6} {:>8} {:>6}",
-        "裁判", "样本", "一致", "一致率", "权重"
+        "{:<14} {:>6} {:>6} {:>8} {:>6} 应用状态",
+        "裁判", "样本", "一致", "一致率", "建议权重"
     );
     for (name, (n, a)) in &stats {
         let rate = if *n > 0 { *a as f64 / *n as f64 } else { 0.0 };
-        // 权重 = 0.3 + 一致率，范围 0.3–1.3；样本越少越往 1.0 收缩
+        // 保持原收缩公式：样本越少越往默认 1.0 收缩；是否应用另受可信阈值控制。
         let shrink = (*n as f64 / (*n as f64 + 4.0)).min(1.0);
         let weight = 1.0 + (rate - 0.5) * 2.0 * shrink;
+        let trusted = *n >= MIN_CALIBRATION_SAMPLES;
         conn.execute(
-            "INSERT INTO judge_model(name,samples,agreements,weight,updated_at) VALUES(?1,?2,?3,?4,?5)
-             ON CONFLICT(name) DO UPDATE SET samples=?2, agreements=?3, weight=?4, updated_at=?5",
-            params![name, n, a, weight, crate::now_iso()],
+            "INSERT INTO judge_model(name,samples,agreements,weight,updated_at,calibration_source,calibration_trusted)
+             VALUES(?1,?2,?3,?4,?5,'human',?6)
+             ON CONFLICT(name) DO UPDATE SET samples=?2, agreements=?3, weight=?4, updated_at=?5,
+                 calibration_source='human', calibration_trusted=?6",
+            params![name, n, a, weight, crate::now_iso(), trusted],
         )?;
         println!(
-            "{name:<14} {n:>6} {a:>6} {:>7.1}% {weight:>6.2}",
-            rate * 100.0
+            "{name:<14} {n:>6} {a:>6} {:>7.1}% {weight:>6.2} {}",
+            rate * 100.0,
+            if trusted {
+                "可信 human 校准"
+            } else {
+                "少样本，不应用（至少20）"
+            }
         );
     }
     if stats.is_empty() {
-        println!("没有样本：先给 panel run 回填人工分（ie judge fill）再校准");
+        println!(
+            "没有真实样本：已恢复默认权重，不应用校准；请用 --source human --reviewer <本人> 回填"
+        );
     }
+    conn.commit()?;
     Ok(())
 }
 
 pub fn models(db: &str) -> Result<()> {
+    print!("{}", models_text(db)?);
+    Ok(())
+}
+
+pub fn models_text(db: &str) -> Result<String> {
     let conn = Connection::open(db)?;
     let mut stmt = conn.prepare(
-        "SELECT name, samples, agreements, weight, updated_at FROM judge_model ORDER BY name",
+        "SELECT name, samples, agreements, weight, updated_at, calibration_source, calibration_trusted
+         FROM judge_model ORDER BY name",
     )?;
-    let rows: Vec<(String, i64, i64, f64, String)> = stmt
+    type ModelRow = (String, i64, i64, f64, String, String, bool);
+    let rows: Vec<ModelRow> = stmt
         .query_map([], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+            ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     if rows.is_empty() {
-        println!("还没有校准记录");
-        return Ok(());
+        return Ok("还没有校准记录\n".into());
     }
-    println!(
-        "{:<14} {:>6} {:>6} {:>8} 更新",
-        "裁判", "样本", "一致", "权重"
+    let mut text = format!(
+        "{:<14} {:>6} {:>6} {:>8} 应用状态（阈值20）· 更新\n",
+        "裁判", "样本", "一致", "建议权重"
     );
-    for (name, n, a, w, at) in rows {
-        println!("{name:<14} {n:>6} {a:>6} {w:>8.2} {at}");
+    for (name, n, a, w, at, source, trusted) in rows {
+        let status = if source != "human" {
+            "legacy，不应用"
+        } else if !trusted || n < MIN_CALIBRATION_SAMPLES || !w.is_finite() || w <= 0.0 {
+            "human 少样本，不应用"
+        } else {
+            "可信 human 校准"
+        };
+        text.push_str(&format!(
+            "{name:<14} {n:>6} {a:>6} {w:>8.2} {status} · {at}\n"
+        ));
     }
-    Ok(())
+    Ok(text)
 }
 
 pub fn list(db: &str) -> Result<()> {
@@ -538,10 +685,19 @@ pub fn list(db: &str) -> Result<()> {
 
 pub fn review(db: &str, run_id: Option<i64>) -> Result<()> {
     let conn = Connection::open(db)?;
-    let sql = "SELECT i.id, i.run_id, i.label, i.pill_id, i.machine_total, i.precheck, i.human_score
+    let sql = "SELECT i.id, i.run_id, i.label, i.pill_id, i.machine_total, i.precheck,
+                      CASE WHEN i.human_score IS NOT NULL THEN printf('%.0f [%s]',i.human_score,i.human_source) END
                FROM judge_item i WHERE i.status='human_needed' AND (?1 IS NULL OR i.run_id=?1) ORDER BY i.run_id, i.display_order";
     let mut stmt = conn.prepare(sql)?;
-    type QRow = (i64, i64, String, i64, Option<f64>, Option<f64>, Option<f64>);
+    type QRow = (
+        i64,
+        i64,
+        String,
+        i64,
+        Option<f64>,
+        Option<f64>,
+        Option<String>,
+    );
     let rows: Vec<QRow> = stmt
         .query_map(params![run_id], |r| {
             Ok((
@@ -561,7 +717,7 @@ pub fn review(db: &str, run_id: Option<i64>) -> Result<()> {
     }
     println!(
         "{:<6} {:<5} {:<7} {:<7} {:>8} {:>6} {:>6}",
-        "item", "run", "标签", "丹药", "机器分", "预检", "人工"
+        "item", "run", "标签", "丹药", "机器分", "预检", "评分/来源"
     );
     for (id, run, label, pid, machine, pre, human) in rows {
         println!(
@@ -572,15 +728,30 @@ pub fn review(db: &str, run_id: Option<i64>) -> Result<()> {
             pid,
             machine.map(|v| format!("{v:.1}")).unwrap_or("-".into()),
             pre.map(|v| format!("{v:.3}")).unwrap_or("-".into()),
-            human.map(|v| format!("{v:.0}")).unwrap_or("-".into())
+            human.unwrap_or("-".into())
         );
     }
-    println!("\n回填：ie judge record --item <item_id> --score 0-100 [--note ...] [--approve]");
+    println!(
+        "\n真实回填：ie judge record --item <item_id> --score 0-100 --source human --reviewer <本人> [--note ...]"
+    );
     Ok(())
 }
 
 /// 一屏审阅：把一次 run 的所有候选、分数、规格摘要和成对理由放在同一屏。
 pub fn screen(db: &str, run_id: i64) -> Result<()> {
+    print!("{}", screen_text(db, run_id)?);
+    Ok(())
+}
+
+/// 与 CLI 完全相同的审阅屏，允许离线调用者展示并测试，不调用模型。
+pub fn screen_text(db: &str, run_id: i64) -> Result<String> {
+    let mut text = String::new();
+    macro_rules! line {
+        ($($arg:tt)*) => {{
+            text.push_str(&format!($($arg)*));
+            text.push('\n');
+        }};
+    }
     let conn = Connection::open(db)?;
     let (status, seed, judge_json): (String, i64, Option<String>) = conn.query_row(
         "SELECT status, coalesce(json_extract(input_json,'$.seed'),0), judge_json FROM judge_run WHERE id=?1",
@@ -592,21 +763,51 @@ pub fn screen(db: &str, run_id: i64) -> Result<()> {
         .and_then(|s| serde_json::from_str(s).ok())
         .unwrap_or_default();
 
-    println!("══ run #{run_id} · {status} · seed {seed} ══");
+    line!("══ run #{run_id} · {status} · seed {seed} ══");
     if let Some(pairs) = j["pairs"].as_array() {
         for p in pairs {
-            let winner = if p["win_i"].as_f64().unwrap_or(0.5) > 0.5 {
-                p["i"].as_str().unwrap_or("?")
-            } else if p["win_i"].as_f64().unwrap_or(0.5) < 0.5 {
-                p["j"].as_str().unwrap_or("?")
-            } else {
-                "平"
+            let probability = p["combined"]
+                .as_f64()
+                .or_else(|| p["win_i"].as_f64())
+                .filter(|v| v.is_finite() && (0.0..=1.0).contains(v));
+            let winner = match probability {
+                Some(v) if v > 0.5 + 1e-9 => p["i"].as_str().unwrap_or("?"),
+                Some(v) if v < 0.5 - 1e-9 => p["j"].as_str().unwrap_or("?"),
+                Some(_) => "平",
+                None => "未知",
             };
-            println!(
-                "  {} vs {} → {}   （{}）",
+            let votes: Vec<(&str, f64)> = p["votes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|v| Some((v[0].as_str()?, v[1].as_f64()?)))
+                .collect();
+            let verdict = |v: f64| {
+                if v > 0.5 + 1e-9 {
+                    1
+                } else if v < 0.5 - 1e-9 {
+                    -1
+                } else {
+                    0
+                }
+            };
+            let disputed = p["disputed"].as_bool().unwrap_or(false)
+                || votes.first().is_some_and(|(_, first)| {
+                    votes.iter().any(|(_, v)| verdict(*v) != verdict(*first))
+                });
+            let votes = votes
+                .iter()
+                .map(|(name, v)| format!("{name}={v:.2}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            line!(
+                "  {} vs {} → {}  胜率 {}  {}{} （{}）",
                 p["i"].as_str().unwrap_or("?"),
                 p["j"].as_str().unwrap_or("?"),
                 winner,
+                probability.map(|v| format!("{v:.2}")).unwrap_or("-".into()),
+                votes,
+                if disputed { " ⚠ 裁判分歧" } else { "" },
                 p["reason"].as_str().unwrap_or("")
             );
         }
@@ -614,10 +815,12 @@ pub fn screen(db: &str, run_id: i64) -> Result<()> {
 
     let mut stmt = conn.prepare(
         "SELECT i.id, i.label, i.pill_id, i.machine_total, i.precheck, i.human_score, i.status,
-                p.output_json, p.output_md
+                p.output_json, p.output_md, i.human_source, i.human_reviewer,
+                i.human_recorded_at, i.human_dimension
          FROM judge_item i JOIN pill p ON p.id=i.pill_id
          WHERE i.run_id=?1 ORDER BY i.display_order",
     )?;
+    type ReviewMeta = (String, Option<String>, Option<String>, Option<String>);
     type ScreenRow = (
         i64,
         String,
@@ -628,6 +831,7 @@ pub fn screen(db: &str, run_id: i64) -> Result<()> {
         String,
         String,
         String,
+        ReviewMeta,
     );
     let rows: Vec<ScreenRow> = stmt
         .query_map(params![run_id], |r| {
@@ -641,46 +845,96 @@ pub fn screen(db: &str, run_id: i64) -> Result<()> {
                 r.get(6)?,
                 r.get(7)?,
                 r.get(8)?,
+                (r.get(9)?, r.get(10)?, r.get(11)?, r.get(12)?),
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
-    for (item_id, label, pill_id, machine, precheck, human, status, output_json, md) in rows {
+    for (
+        item_id,
+        label,
+        pill_id,
+        machine,
+        precheck,
+        human,
+        status,
+        output_json,
+        md,
+        (source, reviewer, at, dimension),
+    ) in rows
+    {
         let out: Value = serde_json::from_str(&output_json).unwrap_or_default();
         let prompt = out["prompt"].as_str().unwrap_or("");
         let excerpt: String = prompt.chars().take(180).collect();
-        println!("──────────────────────────────────────────────");
-        println!(
-            "[{label}] item#{item_id} pill#{pill_id}  机器 {}  预检 {}  人工 {}  {}",
+        line!("──────────────────────────────────────────────");
+        line!(
+            "[{label}] item#{item_id} pill#{pill_id}  机器 {}  预检 {}  评分 {} [{source}]  {}",
             machine.map(|v| format!("{v:.1}")).unwrap_or("-".into()),
             precheck.map(|v| format!("{v:.3}")).unwrap_or("-".into()),
             human.map(|v| format!("{v:.0}")).unwrap_or("-".into()),
             status
         );
+        if human.is_some() {
+            line!(
+                "  reviewer={} at={} dimension={}",
+                reviewer.as_deref().unwrap_or("未知"),
+                at.as_deref().unwrap_or("未知"),
+                dimension.as_deref().unwrap_or("未标注")
+            );
+        }
         if prompt.is_empty() {
             let plain: String = md.chars().take(180).collect();
-            println!("  规格：{plain}");
+            line!("  规格：{plain}");
         } else {
-            println!("  规格：{excerpt}");
+            line!("  规格：{excerpt}");
         }
     }
-    println!("──────────────────────────────────────────────");
-    println!("批量回填：ie judge fill --run {run_id} --scores \"A=82,B=70,C=75\" [--note \"...\"]");
-    Ok(())
+    line!("──────────────────────────────────────────────");
+    line!(
+        "真实人评：ie judge fill --run {run_id} --scores \"A=82,B=70,C=75\" --source human --reviewer <本人> [--dimension ...]"
+    );
+    line!("省略 --source 默认 demo；ai/demo/legacy 不进入真实校准，不完成人工队列。");
+    Ok(text)
 }
 
-/// 批量回填：一次把这一屏所有候选的人工分写进去。
+/// 旧接口仅用于 demo；真实人工评分必须使用带 provenance 的接口。
+#[allow(
+    dead_code,
+    reason = "保留兼容公开接口，默认 demo，绝不隐式创建真人评分"
+)]
 pub fn fill(db: &str, run_id: i64, scores: &str, note: Option<&str>) -> Result<()> {
-    let conn = Connection::open(db)?;
-    let mut stmt = conn.prepare("SELECT id, label FROM judge_item WHERE run_id=?1")?;
+    fill_with_opts(&FillOpts {
+        db,
+        run_id,
+        scores,
+        note,
+        provenance: ReviewProvenance::demo(),
+    })
+}
+
+pub fn fill_with_opts(o: &FillOpts<'_>) -> Result<()> {
+    o.provenance.validate()?;
+    let FillOpts {
+        db,
+        run_id,
+        scores,
+        note,
+        ..
+    } = *o;
+    let mut conn = Connection::open(db)?;
+    conn.busy_timeout(Duration::from_secs(10))?;
+    let tx = conn.transaction()?;
+    let mut stmt = tx.prepare("SELECT id, label FROM judge_item WHERE run_id=?1")?;
     let items: Vec<(i64, String)> = stmt
         .query_map(params![run_id], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
     if items.is_empty() {
         bail!("run #{run_id} 没有条目");
     }
 
-    let mut applied = 0usize;
+    let mut validated = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
     for part in scores.split([',', ';', '、']) {
         let part = part.trim();
         if part.is_empty() {
@@ -690,6 +944,9 @@ pub fn fill(db: &str, run_id: i64, scores: &str, note: Option<&str>) -> Result<(
             bail!("看不懂 \"{part}\"，格式应为 A=82");
         };
         let label = label.trim().to_uppercase();
+        if !seen.insert(label.clone()) {
+            bail!("重复标签 {label}，整批未写入");
+        }
         let score: f64 = val.trim().parse().context("分数不是数字")?;
         if !(0.0..=100.0).contains(&score) {
             bail!("{label} 的分数 {score} 超出 0–100");
@@ -697,16 +954,19 @@ pub fn fill(db: &str, run_id: i64, scores: &str, note: Option<&str>) -> Result<(
         let Some((item_id, _)) = items.iter().find(|(_, l)| *l == label) else {
             bail!("run #{run_id} 里没有标签 {label}");
         };
-        conn.execute(
-            "UPDATE judge_item SET human_score=?1, human_note=?2, status='done' WHERE id=?3",
-            params![score, note, item_id],
-        )?;
-        applied += 1;
+        ensure_review_can_replace(&tx, *item_id, &o.provenance)?;
+        validated.push((*item_id, score));
     }
+    let applied = validated.len();
     if applied == 0 {
         bail!("没有解析到任何分数");
     }
-    recompute(&conn, run_id)?;
+    let at = crate::now_iso();
+    for (item_id, score) in validated {
+        write_review(&tx, item_id, score, note, &o.provenance, &at)?;
+    }
+    recompute(&tx, run_id)?;
+    tx.commit()?;
 
     let mut stmt = conn.prepare(
         "SELECT label, pill_id, machine_total, human_score, final_total FROM judge_item WHERE run_id=?1 ORDER BY display_order",
@@ -717,10 +977,13 @@ pub fn fill(db: &str, run_id: i64, scores: &str, note: Option<&str>) -> Result<(
             Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    println!("已回填 {applied} 条，run #{run_id} 重算：");
+    println!(
+        "已回填 {applied} 条（source={}），run #{run_id} 重算：",
+        o.provenance.source.as_str()
+    );
     println!(
         "{:<6} {:<8} {:>8} {:>6} {:>8}",
-        "标签", "丹药", "机器分", "人工", "最终分"
+        "标签", "丹药", "机器分", "评分", "最终分"
     );
     for (label, pid, m, h, f) in rows {
         println!(
@@ -741,21 +1004,820 @@ pub fn fill(db: &str, run_id: i64, scores: &str, note: Option<&str>) -> Result<(
     Ok(())
 }
 
+#[allow(
+    dead_code,
+    reason = "保留兼容公开接口，默认 demo，绝不隐式创建真人评分"
+)]
 pub fn record(db: &str, item_id: i64, score: f64, note: Option<&str>) -> Result<()> {
-    if !(0.0..=100.0).contains(&score) {
-        bail!("人工分应在 0–100");
+    record_with_provenance(db, item_id, score, note, &ReviewProvenance::demo())
+}
+
+pub fn record_with_provenance(
+    db: &str,
+    item_id: i64,
+    score: f64,
+    note: Option<&str>,
+    provenance: &ReviewProvenance<'_>,
+) -> Result<()> {
+    provenance.validate()?;
+    if !score.is_finite() || !(0.0..=100.0).contains(&score) {
+        bail!("评分必须是 0–100 的有限数字");
     }
-    let conn = Connection::open(db)?;
-    let run_id: i64 = conn.query_row(
+    let mut conn = Connection::open(db)?;
+    conn.busy_timeout(Duration::from_secs(10))?;
+    let tx = conn.transaction()?;
+    let run_id: i64 = tx.query_row(
         "SELECT run_id FROM judge_item WHERE id=?1",
         params![item_id],
         |r| r.get(0),
     )?;
-    conn.execute(
-        "UPDATE judge_item SET human_score=?1, human_note=?2, status='done' WHERE id=?3",
-        params![score, note, item_id],
-    )?;
-    recompute(&conn, run_id)?;
-    println!("已记录 item #{item_id} 人工分 {score:.0}，run #{run_id} 已重算");
+    ensure_review_can_replace(&tx, item_id, provenance)?;
+    write_review(&tx, item_id, score, note, provenance, &crate::now_iso())?;
+    recompute(&tx, run_id)?;
+    tx.commit()?;
+    println!(
+        "已记录 item #{item_id} {} 分 {score:.0}，run #{run_id} 已重算",
+        provenance.source.as_str()
+    );
     Ok(())
+}
+
+fn ensure_review_can_replace(
+    conn: &Connection,
+    item_id: i64,
+    provenance: &ReviewProvenance<'_>,
+) -> Result<()> {
+    if provenance.source != ReviewSource::Human {
+        let accepted_human: bool = conn.query_row(
+            "SELECT human_score IS NOT NULL
+            AND human_source='human' AND length(trim(coalesce(human_reviewer,'')))>0
+            FROM judge_item WHERE id=?1",
+            [item_id],
+            |r| r.get(0),
+        )?;
+        if accepted_human {
+            bail!("item #{item_id} 已有真实 human 评分，拒绝用 ai/demo/legacy 覆盖；整批未写入");
+        }
+    }
+    Ok(())
+}
+
+fn write_review(
+    conn: &Connection,
+    item_id: i64,
+    score: f64,
+    note: Option<&str>,
+    provenance: &ReviewProvenance<'_>,
+    at: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE judge_item SET human_score=?1, human_note=?2, human_source=?3,
+             human_reviewer=?4, human_recorded_at=?5,
+             human_dimension=coalesce(?6,(SELECT json_extract(input_json,'$.dimension')
+                                          FROM judge_run WHERE id=judge_item.run_id)),
+             status=CASE WHEN ?3='human' THEN 'done'
+                         WHEN status='done' AND human_score IS NOT NULL THEN 'human_needed'
+                         ELSE status END WHERE id=?7",
+        params![
+            score,
+            note,
+            provenance.source.as_str(),
+            provenance.reviewer.map(str::trim),
+            at,
+            provenance.dimension.map(str::trim),
+            item_id
+        ],
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_DB: AtomicU64 = AtomicU64::new(0);
+
+    struct Fixture {
+        path: std::path::PathBuf,
+        conn: Connection,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            Self::with_provenance(true)
+        }
+
+        fn with_provenance(upgrade: bool) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "ie-judgment-test-{}-{}.sqlite",
+                std::process::id(),
+                NEXT_DB.fetch_add(1, Ordering::Relaxed)
+            ));
+            assert!(path.is_absolute());
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE schema_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 CREATE TABLE pill(id INTEGER PRIMARY KEY, output_json TEXT NOT NULL DEFAULT '{}',
+                     output_md TEXT NOT NULL DEFAULT '', score_json TEXT NOT NULL DEFAULT '{}');",
+            )
+            .unwrap();
+            conn.execute_batch(include_str!(
+                "../../../../docs/design/inspiration/migrations/012-judge-pipeline.sql"
+            ))
+            .unwrap();
+            conn.execute_batch(include_str!(
+                "../../../../docs/design/inspiration/migrations/020-judge-model.sql"
+            ))
+            .unwrap();
+            if upgrade {
+                conn.execute_batch(include_str!(
+                    "../../../../docs/design/inspiration/migrations/022-judgment-provenance.sql"
+                ))
+                .unwrap();
+            }
+            conn.execute_batch(
+                "INSERT INTO pill(id) VALUES(1),(2);
+                 INSERT INTO judge_run(id,status,stage,created_at,updated_at)
+                     VALUES(1,'awaiting_human','panel','before','before');
+                 INSERT INTO judge_item(id,run_id,pill_id,label,display_order,precheck,machine_total,status)
+                     VALUES(1,1,1,'A',0,0.8,80,'human_needed'),(2,1,2,'B',1,0.8,60,'human_needed');",
+            ).unwrap();
+            Self { path, conn }
+        }
+
+        fn db(&self) -> &str {
+            self.path.to_str().unwrap()
+        }
+
+        fn scored_items(&self) -> i64 {
+            self.conn
+                .query_row(
+                    "SELECT count(*) FROM judge_item WHERE human_score IS NOT NULL",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            // Only remove the exact isolated file created by this fixture, never a user database.
+            assert_eq!(self.path.parent(), Some(std::env::temp_dir().as_path()));
+            assert!(
+                self.path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("ie-judgment-test-")
+            );
+            std::fs::remove_file(&self.path).unwrap();
+        }
+    }
+
+    #[test]
+    fn models_display_distinguishes_legacy_small_and_trusted_calibrations() {
+        let f = Fixture::new();
+        f.conn.execute_batch("INSERT INTO judge_model(name,samples,agreements,weight,updated_at,calibration_source,calibration_trusted)
+            VALUES('legacy-judge',100,90,1.8,'fixture','legacy',0),
+                  ('small-judge',1,1,1.2,'fixture','human',0),
+                  ('trusted-judge',20,20,1.8,'fixture','human',1);").unwrap();
+        let text = models_text(f.db()).unwrap();
+        assert!(text.contains("legacy，不应用"), "{text}");
+        assert!(text.contains("human 少样本，不应用"), "{text}");
+        assert!(text.contains("可信 human 校准"), "{text}");
+    }
+
+    #[test]
+    fn reviews_keep_reviewer_timestamp_dimension_and_an_append_only_history() {
+        let f = Fixture::new();
+        f.conn
+            .execute(
+                "UPDATE judge_run SET input_json=?1 WHERE id=1",
+                [json!({"dimension":"hierarchy"}).to_string()],
+            )
+            .unwrap();
+        record_with_provenance(
+            f.db(),
+            1,
+            90.0,
+            Some("first"),
+            &ReviewProvenance {
+                source: ReviewSource::Human,
+                reviewer: Some(" fixture-reviewer "),
+                dimension: None,
+            },
+        )
+        .unwrap();
+        let first_screen = screen_text(f.db(), 1).unwrap();
+        assert!(
+            first_screen.contains("评分 90 [human]")
+                && first_screen.contains("reviewer=fixture-reviewer")
+        );
+        assert!(first_screen.contains("dimension=hierarchy") && !first_screen.contains("at=未知"));
+        record_with_provenance(
+            f.db(),
+            1,
+            88.0,
+            Some("second"),
+            &ReviewProvenance {
+                source: ReviewSource::Human,
+                reviewer: Some("fixture-reviewer"),
+                dimension: Some("restraint"),
+            },
+        )
+        .unwrap();
+        let reviews: Vec<(f64, String, String, String, String)> = f
+            .conn
+            .prepare(
+                "SELECT score,reviewer,recorded_at,dimension,note
+            FROM judge_review ORDER BY id",
+            )
+            .unwrap()
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(reviews.len(), 2);
+        assert_eq!(reviews[0].0, 90.0);
+        assert_eq!(reviews[0].1, "fixture-reviewer");
+        assert!(!reviews[0].2.is_empty());
+        assert_eq!(
+            (&reviews[0].3, &reviews[0].4),
+            (&"hierarchy".to_string(), &"first".to_string())
+        );
+        assert_eq!(reviews[1].0, 88.0);
+        assert_eq!(
+            (&reviews[1].3, &reviews[1].4),
+            (&"restraint".to_string(), &"second".to_string())
+        );
+    }
+
+    #[test]
+    fn explicit_human_reviews_require_a_nonblank_reviewer_before_writing() {
+        let f = Fixture::new();
+        for reviewer in [None, Some(""), Some("   "), Some("\u{2003}")] {
+            assert!(
+                fill_with_opts(&FillOpts {
+                    db: f.db(),
+                    run_id: 1,
+                    scores: "A=90,B=10",
+                    note: None,
+                    provenance: ReviewProvenance {
+                        source: ReviewSource::Human,
+                        reviewer,
+                        dimension: None
+                    },
+                })
+                .is_err()
+            );
+            assert!(
+                record_with_provenance(
+                    f.db(),
+                    1,
+                    90.0,
+                    None,
+                    &ReviewProvenance {
+                        source: ReviewSource::Human,
+                        reviewer,
+                        dimension: None,
+                    }
+                )
+                .is_err()
+            );
+        }
+        assert_eq!(f.scored_items(), 0);
+    }
+
+    #[test]
+    fn migration_preserves_all_old_scores_and_weights_as_unknown_legacy() {
+        let f = Fixture::with_provenance(false);
+        f.conn.execute("UPDATE judge_item SET human_score=73,human_note='unknown old review',status='done' WHERE id=1",[]).unwrap();
+        f.conn.execute("INSERT INTO judge_model(name,samples,agreements,weight,updated_at) VALUES('old-demo',100,99,1.9,'old')",[]).unwrap();
+        f.conn
+            .execute_batch(include_str!(
+                "../../../../docs/design/inspiration/migrations/022-judgment-provenance.sql"
+            ))
+            .unwrap();
+        let text = screen_text(f.db(), 1).unwrap();
+        assert!(
+            text.contains("评分 73 [legacy]") && text.contains("reviewer=未知 at=未知"),
+            "{text}"
+        );
+        let review: (f64, String, Option<String>, Option<String>) = f
+            .conn
+            .query_row(
+                "SELECT score,source,reviewer,recorded_at FROM judge_review",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(review, (73.0, "legacy".into(), None, None));
+        let archived: (f64, String, i64) = f
+            .conn
+            .query_row(
+                "SELECT weight,calibration_source,calibration_trusted FROM judge_model_history",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(archived, (1.9, "legacy".into(), 0));
+        assert_eq!(
+            crate::panel::calibrated_weight(&f.conn, "old-demo", 1.0).unwrap(),
+            1.0
+        );
+        let version: String = f
+            .conn
+            .query_row(
+                "SELECT value FROM schema_meta WHERE key='schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "23");
+    }
+
+    #[test]
+    fn trusted_calibration_is_applied_only_at_twenty_real_pairs() {
+        let f = Fixture::new();
+        let pairs = json!({"pairs":[{"i":"A","j":"B","votes":[["judge-one",1.0]]}]}).to_string();
+        for run in 1..=20 {
+            if run > 1 {
+                f.conn
+                    .execute(
+                        "INSERT INTO judge_run(id,status,stage,created_at,updated_at)
+                    VALUES(?1,'awaiting_human','panel','fixture','fixture')",
+                        [run],
+                    )
+                    .unwrap();
+                f.conn.execute("INSERT INTO judge_item(run_id,pill_id,label,display_order,precheck,machine_total,status)
+                    SELECT ?1,pill_id,label,display_order,precheck,machine_total,'human_needed'
+                    FROM judge_item WHERE run_id=1",[run]).unwrap();
+            }
+            f.conn
+                .execute(
+                    "UPDATE judge_run SET judge_json=?1 WHERE id=?2",
+                    params![pairs, run],
+                )
+                .unwrap();
+            fill_with_opts(&FillOpts {
+                db: f.db(),
+                run_id: run,
+                scores: "A=90,B=10",
+                note: None,
+                provenance: ReviewProvenance {
+                    source: ReviewSource::Human,
+                    reviewer: Some("fixture-reviewer"),
+                    dimension: None,
+                },
+            })
+            .unwrap();
+            if run == 19 {
+                calibrate(f.db()).unwrap();
+                assert_eq!(
+                    crate::panel::calibrated_weight(&f.conn, "judge-one", 1.0).unwrap(),
+                    1.0
+                );
+            }
+        }
+        calibrate(f.db()).unwrap();
+        let row: (i64, i64, String, i64) = f
+            .conn
+            .query_row(
+                "SELECT samples,agreements,calibration_source,calibration_trusted
+            FROM judge_model WHERE name='judge-one'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(row, (20, 20, "human".into(), 1));
+        assert!(crate::panel::calibrated_weight(&f.conn, "judge-one", 1.0).unwrap() > 1.0);
+    }
+
+    #[test]
+    fn panel_never_loads_legacy_weights_even_with_many_samples() {
+        let f = Fixture::new();
+        f.conn.execute("INSERT INTO judge_model(name,samples,agreements,weight,updated_at) VALUES('old-demo',100,99,1.9,'old')",[]).unwrap();
+        assert_eq!(
+            crate::panel::calibrated_weight(&f.conn, "old-demo", 0.75).unwrap(),
+            0.75
+        );
+        f.conn
+            .execute(
+                "UPDATE judge_model SET calibration_trusted=1 WHERE name='old-demo'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            crate::panel::calibrated_weight(&f.conn, "old-demo", 0.75).unwrap(),
+            0.75,
+            "the source guard is required independently of the trusted flag"
+        );
+    }
+
+    #[test]
+    fn untrusted_batches_cannot_replace_accepted_human_reviews() {
+        for source in [ReviewSource::Demo, ReviewSource::Ai, ReviewSource::Legacy] {
+            let f = Fixture::new();
+            record_with_provenance(
+                f.db(),
+                1,
+                90.0,
+                None,
+                &ReviewProvenance {
+                    source: ReviewSource::Human,
+                    reviewer: Some("fixture-reviewer"),
+                    dimension: None,
+                },
+            )
+            .unwrap();
+            let before = screen_text(f.db(), 1).unwrap();
+            assert!(
+                fill_with_opts(&FillOpts {
+                    db: f.db(),
+                    run_id: 1,
+                    scores: "B=60,A=30",
+                    note: None,
+                    provenance: ReviewProvenance {
+                        source,
+                        reviewer: None,
+                        dimension: None
+                    },
+                })
+                .is_err(),
+                "{source:?} must not replace accepted human review"
+            );
+            assert!(
+                record_with_provenance(
+                    f.db(),
+                    1,
+                    30.0,
+                    None,
+                    &ReviewProvenance {
+                        source,
+                        reviewer: None,
+                        dimension: None,
+                    }
+                )
+                .is_err()
+            );
+            assert_eq!(screen_text(f.db(), 1).unwrap(), before);
+            assert_eq!(
+                f.scored_items(),
+                1,
+                "the earlier valid B must also remain unwritten"
+            );
+        }
+    }
+
+    #[test]
+    fn all_invalid_scores_are_rejected_before_any_persistent_change() {
+        let f = Fixture::new();
+        let before = screen_text(f.db(), 1).unwrap();
+        for scores in [
+            "A=90,B=NaN",
+            "A=90,B=inf",
+            "A=90,B=-inf",
+            "A=90,B=101",
+            "A=90,B=-1",
+            "A=90,B=oops",
+            "A=90,Z=70",
+            "A=90,broken",
+            "A=90,a=10",
+            " , ; ",
+        ] {
+            assert!(fill(f.db(), 1, scores, None).is_err(), "accepted {scores}");
+            assert_eq!(
+                screen_text(f.db(), 1).unwrap(),
+                before,
+                "changed after {scores}"
+            );
+        }
+        for score in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0, 101.0] {
+            assert!(record(f.db(), 1, score, None).is_err());
+        }
+        assert_eq!(f.scored_items(), 0);
+        let reviews: i64 = f
+            .conn
+            .query_row("SELECT count(*) FROM judge_review", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(reviews, 0);
+    }
+
+    #[test]
+    fn recompute_failure_rolls_back_scores_queue_finals_and_audit_for_fill_and_record() {
+        for batch in [true, false] {
+            let f = Fixture::new();
+            f.conn.execute_batch("CREATE TRIGGER fixture_recompute_failure BEFORE UPDATE OF final_json ON judge_run
+                BEGIN SELECT RAISE(ABORT,'fixture recompute failure'); END;").unwrap();
+            let before = screen_text(f.db(), 1).unwrap();
+            let provenance = ReviewProvenance {
+                source: ReviewSource::Human,
+                reviewer: Some("fixture-reviewer"),
+                dimension: None,
+            };
+            let result = if batch {
+                fill_with_opts(&FillOpts {
+                    db: f.db(),
+                    run_id: 1,
+                    scores: "A=90,B=10",
+                    note: None,
+                    provenance,
+                })
+            } else {
+                record_with_provenance(f.db(), 1, 90.0, None, &provenance)
+            };
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("fixture recompute failure")
+            );
+            assert_eq!(screen_text(f.db(), 1).unwrap(), before);
+            assert_eq!(f.scored_items(), 0);
+            let (finals, reviews): (i64, i64) = f
+                .conn
+                .query_row(
+                    "SELECT
+                (SELECT count(*) FROM judge_item WHERE final_total IS NOT NULL),
+                (SELECT count(*) FROM judge_review)",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!((finals, reviews), (0, 0));
+        }
+    }
+
+    #[test]
+    fn run_input_snapshots_keep_dimension_and_model_configuration() {
+        let input = input_metadata(&RunOpts {
+            db: "unused",
+            pills: vec![1, 2],
+            provider: "fixture",
+            model: "fixture-model",
+            base_url: "unused",
+            thinking: 0,
+            seed: 7,
+            repeats: 3,
+            dimension: "hierarchy".into(),
+            rpm: 0,
+        });
+        assert_eq!(input["dimension"], "hierarchy");
+        assert_eq!(input["provider"], "fixture");
+        assert_eq!(input["model"], "fixture-model");
+        assert_eq!(input["repeats"], 3);
+        let panel = crate::panel::input_metadata(
+            &crate::panel::PanelOpts {
+                db: "unused",
+                pills: vec![1, 2],
+                judges: vec!["judge-one".into()],
+                cfg_path: std::path::Path::new("unused"),
+                repeats: 4,
+                dimension: "restraint".into(),
+                seed: 9,
+            },
+            vec![
+                json!({"name":"judge-one","provider":"fixture","model":"fixture-model","weight":1.0}),
+            ],
+        );
+        assert_eq!(panel["dimension"], "restraint");
+        assert_eq!(panel["repeats"], 4);
+        assert_eq!(panel["judge_configs"][0]["provider"], "fixture");
+        assert_eq!(panel["judge_configs"][0]["model"], "fixture-model");
+    }
+
+    #[test]
+    fn screen_labels_demo_scores_instead_of_presenting_them_as_human() {
+        let f = Fixture::new();
+        record(f.db(), 1, 90.0, None).unwrap();
+        let text = screen_text(f.db(), 1).unwrap();
+        assert!(
+            text.contains("评分 90 [demo]"),
+            "provenance must be visible: {text}"
+        );
+        assert!(
+            !text.contains("人工 90"),
+            "demo must never be labeled as human"
+        );
+    }
+
+    #[test]
+    fn screen_renders_panel_combined_votes_and_disagreement() {
+        let f = Fixture::new();
+        f.conn.execute("UPDATE judge_run SET judge_json=?1 WHERE id=1", [json!({"pairs":[
+            {"i":"A","j":"B","combined":0.75,"votes":[["judge-one",1.0],["judge-two",0.0]],"disputed":true}
+        ]}).to_string()]).unwrap();
+        let text = screen_text(f.db(), 1).unwrap();
+        assert!(
+            text.contains("A vs B → A"),
+            "combined must not be rendered as a tie: {text}"
+        );
+        assert!(
+            text.contains("judge-one=1.00") && text.contains("judge-two=0.00"),
+            "{text}"
+        );
+        assert!(text.contains("裁判分歧"), "{text}");
+    }
+
+    #[test]
+    fn untrusted_reviews_do_not_change_final_scores_or_complete_human_queue() {
+        for source in [ReviewSource::Demo, ReviewSource::Ai, ReviewSource::Legacy] {
+            let f = Fixture::new();
+            fill_with_opts(&FillOpts {
+                db: f.db(),
+                run_id: 1,
+                scores: "A=90,B=10",
+                note: None,
+                provenance: ReviewProvenance {
+                    source,
+                    reviewer: Some("not-a-human"),
+                    dimension: None,
+                },
+            })
+            .unwrap();
+            let text = screen_text(f.db(), 1).unwrap();
+            assert!(
+                text.contains("awaiting_human"),
+                "{source:?} cannot complete a real review queue: {text}"
+            );
+            let final_a: f64 = f
+                .conn
+                .query_row("SELECT final_total FROM judge_item WHERE id=1", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(
+                final_a, 80.0,
+                "{source:?} must not be blended into final production scores"
+            );
+        }
+    }
+
+    #[test]
+    fn real_reviews_are_counted_but_small_calibrations_are_not_applied() {
+        let f = Fixture::new();
+        f.conn
+            .execute(
+                "UPDATE judge_run SET judge_json=?1 WHERE id=1",
+                [json!({"pairs":[{"i":"A","j":"B","votes":[["judge-one",1.0]]}]}).to_string()],
+            )
+            .unwrap();
+        fill_with_opts(&FillOpts {
+            db: f.db(),
+            run_id: 1,
+            scores: "A=90,B=10",
+            note: None,
+            provenance: ReviewProvenance {
+                source: ReviewSource::Human,
+                reviewer: Some("fixture-reviewer"),
+                dimension: None,
+            },
+        })
+        .unwrap();
+        calibrate(f.db()).unwrap();
+        let (n, agreements, proposed): (i64, i64, f64) = f
+            .conn
+            .query_row(
+                "SELECT samples,agreements,weight FROM judge_model WHERE name='judge-one'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((n, agreements), (1, 1));
+        assert!(proposed > 1.0, "small-sample statistics remain visible");
+        assert_eq!(
+            crate::panel::calibrated_weight(&f.conn, "judge-one", 1.0).unwrap(),
+            1.0,
+            "fewer than 20 paired comparisons must not change panel weights"
+        );
+        let source: String = f
+            .conn
+            .query_row(
+                "SELECT calibration_source FROM judge_model WHERE name='judge-one'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(source, "human");
+    }
+
+    #[test]
+    fn calibration_without_samples_resets_current_weights_but_preserves_history() {
+        let f = Fixture::new();
+        f.conn.execute("INSERT INTO judge_model(name,samples,agreements,weight,updated_at) VALUES('old-demo',90,89,1.9,'old')", []).unwrap();
+        calibrate(f.db()).unwrap();
+        let current: (i64, f64, i64) = f
+            .conn
+            .query_row(
+                "SELECT samples,weight,calibration_trusted FROM judge_model WHERE name='old-demo'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            current,
+            (0, 1.0, 0),
+            "no real samples must not leave stale weights active"
+        );
+        let archived: f64 = f
+            .conn
+            .query_row(
+                "SELECT weight FROM judge_model_history WHERE name='old-demo' ORDER BY id LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(archived, 1.9);
+    }
+
+    #[test]
+    fn calibration_requires_the_same_reviewer_for_a_pair() {
+        let f = Fixture::new();
+        f.conn
+            .execute(
+                "UPDATE judge_run SET judge_json=?1 WHERE id=1",
+                [json!({"pairs":[{"i":"A","j":"B","votes":[["judge-one",1.0]]}]}).to_string()],
+            )
+            .unwrap();
+        for (item, score, reviewer) in [(1, 90.0, "reviewer-one"), (2, 10.0, "reviewer-two")] {
+            record_with_provenance(
+                f.db(),
+                item,
+                score,
+                None,
+                &ReviewProvenance {
+                    source: ReviewSource::Human,
+                    reviewer: Some(reviewer),
+                    dimension: None,
+                },
+            )
+            .unwrap();
+        }
+        calibrate(f.db()).unwrap();
+        let samples: i64 = f
+            .conn
+            .query_row(
+                "SELECT coalesce(sum(samples),0) FROM judge_model",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            samples, 0,
+            "different reviewers are not a paired comparison"
+        );
+    }
+
+    #[test]
+    fn calibration_excludes_demo_and_legacy_scores() {
+        let f = Fixture::new();
+        f.conn
+            .execute(
+                "UPDATE judge_run SET judge_json=?1 WHERE id=1",
+                [
+                    json!({"pairs":[{"i":"A","j":"B","votes":[["judge-one",1.0]],"combined":1.0}]})
+                        .to_string(),
+                ],
+            )
+            .unwrap();
+        f.conn
+            .execute("UPDATE judge_item SET human_score=10 WHERE id=2", [])
+            .unwrap();
+        record(f.db(), 1, 90.0, Some("demo, not a human review")).unwrap();
+        calibrate(f.db()).unwrap();
+        let samples: i64 = f
+            .conn
+            .query_row(
+                "SELECT coalesce(sum(samples),0) FROM judge_model",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            samples, 0,
+            "neither demo nor unknown legacy scores may train real weights"
+        );
+    }
+
+    #[test]
+    fn fill_rejects_duplicate_labels_without_writing() {
+        let f = Fixture::new();
+        assert!(fill(f.db(), 1, "A=82,a=70", None).is_err());
+        assert_eq!(f.scored_items(), 0);
+    }
+
+    #[test]
+    fn fill_rejects_invalid_later_item_without_partial_write() {
+        let f = Fixture::new();
+        assert!(fill(f.db(), 1, "A=82,B=101", None).is_err());
+        assert_eq!(
+            f.scored_items(),
+            0,
+            "the entire batch must remain unchanged"
+        );
+    }
 }

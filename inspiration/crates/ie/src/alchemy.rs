@@ -1,7 +1,7 @@
 //! 炼丹 D0：炼药（refine）与背包（bag）。
 //!
 //! 药材 = work；手法 = technique 表里的模板；药液 = extract；背包 = inventory。
-//! 药液按 (work, technique, dimension, fire_model) 唯一，重复炼不会产生副本。
+//! 药液是不可变版本；相同输入可复用，改版或 refresh 只产生新版本。
 
 use anyhow::{Context, Result, bail};
 use base64::Engine;
@@ -49,10 +49,16 @@ struct Technique {
     dimension: String,
     prompt: String,
     params: String,
+    schema: Option<String>,
     version: String,
 }
 
 pub fn refine(o: &RefineOpts<'_>) -> Result<()> {
+    refine_selected(o).map(|_| ())
+}
+
+/// Return only bottles actually produced/reused by this invocation, never max(id).
+fn refine_selected(o: &RefineOpts<'_>) -> Result<Vec<i64>> {
     let conn = Connection::open(o.db)?;
     conn.busy_timeout(Duration::from_secs(10))?;
     let (asset_path, title, _collection): (String, String, String) = conn
@@ -71,13 +77,14 @@ pub fn refine(o: &RefineOpts<'_>) -> Result<()> {
             |r| r.get(0),
         )
         .unwrap_or_default();
+    let asset_hash = hash_bytes(&std::fs::read(&path)?);
     let m = metrics::compute(&path)?;
 
     let mut techniques = Vec::new();
     for key in &o.techniques {
         let t = conn
             .query_row(
-                "SELECT id,key,title,dimension,prompt_template,params_json,version FROM technique WHERE key=?1 AND status='active'",
+                "SELECT id,key,title,dimension,prompt_template,params_json,version,schema_json FROM technique WHERE key=?1 AND status='active'",
                 params![key],
                 |r| {
                     Ok(Technique {
@@ -88,6 +95,7 @@ pub fn refine(o: &RefineOpts<'_>) -> Result<()> {
                         prompt: r.get(4)?,
                         params: r.get(5)?,
                         version: r.get(6)?,
+                        schema: r.get(7)?,
                     })
                 },
             )
@@ -95,49 +103,66 @@ pub fn refine(o: &RefineOpts<'_>) -> Result<()> {
         techniques.push(t);
     }
 
-    // 只有需要模型的手法才要求密钥
-    let needs_llm = techniques
-        .iter()
-        .any(|t| !t.params.contains("\"kind\":\"pixel\""));
-    let key = if !needs_llm {
-        String::new()
-    } else if o.provider == "openai" {
-        std::env::var("IE_API_KEY").unwrap_or_default()
-    } else {
-        std::env::var("GEMINI_API_KEY").context("缺少 GEMINI_API_KEY")?
-    };
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(180))
         .build()?;
 
     let now = crate::now_iso();
+    let mut selected = Vec::new();
     for t in &techniques {
-        let fire_hint = if t.params.contains("\"kind\":\"pixel\"") {
-            "pixel-proxy".to_string()
+        let pixel = serde_json::from_str::<serde_json::Value>(&t.params)
+            .context("手法 params_json 不是合法 JSON")?["kind"]
+            == "pixel";
+        let execution = if pixel {
+            serde_json::json!({"kind":"pixel", "implementation":"pixel-proxy-v2"})
         } else {
-            o.model.to_string()
+            serde_json::json!({
+                "provider":o.provider, "model":o.model,
+                "endpoint_sha256":hash_of(o.base_url.trim_end_matches('/')),
+                "thinking":o.thinking, "temperature":0.2, "max_output_tokens":2048,
+                "image_preparation":"prepare_image-v1", "request_contract":"refine-v2"
+            })
         };
+        let inputs = serde_json::json!({
+            "work_id":o.work, "domain":work_domain, "asset_sha256":asset_hash,
+            "technique": {"id":t.id, "key":t.key, "version":t.version,
+                "dimension":t.dimension, "prompt":t.prompt,
+                "params_json":t.params, "schema_json":t.schema},
+            "execution":execution
+        });
+        let fingerprint = hash_of(&inputs.to_string());
+        let fire_hint = if pixel { "pixel-proxy" } else { o.model };
+        let lineage =
+            hash_of(&serde_json::json!([o.work, t.id, t.dimension, fire_hint]).to_string());
         if !o.refresh
             && let Ok((eid, q)) = conn.query_row(
-                "SELECT id, quality FROM extract
-             WHERE work_id=?1 AND technique_id=?2 AND dimension=?3 AND fire_model=?4",
-                params![o.work, t.id, t.dimension, fire_hint],
+                "SELECT id, quality FROM extract WHERE input_fingerprint=?1
+                 ORDER BY id DESC LIMIT 1",
+                params![fingerprint],
                 |r| Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?)),
             )
         {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute(
+                "INSERT INTO extract_head(lineage_key,extract_id) VALUES(?1,?2)
+                        ON CONFLICT(lineage_key) DO UPDATE SET extract_id=excluded.extract_id",
+                params![lineage, eid],
+            )?;
             if o.to_bag {
-                conn.execute(
+                tx.execute(
                     "INSERT OR IGNORE INTO inventory(extract_id,added_at) VALUES(?1,?2)",
                     params![eid, now],
                 )?;
             }
+            tx.commit()?;
+            selected.push(eid);
             println!(
                 "  · {}「{}」已有同火候药液 #{}（质量 {:.2}），复用",
                 t.key, t.title, eid, q
             );
             continue;
         }
-        let (content, fire) = if t.params.contains("\"kind\":\"pixel\"") {
+        let (content, fire) = if pixel {
             let content = if t.dimension == "spacing" {
                 spacing_extract(&m, &work_domain)
             } else {
@@ -148,6 +173,12 @@ pub fn refine(o: &RefineOpts<'_>) -> Result<()> {
             let bytes = prepare_image(&path)?;
             let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
             let body = request_body(o.provider, &t.prompt, &b64, o.model, o.thinking);
+            // A warm cache does not need credentials or an API call.
+            let key = if o.provider == "openai" {
+                std::env::var("IE_API_KEY").unwrap_or_default()
+            } else {
+                std::env::var("GEMINI_API_KEY").context("缺少 GEMINI_API_KEY")?
+            };
             let outcome = if o.provider == "openai" {
                 call_openai(&client, o.base_url, &key, &body)
             } else {
@@ -183,17 +214,20 @@ pub fn refine(o: &RefineOpts<'_>) -> Result<()> {
             continue;
         }
 
-        let hash = hash_of(&format!(
-            "{}|{}|{}|{}|{}",
-            o.work, t.key, t.version, fire, content
-        ));
+        if hash_bytes(&std::fs::read(&path)?) != asset_hash {
+            bail!("炼制期间素材内容变化，请重新 refine");
+        }
+        let hash = hash_of(&content.to_string());
         let tx = conn.unchecked_transaction()?;
+        let revision: i64 = tx.query_row(
+            "SELECT coalesce(max(revision),0)+1 FROM extract
+             WHERE work_id=?1 AND technique_id=?2 AND dimension=?3 AND fire_model=?4",
+            params![o.work, t.id, t.dimension, fire],
+            |r| r.get(0),
+        )?;
         tx.execute(
-            "INSERT INTO extract(work_id,technique_id,dimension,content_json,content_md,quality,fire_model,hash,created_at,technique_version)
-             VALUES(?1,?2,?3,?4,NULL,?5,?6,?7,?8,?9)
-             ON CONFLICT(work_id,technique_id,dimension,fire_model) DO UPDATE SET
-               content_json=excluded.content_json, quality=excluded.quality,
-               hash=excluded.hash, created_at=excluded.created_at",
+            "INSERT INTO extract(work_id,technique_id,dimension,content_json,content_md,quality,fire_model,hash,created_at,technique_version,input_fingerprint,input_json,revision)
+             VALUES(?1,?2,?3,?4,NULL,?5,?6,?7,?8,?9,?10,?11,?12)",
             params![
                 o.work,
                 t.id,
@@ -203,13 +237,17 @@ pub fn refine(o: &RefineOpts<'_>) -> Result<()> {
                 fire,
                 hash,
                 now,
-                t.version
+                t.version,
+                fingerprint,
+                inputs.to_string(),
+                revision
             ],
         )?;
-        let eid: i64 = tx.query_row(
-            "SELECT id FROM extract WHERE work_id=?1 AND technique_id=?2 AND dimension=?3 AND fire_model=?4",
-            params![o.work, t.id, t.dimension, fire],
-            |r| r.get(0),
+        let eid = tx.last_insert_rowid();
+        tx.execute(
+            "INSERT INTO extract_head(lineage_key,extract_id) VALUES(?1,?2)
+                    ON CONFLICT(lineage_key) DO UPDATE SET extract_id=excluded.extract_id",
+            params![lineage, eid],
         )?;
         if o.to_bag {
             tx.execute(
@@ -218,6 +256,7 @@ pub fn refine(o: &RefineOpts<'_>) -> Result<()> {
             )?;
         }
         tx.commit()?;
+        selected.push(eid);
         println!(
             "  ✓ {}「{}」{} 质量 {:.2} 火候 {} → 药液 #{}",
             t.key, t.title, t.dimension, quality, fire, eid
@@ -230,7 +269,7 @@ pub fn refine(o: &RefineOpts<'_>) -> Result<()> {
         techniques.len(),
         if o.to_bag { "，已入背包" } else { "" }
     );
-    Ok(())
+    Ok(selected)
 }
 
 fn request_body(
@@ -486,7 +525,7 @@ pub fn brew(o: &BrewOpts<'_>) -> Result<()> {
         // 取候选（最多 20 瓶），palette 先按配方的对比度约束过滤，再按质量排
         let mut stmt = conn.prepare(
             "SELECT e.id, e.quality, e.fire_model, coalesce(w.title,'?'), e.content_json
-             FROM inventory i JOIN extract e ON e.id=i.extract_id
+             FROM inventory i JOIN v_extract_head e ON e.id=i.extract_id
              LEFT JOIN work w ON w.id=e.work_id
              WHERE e.dimension=?1 ORDER BY e.quality DESC, e.id DESC LIMIT 20",
         )?;
@@ -776,15 +815,40 @@ pub fn brew(o: &BrewOpts<'_>) -> Result<()> {
     }
 
     let now = crate::now_iso();
+    type ExtractSnapshotRow = (
+        Option<String>,
+        i64,
+        String,
+        Option<String>,
+        Option<String>,
+        i64,
+        Option<i64>,
+    );
+    let snapshots = picked.iter().map(|p| -> Result<serde_json::Value> {
+        let (technique_version, revision, hash, fingerprint, inputs, technique_id, work_id):
+            ExtractSnapshotRow = conn.query_row(
+                "SELECT technique_version,revision,hash,input_fingerprint,input_json,technique_id,work_id
+                 FROM extract WHERE id=?1", params![p.extract_id],
+                |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?)),
+            )?;
+        Ok(serde_json::json!({
+            "slot":p.slot, "dimension":p.dimension, "ratio":p.ratio, "polarity":p.polarity,
+            "extract_id":p.extract_id, "extract_revision":revision,
+            "technique_id":technique_id, "technique_version":technique_version, "work_id":work_id,
+            "material":p.material, "quality":p.quality, "fire":p.fire,
+            "content":p.content, "hash":hash, "content_hash":hash_of(&p.content.to_string()),
+            "input_fingerprint":fingerprint,
+            "inputs":inputs.map(|s| serde_json::from_str::<serde_json::Value>(&s)).transpose()?
+        }))
+    }).collect::<Result<Vec<_>>>()?;
     let output_json = serde_json::json!({
-        "recipe": key,
-        "components": picked.iter().map(|p| serde_json::json!({
-            "slot": p.slot, "dimension": p.dimension, "ratio": p.ratio,
-            "extract_id": p.extract_id, "material": p.material, "quality": p.quality, "fire": p.fire
-        })).collect::<Vec<_>>(),
-        "conflicts": conflicts,
-        "spec_issues": issues,
-        "prompt": rendered,
+        "snapshot_version":1,
+        "provenance":{"source":"pill_snapshot", "historically_reproducible":true},
+        "recipe":key, "recipe_definition":r,
+        "components":snapshots,
+        "conflicts":conflicts,
+        "spec_issues":issues,
+        "prompt":rendered,
     });
     conn.execute(
         "INSERT INTO pill(formula_id,recipe_id,output_md,output_json,score_json,cost_json,created_at)
@@ -931,6 +995,7 @@ pub fn refine_video(o: &MotionOpts<'_>) -> Result<()> {
     if !o.video.exists() {
         bail!("找不到视频 {}", o.video.display());
     }
+    let asset_hash = hash_bytes(&std::fs::read(o.video)?);
     let dur_out = std::process::Command::new("ffprobe")
         .args([
             "-v",
@@ -974,17 +1039,19 @@ pub fn refine_video(o: &MotionOpts<'_>) -> Result<()> {
 
     let conn = Connection::open(o.db)?;
     let t = conn.query_row(
-        "SELECT id, version, prompt_template FROM technique WHERE key='t.motion'",
+        "SELECT id, version, prompt_template,params_json,schema_json FROM technique WHERE key='t.motion' AND status='active'",
         [],
         |r| {
             Ok((
                 r.get::<_, i64>(0)?,
                 r.get::<_, String>(1)?,
                 r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, Option<String>>(4)?,
             ))
         },
     )?;
-    let (tid, tver, prompt) = t;
+    let (tid, tver, prompt, technique_params, schema) = t;
 
     let key = if o.provider == "openai" {
         std::env::var("IE_API_KEY").unwrap_or_default()
@@ -1029,23 +1096,44 @@ pub fn refine_video(o: &MotionOpts<'_>) -> Result<()> {
         CallOutcome::Failed(e) => bail!("调用失败：{e}"),
     };
     let quality = json["confidence"].as_f64().unwrap_or(0.55).clamp(0.0, 1.0) as f32;
-    let hash = hash_of(&format!(
-        "{}|t.motion|{}|{}|{}",
-        o.video.display(),
-        tver,
-        o.model,
-        json
-    ));
-    conn.execute(
-        "INSERT INTO extract(work_id,technique_id,dimension,content_json,content_md,quality,fire_model,hash,created_at,technique_version)
-         VALUES(NULL,?1,'motion',?2,NULL,?3,?4,?5,?6,?7)",
-        params![tid, json.to_string(), quality, o.model, hash, crate::now_iso(), tver],
+    if hash_bytes(&std::fs::read(o.video)?) != asset_hash {
+        bail!("炼制期间视频内容变化，请重新 refine-video");
+    }
+    let hash = hash_of(&json.to_string());
+    let inputs = serde_json::json!({
+        "asset_sha256":asset_hash,
+        "technique":{"id":tid,"key":"t.motion","version":tver,"dimension":"motion",
+            "prompt":prompt,"params_json":technique_params,"schema_json":schema},
+        "execution":{"provider":o.provider,"model":o.model,"thinking":o.thinking,
+            "endpoint_sha256":hash_of(o.base_url.trim_end_matches('/')),
+            "sampling":[0.1,0.5,0.9],"request_contract":"refine-video-v2"}
+    });
+    let fingerprint = hash_of(&inputs.to_string());
+    let lineage =
+        hash_of(&serde_json::json!(["video", o.video.to_string_lossy(), tid, o.model]).to_string());
+    let tx = conn.unchecked_transaction()?;
+    let revision: i64 = tx.query_row(
+        "SELECT coalesce(max(e.revision),0)+1 FROM extract e
+         JOIN extract_head h ON h.extract_id=e.id WHERE h.lineage_key=?1",
+        params![lineage],
+        |r| r.get(0),
     )?;
-    let eid = conn.last_insert_rowid();
-    conn.execute(
+    tx.execute(
+        "INSERT INTO extract(work_id,technique_id,dimension,content_json,content_md,quality,fire_model,hash,created_at,technique_version,input_fingerprint,input_json,revision)
+         VALUES(NULL,?1,'motion',?2,NULL,?3,?4,?5,?6,?7,?8,?9,?10)",
+        params![tid,json.to_string(),quality,o.model,hash,crate::now_iso(),tver,fingerprint,inputs.to_string(),revision],
+    )?;
+    let eid = tx.last_insert_rowid();
+    tx.execute(
+        "INSERT INTO extract_head(lineage_key,extract_id) VALUES(?1,?2)
+                ON CONFLICT(lineage_key) DO UPDATE SET extract_id=excluded.extract_id",
+        params![lineage, eid],
+    )?;
+    tx.execute(
         "INSERT OR IGNORE INTO inventory(extract_id,added_at) VALUES(?1,?2)",
         params![eid, crate::now_iso()],
     )?;
+    tx.commit()?;
     println!(
         "  ✓ t.motion「观动」motion 质量 {quality:.2} 火候 {} → 药液 #{eid}",
         o.model
@@ -1097,7 +1185,7 @@ pub fn formula_run(o: &FormulaOpts<'_>) -> Result<()> {
             "refine" => {
                 let work = step["material"].as_i64().context("refine 缺 material")?;
                 let technique = step["technique"].as_str().context("refine 缺 technique")?;
-                refine(&RefineOpts {
+                let selected = refine_selected(&RefineOpts {
                     db: o.db,
                     root: o.root,
                     work,
@@ -1109,19 +1197,7 @@ pub fn formula_run(o: &FormulaOpts<'_>) -> Result<()> {
                     to_bag: true,
                     refresh: false,
                 })?;
-                let tid: i64 = conn.query_row(
-                    "SELECT id FROM technique WHERE key=?1",
-                    params![technique],
-                    |r| r.get(0),
-                )?;
-                let eid: Option<i64> = conn
-                    .query_row(
-                        "SELECT id FROM extract WHERE work_id=?1 AND technique_id=?2 ORDER BY id DESC LIMIT 1",
-                        params![work, tid],
-                        |r| r.get(0),
-                    )
-                    .ok();
-                if let Some(eid) = eid {
+                if let Some(eid) = selected.first().copied() {
                     produced.insert(sid.to_string(), eid);
                 } else {
                     println!(
@@ -1191,25 +1267,41 @@ pub fn score_pill(conn: &Connection, pill_id: i64) -> Result<serde_json::Value> 
     let conflicts = out["conflicts"].as_array().cloned().unwrap_or_default();
     let prompt = out["prompt"].as_str().unwrap_or("");
 
-    // 必需槽位是否齐全
-    let (mut req_total, mut req_have) = (0usize, 0usize);
-    if let Some(rid) = recipe_id {
+    // 新丹药只依赖冻结配方；旧丹药的兼容评分不冒充历史快照。
+    let req: Vec<(String, String)> = if out["snapshot_version"] == 1 {
+        out["recipe_definition"]["components"]
+            .as_array()
+            .context("丹药快照缺配方组件")?
+            .iter()
+            .filter(|c| c["required"].as_bool().unwrap_or(true))
+            .map(|c| {
+                Ok((
+                    c["slot"].as_str().unwrap_or("base").to_string(),
+                    c["dimension"]
+                        .as_str()
+                        .context("快照组件缺dimension")?
+                        .to_string(),
+                ))
+            })
+            .collect::<Result<_>>()?
+    } else if let Some(rid) = recipe_id {
         let mut stmt = conn.prepare(
             "SELECT slot, dimension FROM recipe_component WHERE recipe_id=?1 AND required=1",
         )?;
-        let req: Vec<(String, String)> = stmt
-            .query_map(params![rid], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        req_total = req.len();
-        for (slot, dim) in &req {
-            if comps
+        stmt.query_map(params![rid], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?
+    } else {
+        Vec::new()
+    };
+    let req_total = req.len();
+    let req_have = req
+        .iter()
+        .filter(|(slot, dim)| {
+            comps
                 .iter()
                 .any(|c| c["slot"] == *slot && c["dimension"] == *dim)
-            {
-                req_have += 1;
-            }
-        }
-    }
+        })
+        .count();
     let completeness = if req_total == 0 {
         1.0
     } else {
@@ -1381,10 +1473,12 @@ fn stringify(v: &serde_json::Value) -> String {
 }
 
 fn hash_of(s: &str) -> String {
+    hash_bytes(s.as_bytes())
+}
+
+fn hash_bytes(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(s.as_bytes());
-    format!("{:x}", h.finalize())
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 fn truncate(s: &str, n: usize) -> String {
@@ -1393,5 +1487,485 @@ fn truncate(s: &str, n: usize) -> String {
         s.to_string()
     } else {
         format!("{}…", chars[..n].iter().collect::<String>())
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    pub(crate) struct Fixture {
+        pub root: PathBuf,
+        pub db: String,
+    }
+
+    impl Fixture {
+        pub(crate) fn new() -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let root = std::env::temp_dir().join(format!(
+                "ie-immutable-{}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+                NEXT.fetch_add(1, Ordering::Relaxed),
+            ));
+            std::fs::create_dir_all(&root).unwrap();
+            let db = root.join("fixture.sqlite").to_str().unwrap().to_string();
+            let mut conn = Connection::open(&db).unwrap();
+            crate::db::migrate(&mut conn).unwrap();
+            conn.execute_batch(
+                "INSERT INTO pack(id,title,version) VALUES('fixture','fixture','1');
+                 INSERT INTO domain(id,title,medium,pack_id) VALUES('fixture','fixture','image','fixture');
+                 INSERT INTO source(id,kind,title,created_at) VALUES('fixture','manual','fixture','now');
+                 INSERT INTO work(id,source_id,domain_id,collection,slug,canonical_url,title,first_seen_at,last_seen_at)
+                 VALUES(1,'fixture','fixture','fixture','fixture','local:fixture','fixture','now','now');
+                 INSERT INTO asset(id,work_id,role,local_path) VALUES(1,1,'screenshot','asset.png');
+                 INSERT INTO technique(id,key,title,dimension,prompt_template,params_json,schema_json,version,created_at)
+                 VALUES(9001,'test.palette','test palette','palette','palette contract','{\"kind\":\"pixel\"}','{}','1','now');"
+            ).unwrap();
+            let f = Self { root, db };
+            f.image([255, 255, 255]);
+            f
+        }
+
+        pub(crate) fn conn(&self) -> Connection {
+            let conn = Connection::open(&self.db).unwrap();
+            conn.execute_batch("PRAGMA foreign_keys=ON").unwrap();
+            conn
+        }
+
+        pub(crate) fn image(&self, color: [u8; 3]) {
+            let img = image::RgbImage::from_fn(32, 32, |x, _| {
+                image::Rgb(if x < 8 { [0, 0, 0] } else { color })
+            });
+            img.save(self.root.join("asset.png")).unwrap();
+        }
+
+        pub(crate) fn refine(&self, refresh: bool) {
+            refine(&RefineOpts {
+                db: &self.db,
+                root: &self.root,
+                work: 1,
+                techniques: vec!["test.palette".into()],
+                provider: "openai",
+                model: "no-network",
+                base_url: "http://127.0.0.1:1",
+                thinking: 0,
+                to_bag: true,
+                refresh,
+            })
+            .unwrap();
+        }
+
+        pub(crate) fn recipe(&self) -> (PathBuf, serde_json::Value) {
+            let recipe = serde_json::json!({
+                "key":"test.recipe", "name":"test", "version":"recipe-v1", "goal":"fixture",
+                "components":[{"slot":"base","dimension":"palette","ratio":1.0,"required":true}],
+                "constraints":{"contrast_min":4.5}, "custom_policy":{"preserve":"everything"},
+                "combination_prompt":"Build a complete accessible page using {{base.palette.content}} and keep its original typography."
+            });
+            let path = self.root.join("recipe.json");
+            std::fs::write(&path, recipe.to_string()).unwrap();
+            (path, recipe)
+        }
+
+        pub(crate) fn brew(&self, recipe: &Path) -> (i64, serde_json::Value) {
+            brew(&BrewOpts {
+                db: &self.db,
+                recipe,
+                pinned: None,
+                formula_id: None,
+                allow_mixed: false,
+                force: false,
+                out_dir: None,
+                quiet: true,
+            })
+            .unwrap();
+            self.latest_pill()
+        }
+
+        pub(crate) fn latest_pill(&self) -> (i64, serde_json::Value) {
+            let (id, text): (i64, String) = self
+                .conn()
+                .query_row(
+                    "SELECT id,output_json FROM pill ORDER BY id DESC LIMIT 1",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            (id, serde_json::from_str(&text).unwrap())
+        }
+
+        pub(crate) fn extracts(&self) -> Vec<(i64, String, String, String)> {
+            self.conn()
+                .prepare(
+                    "SELECT id, technique_version, content_json, hash FROM extract ORDER BY id",
+                )
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            // Only remove this fixture's resolved directory directly under the OS temp directory.
+            if let (Ok(root), Ok(temp)) = (
+                self.root.canonicalize(),
+                std::env::temp_dir().canonicalize(),
+            ) && root.parent() == Some(temp.as_path())
+                && root
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("ie-immutable-")
+            {
+                let _ = std::fs::remove_dir_all(root);
+            }
+        }
+    }
+
+    #[test]
+    fn migration_preserves_legacy_ids_inventory_pill_links_and_unproven_versions() {
+        let f = Fixture::new();
+        let mut conn = Connection::open(f.root.join("legacy.sqlite")).unwrap();
+        crate::db::migrate_to(&mut conn, 21).unwrap();
+        conn.execute_batch(
+            "INSERT INTO technique(id,key,title,dimension,prompt_template,version,created_at)
+             VALUES(9002,'legacy.fixture','legacy','palette','current contract','2','then');
+             INSERT INTO extract(id,technique_id,dimension,content_json,quality,fire_model,hash,created_at,technique_version)
+             VALUES(123,9002,'palette','{\"colors\":[]}',0.6,'old-model','old-hash','then','1'),
+                   (124,9002,'palette','{\"old\":true}',0.7,'other-model','unknown-hash','then',NULL);
+             INSERT INTO inventory(extract_id,owner_id,qty,note,added_at)
+             VALUES(123,'other-owner',4,'keep note','then'),(124,'me',2,'unknown version','then');
+             INSERT INTO formula(id,key,name,steps_json,created_at) VALUES(55,'legacy.formula','legacy','[]','then');
+             INSERT INTO recipe(id,key,name,goal,combination_prompt,created_at)
+             VALUES(66,'legacy.recipe','legacy','old goal','old prompt','then');
+             INSERT INTO pill(id,formula_id,recipe_id,output_md,output_json,created_at)
+             VALUES(42,55,66,'keep markdown','{\"components\":[{\"extract_id\":123}]}','then');"
+        ).unwrap();
+        crate::db::migrate(&mut conn).unwrap();
+        crate::db::migrate(&mut conn).unwrap();
+        let inventory: (String, i64, String, String) = conn
+            .query_row(
+                "SELECT owner_id,qty,note,added_at FROM inventory WHERE extract_id=123",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            inventory,
+            ("other-owner".into(), 4, "keep note".into(), "then".into())
+        );
+        let versions: Vec<(i64, Option<String>)> = conn
+            .prepare("SELECT extract_id,technique_version FROM v_bag ORDER BY extract_id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            versions,
+            vec![(123, Some("1".into())), (124, None)],
+            "never relabel legacy extracts as technique's current version"
+        );
+        let pill: (i64, i64, String, String) = conn
+            .query_row(
+                "SELECT formula_id,recipe_id,output_md,output_json FROM pill WHERE id=42",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            pill,
+            (
+                55,
+                66,
+                "keep markdown".into(),
+                "{\"components\":[{\"extract_id\":123}]}".into()
+            )
+        );
+        assert_eq!(
+            conn.query_row("SELECT hash FROM extract WHERE id=123", [], |r| r
+                .get::<_, String>(0))
+                .unwrap(),
+            "old-hash"
+        );
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM v_extract_head", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert!(
+            conn.query_row("PRAGMA foreign_keys", [], |r| r.get::<_, bool>(0))
+                .unwrap()
+        );
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r
+                .get::<_, i64>(
+                0
+            ))
+            .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn rescoring_a_frozen_pill_ignores_later_recipe_redefinitions() {
+        let f = Fixture::new();
+        f.refine(false);
+        let (recipe, mut definition) = f.recipe();
+        let (pill, _) = f.brew(&recipe);
+        let before = score_pill(&f.conn(), pill).unwrap();
+        definition["version"] = serde_json::json!("recipe-v2");
+        definition["components"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "slot":"extra", "dimension":"type", "required":true,"ratio":0.1
+            }));
+        std::fs::write(&recipe, definition.to_string()).unwrap();
+        assert!(
+            brew(&BrewOpts {
+                db: &f.db,
+                recipe: &recipe,
+                pinned: None,
+                formula_id: None,
+                allow_mixed: false,
+                force: false,
+                out_dir: None,
+                quiet: true
+            })
+            .is_err()
+        );
+        assert_eq!(
+            score_pill(&f.conn(), pill).unwrap(),
+            before,
+            "old pill completeness is defined by its frozen recipe, not the latest recipe_component"
+        );
+    }
+
+    #[test]
+    fn frozen_extract_rejects_content_version_updates_and_deletion() {
+        let f = Fixture::new();
+        f.refine(false);
+        let old = f.extracts();
+        let (recipe, _) = f.recipe();
+        f.brew(&recipe);
+        for sql in [
+            "UPDATE extract SET content_json='{}' WHERE id=1",
+            "UPDATE extract SET technique_version='forged' WHERE id=1",
+            "DELETE FROM extract WHERE id=1",
+            "DELETE FROM work WHERE id=1",
+        ] {
+            let err = f
+                .conn()
+                .execute(sql, [])
+                .expect_err("immutable historical bottle must reject mutation/cascades");
+            assert!(
+                err.to_string().contains("immutable"),
+                "clear immutable guard error: {err}"
+            );
+        }
+        assert_eq!(f.extracts(), old);
+        assert_eq!(
+            f.conn()
+                .query_row("SELECT count(*) FROM inventory", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn formula_pins_the_extract_returned_by_this_refine_not_any_latest_id() {
+        let f = Fixture::new();
+        f.refine(false);
+        let expected = f.extracts()[0].0;
+        f.image([255, 200, 0]);
+        f.refine(false);
+        f.image([255, 255, 255]);
+        f.recipe();
+        let formula = f.root.join("formula.json");
+        std::fs::write(
+            &formula,
+            serde_json::json!({
+                "key":"test.formula", "steps":[
+                    {"id":"r","op":"refine","material":1,"technique":"test.palette"},
+                    {"id":"b","op":"brew","recipe":"test.recipe","inputs":["r"]}
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        formula_run(&FormulaOpts {
+            db: &f.db,
+            formula: &formula,
+            recipes_dir: &f.root,
+            root: &f.root,
+            provider: "openai",
+            model: "no-network",
+            base_url: "http://127.0.0.1:1",
+            thinking: 0,
+        })
+        .unwrap();
+        assert_eq!(f.latest_pill().1["components"][0]["extract_id"], expected);
+    }
+
+    #[test]
+    fn brew_uses_current_head_even_when_refine_reuses_an_older_cached_id() {
+        let f = Fixture::new();
+        f.refine(false);
+        let first_id = f.extracts()[0].0;
+        f.image([255, 200, 0]);
+        f.refine(false);
+        f.image([255, 255, 255]);
+        f.refine(false); // Returns the first cached bottle, not max(id).
+        let (recipe, _) = f.recipe();
+        let (_, pill) = f.brew(&recipe);
+        assert_eq!(pill["components"][0]["extract_id"], first_id);
+        f.conn()
+            .execute("UPDATE technique SET version='2' WHERE id=9001", [])
+            .unwrap();
+        let result = brew(&BrewOpts {
+            db: &f.db,
+            recipe: &recipe,
+            pinned: None,
+            formula_id: None,
+            allow_mixed: false,
+            force: false,
+            out_dir: None,
+            quiet: true,
+        });
+        assert!(
+            result.is_err(),
+            "outdated technique bottles are not automatic current candidates"
+        );
+    }
+
+    #[test]
+    fn brew_freezes_full_recipe_and_selected_extract_content_version_and_hash() {
+        let f = Fixture::new();
+        f.refine(false);
+        let (recipe_path, recipe) = f.recipe();
+        let (_, pill) = f.brew(&recipe_path);
+        let extract = &f.extracts()[0];
+        assert_eq!(pill["snapshot_version"], 1);
+        assert_eq!(
+            pill["recipe_definition"], recipe,
+            "freeze even unrecognized recipe fields"
+        );
+        let c = &pill["components"][0];
+        assert_eq!(
+            c["content"],
+            serde_json::from_str::<serde_json::Value>(&extract.2).unwrap()
+        );
+        assert_eq!(c["technique_version"], "1");
+        assert_eq!(c["extract_revision"], 1);
+        assert_eq!(c["hash"], extract.3);
+        assert_eq!(c["content_hash"].as_str().unwrap().len(), 64);
+        assert_eq!(c["inputs"]["technique"]["prompt"], "palette contract");
+    }
+
+    #[test]
+    fn refresh_creates_a_new_revision_without_changing_old_extract() {
+        let f = Fixture::new();
+        f.refine(false);
+        let old = f.extracts();
+        f.refine(true);
+        let all = f.extracts();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0], old[0]);
+        let revisions: Vec<i64> = f
+            .conn()
+            .prepare("SELECT revision FROM extract ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            revisions,
+            vec![1, 2],
+            "refresh is a distinguishable immutable revision"
+        );
+        f.refine(false);
+        assert_eq!(
+            f.extracts(),
+            all,
+            "warm cache chooses latest identical-input revision"
+        );
+    }
+
+    #[test]
+    fn refine_cache_identity_covers_contract_and_actual_asset_bytes() {
+        let f = Fixture::new();
+        f.refine(false);
+        f.refine(false);
+        assert_eq!(
+            f.extracts().len(),
+            1,
+            "identical inputs should reuse the cache"
+        );
+        for (i, sql) in [
+            "UPDATE technique SET prompt_template='new prompt' WHERE id=9001",
+            "UPDATE technique SET params_json='{\"kind\":\"pixel\",\"precision\":2}' WHERE id=9001",
+            "UPDATE technique SET schema_json='{\"colors\":\"array\"}' WHERE id=9001",
+        ]
+        .iter()
+        .enumerate()
+        {
+            f.conn().execute(sql, []).unwrap();
+            f.refine(false);
+            assert_eq!(
+                f.extracts().len(),
+                i + 2,
+                "changed contract must miss cache: {sql}"
+            );
+        }
+        let old = f.extracts();
+        // The asset row/path is unchanged, and its optional sha256 is deliberately absent.
+        f.image([255, 200, 0]);
+        f.refine(false);
+        let all = f.extracts();
+        assert_eq!(
+            all.len(),
+            5,
+            "hash actual bytes, not only the path or stale asset metadata"
+        );
+        assert_eq!(&all[..4], &old);
+        assert_ne!(all[4].2, all[3].2);
+    }
+
+    #[test]
+    fn refine_version_upgrade_keeps_both_versions_and_bag_entries() {
+        let f = Fixture::new();
+        f.refine(false);
+        let old = f.extracts();
+        f.conn()
+            .execute("UPDATE technique SET version='2' WHERE id=9001", [])
+            .unwrap();
+        f.refine(false);
+        let all = f.extracts();
+        assert_eq!(
+            all.len(),
+            2,
+            "new technique version must not reuse an old extract"
+        );
+        assert_eq!(
+            all[0], old[0],
+            "old extract identity and content must survive"
+        );
+        assert_eq!(all[1].1, "2");
+        let bag_count: i64 = f
+            .conn()
+            .query_row("SELECT count(*) FROM v_bag", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(bag_count, 2);
     }
 }

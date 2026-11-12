@@ -3,11 +3,66 @@
 //! 边界很清楚：引擎不生成 HTML，它只交付"可执行规格 + 验收清单"；
 //! 产物由编码 agent 写，写完回来验收。这样规格才是真正的接口。
 
-use anyhow::{Context, Result};
-use rusqlite::{Connection, params};
+use anyhow::{Context, Result, bail};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::path::Path;
+
+fn frozen_snapshot(out: &Value) -> Result<bool> {
+    let Some(version) = out.get("snapshot_version") else {
+        return Ok(false);
+    };
+    if version != 1 || !out["recipe_definition"].is_object() {
+        bail!("不支持或不完整的丹药快照，不能声称历史可复现");
+    }
+    let components = out["components"]
+        .as_array()
+        .context("丹药快照缺 components")?;
+    for c in components {
+        use sha2::{Digest, Sha256};
+        let content = c.get("content").context("丹药快照缺药液内容")?;
+        let hash = format!("{:x}", Sha256::digest(content.to_string().as_bytes()));
+        if c["content_hash"].as_str() != Some(hash.as_str())
+            || c["hash"].as_str().is_none()
+            || c["extract_revision"].as_i64().unwrap_or(0) < 1
+            || c.get("technique_version").is_none()
+        {
+            bail!("丹药快照药液内容或版本/hash不完整，不能声称历史可复现");
+        }
+    }
+    Ok(true)
+}
+
+fn provenance(frozen: bool, legacy: bool) -> Value {
+    json!({"source": if frozen { "pill_snapshot" } else if legacy { "legacy_live_extract" } else { "missing_snapshot" },
+        "historically_reproducible": frozen,
+        "note":if frozen { "使用冻结快照" } else { "历史不可复原；legacy fallback 仅代表当前数据，非历史证据" }})
+}
+
+fn component_content(
+    conn: &Connection,
+    c: &Value,
+    frozen: bool,
+    legacy: bool,
+) -> Result<Option<Value>> {
+    if frozen {
+        return Ok(Some(c["content"].clone()));
+    }
+    if !legacy {
+        return Ok(None);
+    }
+    let content: Option<String> = conn
+        .query_row(
+            "SELECT content_json FROM extract WHERE id=?1",
+            params![c["extract_id"].as_i64().unwrap_or(0)],
+            |r| r.get(0),
+        )
+        .optional()?;
+    content
+        .map(|s| serde_json::from_str(&s).context("legacy 药液不是合法 JSON"))
+        .transpose()
+}
 
 pub fn brief(db: &str, pill_id: i64, out_dir: &Path) -> Result<()> {
     let conn = Connection::open(db)?;
@@ -20,6 +75,13 @@ pub fn brief(db: &str, pill_id: i64, out_dir: &Path) -> Result<()> {
         )
         .with_context(|| format!("没有丹药 #{pill_id}"))?;
     let out: Value = serde_json::from_str(&output_json).unwrap_or_default();
+    let frozen = frozen_snapshot(&out)?;
+    let legacy = !frozen && out["legacy_provenance_fallback"] == true;
+    let provenance = provenance(frozen, legacy);
+    let recipe_key = out["recipe_definition"]["key"]
+        .as_str()
+        .or_else(|| out["recipe"].as_str())
+        .unwrap_or(&recipe_key);
     let score: Value = serde_json::from_str(&score_json).unwrap_or_default();
     let prompt = out["prompt"].as_str().unwrap_or("");
     let comps = out["components"].as_array().cloned().unwrap_or_default();
@@ -31,13 +93,7 @@ pub fn brief(db: &str, pill_id: i64, out_dir: &Path) -> Result<()> {
     let mut contrast_added = false;
     for c in &comps {
         let dim = c["dimension"].as_str().unwrap_or("");
-        let eid = c["extract_id"].as_i64().unwrap_or(0);
-        if let Ok(content) = conn.query_row(
-            "SELECT content_json FROM extract WHERE id=?1",
-            params![eid],
-            |r| r.get::<_, String>(0),
-        ) {
-            let v: Value = serde_json::from_str(&content).unwrap_or_default();
+        if let Some(v) = component_content(&conn, c, frozen, legacy)? {
             if dim == "palette" {
                 if let Some(roles) = v["roles"].as_object() {
                     for (role, hex) in roles {
@@ -113,8 +169,9 @@ pub fn brief(db: &str, pill_id: i64, out_dir: &Path) -> Result<()> {
 
     std::fs::create_dir_all(out_dir)?;
     let brief = format!(
-        "# 生成简报 · 丹药 #{pill_id}\n\n> 配方 {recipe_key}｜预检 {:.2}\n\n## 合成规格\n\n{}\n\n## 验收清单\n\n{}\n\n## 原始丹药\n\n{}\n",
+        "# 生成简报 · 丹药 #{pill_id}\n\n> 配方 {recipe_key}｜预检 {:.2}\n\n> 来源：{}\n\n## 合成规格\n\n{}\n\n## 验收清单\n\n{}\n\n## 原始丹药\n\n{}\n",
         score["total"].as_f64().unwrap_or(0.0),
+        provenance["note"].as_str().unwrap_or("历史不可复原"),
         prompt,
         checks
             .iter()
@@ -128,7 +185,8 @@ pub fn brief(db: &str, pill_id: i64, out_dir: &Path) -> Result<()> {
         output_md
     );
     std::fs::write(out_dir.join("brief.md"), &brief)?;
-    let mut tokens = json!({"pill": pill_id, "colors": colors.iter().cloned().collect::<Vec<_>>(), "checks": checks});
+    let mut tokens = json!({"pill": pill_id, "provenance":provenance,
+        "colors": colors.iter().cloned().collect::<Vec<_>>(), "checks": checks});
     for (k, v) in &tokens_extra {
         tokens[k] = v.clone();
     }
@@ -150,7 +208,10 @@ pub fn verify(db: &str, pill_id: i64, html: &Path) -> Result<()> {
         params![pill_id],
         |r| Ok((r.get(0)?,)),
     )?;
-    let out: Value = serde_json::from_str(&output_json).unwrap_or_default();
+    let out: Value =
+        serde_json::from_str(&output_json).context("丹药 output_json 不是合法 JSON")?;
+    let frozen = frozen_snapshot(&out)?;
+    let legacy = !frozen && out["legacy_provenance_fallback"] == true;
     let comps = out["components"].as_array().cloned().unwrap_or_default();
 
     // 药液色板
@@ -158,12 +219,7 @@ pub fn verify(db: &str, pill_id: i64, html: &Path) -> Result<()> {
     let mut donts: Vec<String> = Vec::new();
     for c in &comps {
         let dim = c["dimension"].as_str().unwrap_or("");
-        if let Ok(content) = conn.query_row(
-            "SELECT content_json FROM extract WHERE id=?1",
-            params![c["extract_id"].as_i64().unwrap_or(0)],
-            |r| r.get::<_, String>(0),
-        ) {
-            let v: Value = serde_json::from_str(&content).unwrap_or_default();
+        if let Some(v) = component_content(&conn, c, frozen, legacy)? {
             if dim == "palette" {
                 for col in v["colors"].as_array().cloned().unwrap_or_default() {
                     if let Some(h) = col["hex"].as_str() {
@@ -243,6 +299,10 @@ pub fn verify(db: &str, pill_id: i64, html: &Path) -> Result<()> {
     };
 
     let mut checks: Vec<Value> = Vec::new();
+    checks.push(
+        json!({"id":"provenance","ok":frozen,"provenance":provenance(frozen, legacy),
+        "detail":if frozen { "冻结的丹药快照" } else { "缺少快照：历史不可复原" }}),
+    );
     checks.push(json!({"id":"palette","ok": palette_cov >= 0.6, "detail": format!("用到 {:.0}%（{}/{}）", palette_cov*100.0, used_palette.len(), palette.len())}));
     checks.push(json!({"id":"no_shadow","ok": shadows == 0, "detail": format!("box-shadow 出现 {shadows} 次")}));
     checks.push(json!({"id":"contrast","ok": contrast >= 4.5, "detail": format!("正文对比 {contrast:.2}:1")}));
@@ -373,4 +433,165 @@ fn contrast_ratio(bg: &str, fg: &str) -> f64 {
     let (a, b) = (lum(bg), lum(fg));
     let (hi, lo) = if a > b { (a, b) } else { (b, a) };
     (hi + 0.05) / (lo + 0.05)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::alchemy::tests::Fixture;
+
+    #[test]
+    fn legacy_pill_requires_explicit_fallback_and_never_claims_historical_reproduction() {
+        let f = Fixture::new();
+        f.refine(false);
+        let mut legacy = json!({"recipe":"old.recipe", "prompt":"old prompt", "components":[
+            {"dimension":"palette","extract_id":f.extracts()[0].0}
+        ]});
+        f.conn()
+            .execute(
+                "INSERT INTO pill(id,output_md,output_json,created_at) VALUES(1,'legacy',?1,'now')",
+                params![legacy.to_string()],
+            )
+            .unwrap();
+        let out = f.root.join("legacy");
+        brief(&f.db, 1, &out).unwrap();
+        let tokens: Value =
+            serde_json::from_str(&std::fs::read_to_string(out.join("tokens.json")).unwrap())
+                .unwrap();
+        assert!(
+            tokens["colors"].as_array().unwrap().is_empty(),
+            "default must not consult live legacy extracts"
+        );
+        assert_eq!(tokens["provenance"]["historically_reproducible"], false);
+        assert!(
+            std::fs::read_to_string(out.join("brief.md"))
+                .unwrap()
+                .contains("历史不可复原")
+        );
+
+        // Explicit opt-in in the persisted pill, not a silent inference from an extract ID.
+        legacy["legacy_provenance_fallback"] = json!(true);
+        f.conn()
+            .execute(
+                "UPDATE pill SET output_json=?1 WHERE id=1",
+                params![legacy.to_string()],
+            )
+            .unwrap();
+        brief(&f.db, 1, &out).unwrap();
+        let tokens: Value =
+            serde_json::from_str(&std::fs::read_to_string(out.join("tokens.json")).unwrap())
+                .unwrap();
+        assert!(!tokens["colors"].as_array().unwrap().is_empty());
+        assert_eq!(tokens["provenance"]["source"], "legacy_live_extract");
+        assert_eq!(tokens["provenance"]["historically_reproducible"], false);
+        let artifact = f.root.join("legacy.html");
+        std::fs::write(
+            &artifact,
+            "body{background:#FFFFFF;color:#000000}h1{font-size:32px}p{font-size:16px}",
+        )
+        .unwrap();
+        verify(&f.db, 1, &artifact).unwrap();
+        let (checks, passed): (String, bool) = f
+            .conn()
+            .query_row(
+                "SELECT checks_json,passed FROM pill_check ORDER BY id DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!(
+            !passed,
+            "a current-data fallback cannot certify historical reproduction"
+        );
+        let checks: Vec<Value> = serde_json::from_str(&checks).unwrap();
+        assert!(
+            checks
+                .iter()
+                .any(|c| c["id"] == "palette" && c["ok"] == true)
+        );
+        assert!(
+            checks
+                .iter()
+                .any(|c| c["id"] == "provenance" && c["ok"] == false)
+        );
+    }
+
+    #[test]
+    fn verify_uses_frozen_palette_without_reading_live_extracts() {
+        let f = Fixture::new();
+        f.refine(false);
+        let (recipe, _) = f.recipe();
+        let (pill, snapshot) = f.brew(&recipe);
+        let restored = Fixture::new();
+        restored.conn().execute(
+            "INSERT INTO pill(id,output_md,output_json,created_at) VALUES(?1,'frozen',?2,'now')",
+            params![pill, snapshot.to_string()],
+        ).unwrap();
+        let artifact = restored.root.join("artifact.html");
+        std::fs::write(
+            &artifact,
+            "body{background:#FFFFFF;color:#000000}h1{font-size:32px}p{font-size:16px}",
+        )
+        .unwrap();
+        verify(&restored.db, pill, &artifact).unwrap();
+        let (checks, passed): (String, bool) = restored
+            .conn()
+            .query_row(
+                "SELECT checks_json,passed FROM pill_check ORDER BY id DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!(
+            passed,
+            "verification must use the pill palette, not a missing live extract: {checks}"
+        );
+        let checks: Vec<Value> = serde_json::from_str(&checks).unwrap();
+        assert!(
+            checks
+                .iter()
+                .any(|c| c["id"] == "provenance" && c["ok"] == true)
+        );
+    }
+
+    #[test]
+    fn brief_uses_self_contained_pill_snapshot_after_refresh_and_without_extracts() {
+        let f = Fixture::new();
+        f.refine(false);
+        let (recipe, _) = f.recipe();
+        let (pill, snapshot) = f.brew(&recipe);
+        let before = f.root.join("before");
+        brief(&f.db, pill, &before).unwrap();
+        f.image([255, 200, 0]);
+        f.refine(true);
+        let after = f.root.join("after");
+        brief(&f.db, pill, &after).unwrap();
+        assert_eq!(
+            std::fs::read(before.join("tokens.json")).unwrap(),
+            std::fs::read(after.join("tokens.json")).unwrap()
+        );
+
+        // Import only the pill into an independent DB: snapshots must not need live extracts/recipes.
+        let restored = Fixture::new();
+        restored.conn().execute(
+            "INSERT INTO pill(id,output_md,output_json,created_at) VALUES(?1,'frozen markdown',?2,'now')",
+            params![pill, snapshot.to_string()],
+        ).unwrap();
+        let out = restored.root.join("brief");
+        brief(&restored.db, pill, &out).unwrap();
+        let tokens: Value =
+            serde_json::from_str(&std::fs::read_to_string(out.join("tokens.json")).unwrap())
+                .unwrap();
+        assert!(
+            !tokens["colors"].as_array().unwrap().is_empty(),
+            "frozen palette is independent of extract table"
+        );
+        assert_eq!(tokens["provenance"]["source"], "pill_snapshot");
+        assert_eq!(tokens["provenance"]["historically_reproducible"], true);
+        let markdown = std::fs::read_to_string(out.join("brief.md")).unwrap();
+        assert!(
+            markdown.contains("test.recipe"),
+            "recipe identity comes from snapshot too"
+        );
+    }
 }

@@ -1,5 +1,8 @@
 # ie · 灵感引擎研究原型
 
+> 当前进度基线见 [炼丹炉进度快照](../docs/design/炼丹炉进度快照-2026-11-12.md)，第一阶段修复见 [可信基础验收](../docs/design/炼丹炉可信基础验收.md)。
+> 下文保留早期实验日志；其中助手填写的“人工分”是演示数据，不代表真实用户评价，BT 分数也不是绝对审美分。
+
 本目录是 [灵感引擎设计](../docs/design/灵感引擎设计.md) 的 M1（提取）+ P0（个人层闭环）落地验证，**不是正式产品代码**：独立 workspace，不参与根 `Cargo.toml` 的构建与发布。
 
 ```text
@@ -16,16 +19,48 @@ cd inspiration && cargo build --release --offline
 
 依赖只用本地已缓存的 crate（image / rusqlite / rayon / serde_json），不联网。
 
-## 数据前提
+### 原型回归验证
 
-本地库在 `data/inspiration/inspiration.db`（gitignore，不提交）。建库顺序：
+从本目录执行，或用 `--manifest-path inspiration/Cargo.toml` 显式指定独立 workspace：
 
 ```sh
-sqlite3 data/inspiration/inspiration.db < docs/design/inspiration/schema.v2.sql
-sqlite3 data/inspiration/inspiration.db < docs/design/inspiration/migrations/002-personal-layer.sql
-sqlite3 data/inspiration/inspiration.db < docs/design/inspiration/migrations/003-work-vector.sql
-sqlite3 data/inspiration/inspiration.db < docs/design/inspiration/migrations/004-observation-unique.sql
+cargo fmt --all -- --check
+cargo test --workspace --all-targets --locked --offline
+cargo clippy --workspace --all-targets --locked --offline -- -D warnings
 ```
+
+测试使用内存库或独立临时目录、生成的图片/规格与必要的本地 mock，不依赖默认用户数据库，不请求真实模型、不需要 API 密钥。根 workspace 的测试不包含本原型，不能替代上述命令。
+
+## 数据前提
+
+本地库在 `data/inspiration/inspiration.db`（gitignore，不提交）。新库初始化或旧库升级必须显式指定路径：
+
+```sh
+ie migrate --db /absolute/path/to/inspiration.db
+```
+
+迁移 SQL 编译进 CLI，无须从特定目录启动；迁移在同一事务中执行并核验外键。升级已有库前用 SQLite `VACUUM INTO` 创建一致性备份，保留原库与备份；未知数据库或更新版本的库会被拒绝。重复执行不重复迁移。**其他命令不会静默升级默认用户库**，测试也只使用独立临时目录。
+
+## 可信基础：评分来源与历史版本
+
+```sh
+# 演示或 AI 代填必须显式隔离；不指定 --source 也默认 demo
+ie judge fill --db fixture.db --run 1 --scores "A=82,B=70" --source demo
+
+# 只有用户本人真实提交时才使用 human；reviewer 不可省略
+ie judge fill --db my.db --run 1 --scores "A=82,B=70" \
+  --source human --reviewer me --dimension hierarchy
+ie judge calibrate --db my.db
+ie judge models --db my.db
+```
+
+- 旧评分保留为 `legacy`，不猜测评分者，不把助手演示当成真人；新回填保留来源、评分者、维度、时间及追加式历史。
+- 批量回填先校验整批，再将评分与最终分重算放进同一事务；未知标签、重复标签、非法分数或重算失败都会回滚整批。
+- 校准仅消费同一真人评分者的可比较评分；少于 20 对样本只报告统计，不自动应用权重。旧库中的演示权重保留可审计，但不再被合议自动采用。20 对是保守的工程门槛，不等于统计可靠性证明；按维度、用户和模型版本拆分校准仍属后续工作。
+- 药液改为追加式版本。缓存需要手法版本与输入身份匹配；`--refresh` 新增版本，不改写旧药液。丹药冻结药液及配方快照，简报与验收优先读取该快照。这里的可复原仅指历史规格与验收依据，不保证重新调用生成模型会产出相同页面。
+- 旧丹药没有历史内容快照，必须标为不可复原历史；不能通过读取今天的药液，把它包装成当时的规格。
+
+升级副本核验（2026-11-12）：将当前用户库通过 SQLite backup 复制到临时目录再升级，865 件作品、851 个素材、65 瓶药液及背包、29 颗丹药、16 个评判批次全部保留，药液 ID/内容/hash/旧版本字段未变；7 条旧评分隔离为 legacy。副本重新校准后真实样本为 0，两裁判恢复默认 1.0 且不应用校准；完整性和外键检查通过。**原始数据库内容哈希未变，没有在默认库里做测试或伪造真人评分。**
 
 ## 命令
 
