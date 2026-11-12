@@ -378,6 +378,131 @@ pub(crate) fn recompute(conn: &Connection, run_id: i64) -> Result<()> {
     Ok(())
 }
 
+/// 用人工裁决校准裁判权重：每个裁判的裁决与人工结论逐对比较，算一致率。
+pub fn calibrate(db: &str) -> Result<()> {
+    let conn = Connection::open(db)?;
+    let mut stmt = conn.prepare(
+        "SELECT id, judge_json FROM judge_run WHERE stage='panel' AND judge_json IS NOT NULL",
+    )?;
+    let runs: Vec<(i64, String)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    // 裁判名 -> (样本数, 一致数)
+    let mut stats: std::collections::BTreeMap<String, (i64, i64)> = Default::default();
+    let mut used_pairs = 0usize;
+    for (run_id, judge_json) in runs {
+        let j: Value = serde_json::from_str(&judge_json).unwrap_or_default();
+        let mut labels: std::collections::HashMap<String, (i64, Option<f64>)> = Default::default();
+        {
+            let mut s =
+                conn.prepare("SELECT label, pill_id, human_score FROM judge_item WHERE run_id=?1")?;
+            for row in s.query_map(params![run_id], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, Option<f64>>(2)?,
+                ))
+            })? {
+                let (label, pill, human) = row?;
+                labels.insert(label, (pill, human));
+            }
+        }
+        for p in j["pairs"].as_array().cloned().unwrap_or_default() {
+            let (Some(li), Some(lj)) = (p["i"].as_str(), p["j"].as_str()) else {
+                continue;
+            };
+            let (Some((_, Some(hi))), Some((_, Some(hj)))) = (labels.get(li), labels.get(lj))
+            else {
+                continue;
+            };
+            // 人工结论：分差 >3 才算分出胜负
+            let human = if (hi - hj).abs() <= 3.0 {
+                None
+            } else if hi > hj {
+                Some(true)
+            } else {
+                Some(false)
+            };
+            let verdict = |v: f64| -> Option<bool> {
+                if v > 0.5 + 1e-9 {
+                    Some(true)
+                } else if v < 0.5 - 1e-9 {
+                    Some(false)
+                } else {
+                    None
+                }
+            };
+            for vote in p["votes"].as_array().cloned().unwrap_or_default() {
+                let (Some(name), Some(v)) = (vote[0].as_str(), vote[1].as_f64()) else {
+                    continue;
+                };
+                let got = verdict(v);
+                let agree = match (human, got) {
+                    (None, None) => true,
+                    (Some(a), Some(b)) => a == b,
+                    _ => false,
+                };
+                let e = stats.entry(name.to_string()).or_insert((0, 0));
+                e.0 += 1;
+                if agree {
+                    e.1 += 1;
+                }
+            }
+            used_pairs += 1;
+        }
+    }
+
+    println!("可用于校准的成对样本：{used_pairs}");
+    println!(
+        "{:<14} {:>6} {:>6} {:>8} {:>6}",
+        "裁判", "样本", "一致", "一致率", "权重"
+    );
+    for (name, (n, a)) in &stats {
+        let rate = if *n > 0 { *a as f64 / *n as f64 } else { 0.0 };
+        // 权重 = 0.3 + 一致率，范围 0.3–1.3；样本越少越往 1.0 收缩
+        let shrink = (*n as f64 / (*n as f64 + 4.0)).min(1.0);
+        let weight = 1.0 + (rate - 0.5) * 2.0 * shrink;
+        conn.execute(
+            "INSERT INTO judge_model(name,samples,agreements,weight,updated_at) VALUES(?1,?2,?3,?4,?5)
+             ON CONFLICT(name) DO UPDATE SET samples=?2, agreements=?3, weight=?4, updated_at=?5",
+            params![name, n, a, weight, crate::now_iso()],
+        )?;
+        println!(
+            "{name:<14} {n:>6} {a:>6} {:>7.1}% {weight:>6.2}",
+            rate * 100.0
+        );
+    }
+    if stats.is_empty() {
+        println!("没有样本：先给 panel run 回填人工分（ie judge fill）再校准");
+    }
+    Ok(())
+}
+
+pub fn models(db: &str) -> Result<()> {
+    let conn = Connection::open(db)?;
+    let mut stmt = conn.prepare(
+        "SELECT name, samples, agreements, weight, updated_at FROM judge_model ORDER BY name",
+    )?;
+    let rows: Vec<(String, i64, i64, f64, String)> = stmt
+        .query_map([], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if rows.is_empty() {
+        println!("还没有校准记录");
+        return Ok(());
+    }
+    println!(
+        "{:<14} {:>6} {:>6} {:>8} 更新",
+        "裁判", "样本", "一致", "权重"
+    );
+    for (name, n, a, w, at) in rows {
+        println!("{name:<14} {n:>6} {a:>6} {w:>8.2} {at}");
+    }
+    Ok(())
+}
+
 pub fn list(db: &str) -> Result<()> {
     let conn = Connection::open(db)?;
     let mut stmt = conn.prepare(

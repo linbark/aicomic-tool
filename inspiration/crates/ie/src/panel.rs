@@ -71,6 +71,17 @@ pub fn run(o: &PanelOpts<'_>) -> Result<()> {
     // 载入候选并抹掉材料名（盲评）
     let conn = Connection::open(o.db)?;
     conn.busy_timeout(Duration::from_secs(10))?;
+
+    // 若人工校准过，用库里的权重覆盖配置
+    for j in &mut judges {
+        if let Ok(w) = conn.query_row(
+            "SELECT weight FROM judge_model WHERE name=?1",
+            params![j.name],
+            |r| r.get::<_, f64>(0),
+        ) {
+            j.weight = w;
+        }
+    }
     let mut cands: Vec<Cand> = Vec::new();
     let mut names: std::collections::BTreeSet<String> = Default::default();
     for pid in &o.pills {
@@ -317,8 +328,13 @@ pub fn run(o: &PanelOpts<'_>) -> Result<()> {
     crate::judge::recompute(&conn, run_id)?;
 
     println!(
-        "合议 run #{run_id}（{} 位裁判，seed {}）",
+        "合议 run #{run_id}（{} 位裁判：{}，seed {}）",
         judges.len(),
+        judges
+            .iter()
+            .map(|j| format!("{}×{:.2}", j.name, j.weight))
+            .collect::<Vec<_>>()
+            .join("、"),
         o.seed
     );
     for p in &pairs {

@@ -413,6 +413,8 @@ fn main() -> Result<()> {
                         seed,
                     })
                 }
+                "calibrate" => judge::calibrate(&db),
+                "models" => judge::models(&db),
                 "list" => judge::list(&db),
                 "review" => {
                     let run_id: Option<i64> = opts.get("run").and_then(|v| v.parse().ok());
