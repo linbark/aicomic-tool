@@ -3,7 +3,7 @@
 //! 只做 M1（抽取）与 P0（个人层闭环）需要的最小闭环：
 //!   ie extract  --db <db> --root <data dir> [--limit N]
 //!   ie simulate --db <db> --person demo --n 200 [--seed 7]
-//!   ie fit      --db <db> --person demo
+//!   ie fit      --db <db> --person <local-id> [--source demo]
 //!   ie stats    --db <db>
 
 mod alchemy;
@@ -18,6 +18,7 @@ mod forge;
 mod judge;
 mod metrics;
 mod panel;
+mod personal;
 mod vector;
 mod vision;
 
@@ -55,13 +56,27 @@ fn main() -> Result<()> {
             i += 1;
         }
     }
+    for key in ["activate", "apply-personal"] {
+        anyhow::ensure!(
+            !opts.contains_key(key) || implicit_flags.contains(key),
+            "--{key} 是无值开关；不要写 false，关闭时应移除此开关"
+        );
+    }
     // Keep an omitted value distinct from a literal "1", especially for human provenance.
     for key in ["source", "reviewer", "dimension", "manifest-hash"] {
         anyhow::ensure!(!implicit_flags.contains(key), "需要 --{key} <value>");
     }
-    if matches!(cmd.as_str(), "judge" | "experiment") && !positional.is_empty() {
+    if matches!(cmd.as_str(), "judge" | "experiment" | "person" | "kernel")
+        && !positional.is_empty()
+    {
         opts.insert("sub".into(), positional[0].clone());
     }
+    let required = |key: &str| -> Result<&str> {
+        opts.get(key)
+            .map(String::as_str)
+            .filter(|value| !implicit_flags.contains(key) && !value.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("需要 --{key} <value>"))
+    };
     let db = opts
         .get("db")
         .cloned()
@@ -78,6 +93,10 @@ fn main() -> Result<()> {
             | "motion"
             | "bag"
             | "experiment"
+            | "person"
+            | "kernel"
+            | "fit"
+            | "simulate"
     ) {
         db::require_current(std::path::Path::new(&db))?;
     }
@@ -113,9 +132,65 @@ fn main() -> Result<()> {
             fit::simulate(&db, &person, n, seed, active)
         }
         "fit" => {
-            let person = opts.get("person").cloned().unwrap_or_else(|| "demo".into());
-            let seed: u64 = opts.get("seed").and_then(|v| v.parse().ok()).unwrap_or(7);
-            fit::run(&db, &person, seed)
+            let seed: u64 = opts
+                .get("seed")
+                .map(|v| v.parse())
+                .transpose()?
+                .unwrap_or(7);
+            match opts.get("source").map(String::as_str).unwrap_or("human") {
+                "demo" => fit::run_demo(
+                    &db,
+                    opts.get("person").map(String::as_str).unwrap_or("demo"),
+                    seed,
+                ),
+                "human" => {
+                    let value = fit::fit_person(&fit::FitOpts {
+                        db: &db,
+                        person: required("person")?,
+                        scope: opts
+                            .get("scope")
+                            .map(String::as_str)
+                            .unwrap_or(personal::SCOPE),
+                        seed,
+                        activate: opts.contains_key("activate"),
+                    })?;
+                    println!("{}", serde_json::to_string_pretty(&value)?);
+                    Ok(())
+                }
+                _ => anyhow::bail!("fit 只支持 human（默认）或显式 --source demo；不能混用数据"),
+            }
+        }
+        "person" => {
+            let person = required("person")?;
+            let value = match opts.get("sub").map(String::as_str) {
+                Some("init") => personal::init(&personal::InitOpts { db: &db, person })?,
+                Some("bridge") => personal::bridge(&personal::BridgeOpts {
+                    db: &db,
+                    person,
+                    evaluation_id: required("evaluation")?.parse()?,
+                    intent: required("intent")?,
+                })?,
+                _ => anyhow::bail!(
+                    "用法：ie person <init|bridge> --person <local-id> --db <path> ..."
+                ),
+            };
+            println!("{}", serde_json::to_string_pretty(&value)?);
+            Ok(())
+        }
+        "kernel" => {
+            anyhow::ensure!(
+                opts.get("sub").map(String::as_str) == Some("show"),
+                "用法：ie kernel show --person <local-id> --db <path>"
+            );
+            let value = fit::show(
+                &db,
+                required("person")?,
+                opts.get("scope")
+                    .map(String::as_str)
+                    .unwrap_or(personal::SCOPE),
+            )?;
+            println!("{}", serde_json::to_string_pretty(&value)?);
+            Ok(())
         }
         "vision" => {
             let root = PathBuf::from(
@@ -280,6 +355,46 @@ fn main() -> Result<()> {
             })
         }
         "brew" => {
+            if opts.contains_key("personal-candidates") {
+                anyhow::ensure!(
+                    !opts.contains_key("recipe")
+                        && !opts.contains_key("force")
+                        && !opts.contains_key("allow-mixed")
+                        && !opts.contains_key("out"),
+                    "个人候选炼丹不混用 --recipe/--force/--allow-mixed/--out；可随后用 brief 导出规格"
+                );
+                let manifest: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(
+                    required("personal-candidates")?,
+                )?)?;
+                let candidates: Vec<i64> = manifest["artifact_ids"]
+                    .as_array()
+                    .ok_or_else(|| anyhow::anyhow!("候选清单需要 artifact_ids 数组"))?
+                    .iter()
+                    .map(|v| {
+                        v.as_i64()
+                            .ok_or_else(|| anyhow::anyhow!("artifact ID 必须是整数"))
+                    })
+                    .collect::<Result<_>>()?;
+                let ranked = fit::rank(&fit::RankOpts {
+                    db: &db,
+                    person: required("person")?,
+                    scope: manifest["scope"].as_str().unwrap_or(personal::SCOPE),
+                    candidates: &candidates,
+                    apply: opts.contains_key("apply-personal"),
+                })?;
+                anyhow::ensure!(
+                    ranked["chosen_snapshot"].is_object() && ranked["trace"].is_object(),
+                    "候选证据不可核验，未炼制丹药"
+                );
+                let result =
+                    alchemy::brew_snapshot(&db, &ranked["chosen_snapshot"], &ranked["trace"])?;
+                println!("{}", serde_json::to_string_pretty(&result)?);
+                return Ok(());
+            }
+            anyhow::ensure!(
+                !opts.contains_key("person") && !opts.contains_key("apply-personal"),
+                "个人炼丹模式需要 --personal-candidates <manifest.json>；未应用个性化"
+            );
             let recipe = opts
                 .get("recipe")
                 .map(PathBuf::from)
@@ -425,19 +540,34 @@ fn main() -> Result<()> {
                         out_dir: &out_dir,
                     })?
                 }
-                Some("record") => experiment::record(&experiment::RecordOpts {
-                    db: &db,
-                    experiment_id: experiment_id()?,
-                    manifest_hash: required("manifest-hash")?,
-                    source: opts.get("source").map(String::as_str).unwrap_or("demo"),
-                    reviewer: opts.get("reviewer").map(String::as_str),
-                    dimension: opts
-                        .get("dimension")
-                        .map(String::as_str)
-                        .unwrap_or("visual"),
-                    winner: required("winner")?,
-                    note: opts.get("note").map(String::as_str),
-                })?,
+                Some("record") => {
+                    let visual = experiment::RecordOpts {
+                        db: &db,
+                        experiment_id: experiment_id()?,
+                        manifest_hash: required("manifest-hash")?,
+                        source: opts.get("source").map(String::as_str).unwrap_or("demo"),
+                        reviewer: opts.get("reviewer").map(String::as_str),
+                        dimension: opts
+                            .get("dimension")
+                            .map(String::as_str)
+                            .unwrap_or("visual"),
+                        winner: required("winner")?,
+                        note: opts.get("note").map(String::as_str),
+                    };
+                    if opts.contains_key("person") {
+                        personal::record(&personal::RecordOpts {
+                            visual,
+                            person: required("person")?,
+                            intent: required("intent")?,
+                        })?
+                    } else {
+                        anyhow::ensure!(
+                            !opts.contains_key("intent"),
+                            "个人用途需要同时指定 --person 和 --intent"
+                        );
+                        experiment::record(&visual)?
+                    }
+                }
                 Some("stats") => experiment::stats(&experiment::StatsOpts { db: &db })?,
                 _ => anyhow::bail!(
                     "用法：ie experiment <create|attach|blind|record|stats> --db <path> ..."
@@ -655,7 +785,7 @@ fn main() -> Result<()> {
         "stats" => stats(&db),
         _ => {
             eprintln!(
-                "用法：ie <migrate|extract|vision|distill|refine|brew|formula|mutate|bag|pills|judge|experiment|motion|brief|verify|export|import|simulate|fit|stats> --db <path> [options]"
+                "用法：ie <migrate|extract|vision|distill|refine|brew|formula|mutate|bag|pills|judge|experiment|person|kernel|motion|brief|verify|export|import|simulate|fit|stats> --db <path> [options]"
             );
             Ok(())
         }

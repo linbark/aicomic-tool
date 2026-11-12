@@ -47,6 +47,62 @@ pub struct StatsOpts<'a> {
     pub db: &'a str,
 }
 
+/// Read-only private evidence view for the personal bridge; not a public blind payload.
+/// Revalidates the original/archive/receipt/PNG/anonymous exports, never trusts IDs alone.
+#[allow(dead_code)] // Standalone read-only API; the bridge uses the transaction-sharing variant.
+pub fn eligible_evidence(db: &str, experiment_id: i64, manifest_hash: &str) -> Result<Value> {
+    let mut conn = connect(db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let tx = conn.transaction()?;
+    eligible_evidence_in(&tx, experiment_id, manifest_hash)
+}
+/// Shares the caller's SQLite snapshot/transaction, and performs no database writes.
+pub(crate) fn eligible_evidence_in(
+    conn: &Connection,
+    experiment_id: i64,
+    manifest_hash: &str,
+) -> Result<Value> {
+    let experiment = load_experiment(conn, experiment_id)?;
+    let artifacts = verified_pair(conn, experiment_id, &experiment)?;
+    let (_, expected_hash) = verify_manifest(&experiment, &artifacts)?;
+    if expected_hash != manifest_hash {
+        bail!("manifest hash 不匹配冻结匿名证据");
+    }
+    verify_public_exports(conn, experiment_id, &experiment, &artifacts)?;
+    if !generator_known(&experiment.conditions)
+        || !artifacts.iter().all(|a| {
+            a.receipt["verified"] == true
+                && a.receipt["renderer"]["kind"] == "chrome"
+                && a.report["static_checks"]["passed"] == true
+        })
+    {
+        bail!("个人偏好只接受正式 eligible 的真实 capture；mock/未知生成器/静态失败不得桥接");
+    }
+    let mut result = Vec::new();
+    for (index, artifact) in artifacts.iter().enumerate() {
+        let id: i64 = conn.query_row(
+            "SELECT id FROM artifact WHERE experiment_id=?1 AND arm=?2",
+            params![experiment_id, artifact.arm],
+            |r| r.get(0),
+        )?;
+        let label = if experiment.mapping["A"] == artifact.arm {
+            "A"
+        } else {
+            "B"
+        };
+        result.push(json!({"artifact_id":id,"arm":artifact.arm,"label":label,
+            "original_path":artifact.original,"archived_html_path":artifact.archive,"screenshot_path":artifact.screenshot,
+            "page_sha256":artifact.page_hash,"shot_sha256":artifact.screenshot_hash,
+            "receipt_sha256":artifact.receipt_hash,"capture_receipt":artifact.receipt,
+            "content_report":artifact.report,"pill_snapshot":experiment.snapshots[index],"recipe_hash":experiment.recipe_hashes[index]}));
+    }
+    Ok(
+        json!({"experiment_id":experiment_id,"manifest_hash":expected_hash,"formal_eligible":true,
+        "content_hash":hash_json(&experiment.content),"conditions_hash":experiment.conditions_hash,
+        "conditions":experiment.conditions,"artifacts":result,
+        "boundaries":"capture 不是 OS 沙箱；hash 不是签名；生成器身份为声明；静态内容不证明可见性或偏好"}),
+    )
+}
+
 pub fn attach(opts: &AttachOpts<'_>) -> Result<Value> {
     attach_impl(opts, None)
 }
@@ -864,8 +920,8 @@ fn connect(path: &str, flags: OpenFlags) -> Result<Connection> {
         [],
         |r| r.get(0),
     )?;
-    if version != "24" {
-        bail!("experiment 需要 schema 24；请先显式迁移，不会自动修改旧库");
+    if version != "24" && version != "25" {
+        bail!("experiment 需要 schema 24/25；请先显式迁移，不会自动修改旧库");
     }
     Ok(conn)
 }
@@ -1335,6 +1391,29 @@ mod tests {
                 exp.recipe_hashes[winner_index].clone(),
             )
         }
+    }
+
+    #[test]
+    fn personal_evidence_view_revalidates_eligible_final_screenshots_without_writes() {
+        let f = Fixture::new();
+        let id = f.ready();
+        let (hash, _) = f.synthetic_verified_pair(id);
+        let before = std::fs::read(&f.db).unwrap();
+        let evidence = eligible_evidence(&f.db, id, &hash).unwrap();
+        assert_eq!(evidence["formal_eligible"], true);
+        assert_eq!(evidence["manifest_hash"], hash);
+        assert_eq!(evidence["artifacts"].as_array().unwrap().len(), 2);
+        for artifact in evidence["artifacts"].as_array().unwrap() {
+            assert!(artifact["artifact_id"].as_i64().unwrap() > 0);
+            assert_eq!(
+                crate::capture::sha256_file(Path::new(
+                    artifact["screenshot_path"].as_str().unwrap()
+                ))
+                .unwrap(),
+                artifact["shot_sha256"]
+            );
+        }
+        assert_eq!(std::fs::read(&f.db).unwrap(), before);
     }
 
     #[test]

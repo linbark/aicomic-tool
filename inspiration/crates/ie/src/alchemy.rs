@@ -406,10 +406,93 @@ fn pixel_extract(m: &metrics::Metrics) -> serde_json::Value {
     })
 }
 
+/// Brew only a selected frozen recipe/extract set; personal trace never bypasses hard constraints.
+pub fn brew_snapshot(
+    db: &str,
+    snapshot: &serde_json::Value,
+    trace: &serde_json::Value,
+) -> Result<serde_json::Value> {
+    use serde_json::json;
+    anyhow::ensure!(
+        crate::forge::frozen_snapshot(snapshot)?,
+        "个人候选必须是完整冻结丹药"
+    );
+    anyhow::ensure!(trace.is_object(), "个人选择必须有可审计轨迹");
+    let components = snapshot["components"]
+        .as_array()
+        .context("候选缺 components")?;
+    anyhow::ensure!(!components.is_empty(), "个人候选没有冻结药液");
+    let conn = Connection::open(db)?;
+    let mut pinned = std::collections::HashMap::new();
+    type PinnedRecord = (
+        String,
+        Option<String>,
+        i64,
+        String,
+        Option<String>,
+        Option<i64>,
+        i64,
+    );
+    for component in components {
+        let id = component["extract_id"].as_i64().context("候选缺药液 ID")?;
+        let (content, version, revision, hash, input, work, technique): PinnedRecord = conn.query_row(
+            "SELECT content_json,technique_version,revision,hash,input_fingerprint,work_id,technique_id FROM extract WHERE id=?1",
+            [id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?)),
+        ).with_context(|| format!("候选药液 #{id} 不在当前库，不能猜测替代"))?;
+        anyhow::ensure!(
+            serde_json::from_str::<serde_json::Value>(&content)? == component["content"]
+                && json!(version) == component["technique_version"]
+                && json!(revision) == component["extract_revision"]
+                && json!(hash) == component["hash"]
+                && json!(input) == component["input_fingerprint"]
+                && json!(work) == component["work_id"]
+                && json!(technique) == component["technique_id"],
+            "候选药液 #{id} 与当前库身份或冻结内容不符"
+        );
+        let slot = component["slot"].as_str().context("候选药液缺 slot")?;
+        let dimension = component["dimension"]
+            .as_str()
+            .context("候选药液缺 dimension")?;
+        anyhow::ensure!(
+            pinned.insert(format!("{slot}.{dimension}"), id).is_none(),
+            "候选存在重复药液槽位"
+        );
+    }
+    drop(conn);
+    let opts = BrewOpts {
+        db,
+        recipe: Path::new("<frozen-personal-candidate>"),
+        pinned: Some(&pinned),
+        formula_id: None,
+        allow_mixed: false,
+        force: false,
+        out_dir: None,
+        quiet: true,
+    };
+    let pill_id = brew_value(&opts, snapshot["recipe_definition"].clone(), Some(trace))?;
+    let conn = Connection::open(db)?;
+    let raw: String =
+        conn.query_row("SELECT output_json FROM pill WHERE id=?1", [pill_id], |r| {
+            r.get(0)
+        })?;
+    Ok(
+        json!({"pill_id":pill_id,"output":serde_json::from_str::<serde_json::Value>(&raw)?,
+        "note":"按已渲染候选的冻结配方与原药液炼制；选择轨迹不是新成品美感证明"}),
+    )
+}
+
 pub fn brew(o: &BrewOpts<'_>) -> Result<()> {
     let text = std::fs::read_to_string(o.recipe)
         .with_context(|| format!("读不到配方 {}", o.recipe.display()))?;
     let r: serde_json::Value = serde_json::from_str(&text).context("配方不是合法 JSON")?;
+    brew_value(o, r, None).map(|_| ())
+}
+
+fn brew_value(
+    o: &BrewOpts<'_>,
+    r: serde_json::Value,
+    personal_trace: Option<&serde_json::Value>,
+) -> Result<i64> {
     let key = r["key"].as_str().context("配方缺 key")?.to_string();
     let name = r["name"].as_str().unwrap_or(&key).to_string();
     let goal = r["goal"].as_str().unwrap_or("").to_string();
@@ -841,7 +924,7 @@ pub fn brew(o: &BrewOpts<'_>) -> Result<()> {
             "inputs":inputs.map(|s| serde_json::from_str::<serde_json::Value>(&s)).transpose()?
         }))
     }).collect::<Result<Vec<_>>>()?;
-    let output_json = serde_json::json!({
+    let mut output_json = serde_json::json!({
         "snapshot_version":1,
         "provenance":{"source":"pill_snapshot", "historically_reproducible":true},
         "recipe":key, "recipe_definition":r,
@@ -850,6 +933,9 @@ pub fn brew(o: &BrewOpts<'_>) -> Result<()> {
         "spec_issues":issues,
         "prompt":rendered,
     });
+    if let Some(trace) = personal_trace {
+        output_json["personal_selection"] = trace.clone();
+    }
     conn.execute(
         "INSERT INTO pill(formula_id,recipe_id,output_md,output_json,score_json,cost_json,created_at)
          VALUES(?1,?2,?3,?4,'{}','{\"tokens\":0}',?5)",
@@ -866,6 +952,9 @@ pub fn brew(o: &BrewOpts<'_>) -> Result<()> {
         std::fs::create_dir_all(dir)?;
         std::fs::write(dir.join(format!("{pill_id}-{key}.md")), &md)?;
     }
+    if personal_trace.is_some() {
+        return Ok(pill_id);
+    }
     if o.quiet {
         println!(
             "  · #{} 预检分 {:.2}（{}）",
@@ -880,7 +969,7 @@ pub fn brew(o: &BrewOpts<'_>) -> Result<()> {
             score["total"].as_f64().unwrap_or(0.0)
         );
     }
-    Ok(())
+    Ok(pill_id)
 }
 
 pub struct MutateOpts<'a> {
@@ -1494,6 +1583,58 @@ fn truncate(s: &str, n: usize) -> String {
 pub(crate) mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn snapshot_brew_keeps_selected_extracts_and_freezes_personal_trace_without_mutating_history() {
+        let f = Fixture::new();
+        f.refine(false);
+        let (recipe, _) = f.recipe();
+        let (original_id, snapshot) = f.brew(&recipe);
+        let trace = serde_json::json!({"person":"fixture-user","applied":false,"fallback_reason":"cold_start","chosen_artifact_id":1});
+        let result = brew_snapshot(&f.db, &snapshot, &trace).unwrap();
+        let output = &result["output"];
+        assert_eq!(output["personal_selection"], trace);
+        assert_eq!(output["recipe_definition"], snapshot["recipe_definition"]);
+        assert_eq!(output["components"], snapshot["components"]);
+        let old: String = f
+            .conn()
+            .query_row(
+                "SELECT output_json FROM pill WHERE id=?1",
+                [original_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&old).unwrap(),
+            snapshot
+        );
+    }
+
+    #[test]
+    fn personal_snapshot_brew_rejects_missing_extracts_and_keeps_hard_constraints() {
+        let f = Fixture::new();
+        f.refine(false);
+        let (recipe, _) = f.recipe();
+        let (_, snapshot) = f.brew(&recipe);
+        let trace = serde_json::json!({"person":"fixture-user","applied":true});
+        let count = || {
+            f.conn()
+                .query_row("SELECT count(*) FROM pill", [], |r| r.get::<_, i64>(0))
+                .unwrap()
+        };
+        let before = count();
+        let mut missing = snapshot.clone();
+        missing["components"][0]["extract_id"] = serde_json::json!(99999);
+        assert!(brew_snapshot(&f.db, &missing, &trace).is_err());
+        let mut impossible = snapshot;
+        impossible["recipe_definition"]["constraints"]["contrast_min"] = serde_json::json!(22.0);
+        assert!(brew_snapshot(&f.db, &impossible, &trace).is_err());
+        assert_eq!(
+            count(),
+            before,
+            "personalization cannot force an invalid new pill"
+        );
+    }
 
     pub(crate) struct Fixture {
         pub root: PathBuf,

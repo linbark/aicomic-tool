@@ -78,8 +78,13 @@ pub fn export(o: &ExportOpts<'_>) -> Result<()> {
         &[],
     )?;
 
+    // Private generated works and all their dependent assets stay local by default.
+    let private_supported = has_work_visibility(&conn)?;
     // 作品：按可选过滤条件
     let mut where_parts: Vec<String> = Vec::new();
+    if private_supported && !o.with_personal {
+        where_parts.push("w.visibility <> 'private'".to_string());
+    }
     if let Some(c) = o.collection {
         where_parts.push(format!("w.collection = '{}'", c.replace('\'', "''")));
     }
@@ -94,10 +99,15 @@ pub fn export(o: &ExportOpts<'_>) -> Result<()> {
     } else {
         format!("WHERE {}", where_parts.join(" AND "))
     };
+    let visibility_column = if private_supported {
+        "w.visibility"
+    } else {
+        "'public'"
+    };
     let works_sql = format!(
         "SELECT w.source_id,w.domain_id,w.collection,w.slug,w.canonical_url,w.title,w.subtitle_quoted,
                 w.summary_derived,w.creator_name,w.creator_url,w.origin_url,w.created_year,w.licence,
-                w.rights_holder,w.status,w.payload_json,w.first_seen_at,w.last_seen_at
+                w.rights_holder,w.status,w.payload_json,w.first_seen_at,w.last_seen_at,{visibility_column} AS visibility
          FROM work w {filter} ORDER BY w.id"
     );
     let works = rows(&conn, &works_sql, &[])?;
@@ -199,12 +209,17 @@ pub fn export(o: &ExportOpts<'_>) -> Result<()> {
         &[],
     )?;
     let mut pev = Vec::new();
+    let private_reference_filter = if private_supported && !o.with_personal {
+        " AND w.visibility <> 'private'"
+    } else {
+        ""
+    };
     for p in bundle["principles"].as_array().cloned().unwrap_or_default() {
         let pid = p["id"].as_i64().unwrap_or(0);
         for e in rows(
             &conn,
-            "SELECT e.role, e.note, e.weight, w.source_id, w.collection, w.slug
-             FROM principle_evidence e JOIN work w ON w.id=e.work_id WHERE e.principle_id=?1",
+            &format!("SELECT e.role, e.note, e.weight, w.source_id, w.collection, w.slug
+             FROM principle_evidence e JOIN work w ON w.id=e.work_id WHERE e.principle_id=?1{private_reference_filter}"),
             &[&pid],
         )? {
             let mut r = e.clone();
@@ -271,6 +286,14 @@ pub fn export(o: &ExportOpts<'_>) -> Result<()> {
         stats
     );
     Ok(())
+}
+
+fn has_work_visibility(conn: &Connection) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('work') WHERE name='visibility')",
+        [],
+        |r| r.get(0),
+    )?)
 }
 
 fn s(v: &Value, k: &str) -> String {
@@ -669,6 +692,19 @@ impl Imp<'_> {
     }
 
     fn work(&mut self, w: &Value) -> Result<()> {
+        let visibility = w
+            .get("visibility")
+            .and_then(Value::as_str)
+            .unwrap_or("public");
+        anyhow::ensure!(
+            ["public", "private"].contains(&visibility),
+            "未知作品可见性，拒绝猜测或降级隐私"
+        );
+        let private_supported = has_work_visibility(&self.tx)?;
+        anyhow::ensure!(
+            visibility != "private" || private_supported,
+            "私有作品需要升级到 schema25 才能导入；已回滚，不会降级成公开"
+        );
         self.tx.execute(
             "INSERT INTO work(source_id,domain_id,collection,slug,canonical_url,title,subtitle_quoted,summary_derived,
                 creator_name,creator_url,origin_url,created_year,licence,rights_holder,status,payload_json,first_seen_at,last_seen_at)
@@ -703,6 +739,10 @@ impl Imp<'_> {
             params![s(w, "source_id"), s(w, "collection"), s(w, "slug")],
             |r| r.get(0),
         )?;
+        if private_supported {
+            // Import can preserve/strengthen privacy, never silently publish a private row.
+            self.tx.execute("UPDATE work SET visibility=CASE WHEN visibility='private' OR ?1='private' THEN 'private' ELSE 'public' END WHERE id=?2",params![visibility,id])?;
+        }
         self.work_map.insert(
             format!(
                 "{}|{}|{}",
@@ -1088,4 +1128,64 @@ fn find_asset(
         )
         .ok();
     Ok(id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::alchemy::tests::Fixture;
+
+    fn private_fixture() -> Fixture {
+        let f = Fixture::new();
+        f.conn().execute("INSERT INTO work(id,source_id,domain_id,collection,slug,canonical_url,title,payload_json,visibility,first_seen_at,last_seen_at)
+            SELECT 9002,source_id,domain_id,'personal','private-artifact','urn:private-export-fixture','PRIVATE_USER_ARTIFACT','{\"note\":\"PRIVATE_USER_PAYLOAD\"}','private',first_seen_at,last_seen_at FROM work WHERE id=1",[]).unwrap();
+        f.conn().execute("INSERT INTO asset(work_id,role,local_path,sha256) VALUES(9002,'screenshot','PRIVATE_SCREENSHOT_PATH','private-hash')",[]).unwrap();
+        f
+    }
+    fn export_fixture(f: &Fixture, personal: bool, name: &str) -> Value {
+        let out = f.root.join(name);
+        export(&ExportOpts {
+            db: &f.db,
+            out: &out,
+            root: &f.root,
+            format: "json",
+            with_assets: false,
+            with_personal: personal,
+            collection: None,
+            domain: None,
+            since: None,
+        })
+        .unwrap();
+        serde_json::from_str(&std::fs::read_to_string(out).unwrap()).unwrap()
+    }
+    #[test]
+    fn explicit_personal_export_import_cannot_turn_private_works_public() {
+        let original = private_fixture();
+        let exported = export_fixture(&original, true, "explicit-personal.json");
+        assert!(exported.to_string().contains("PRIVATE_USER_ARTIFACT"));
+        let restored = Fixture::new();
+        import(&ImportOpts {
+            db: &restored.db,
+            input: &original.root.join("explicit-personal.json"),
+            root: &restored.root,
+            dry_run: false,
+        })
+        .unwrap();
+        let public = export_fixture(&restored, false, "public-after-import.json");
+        assert!(
+            !public.to_string().contains("PRIVATE_USER_ARTIFACT"),
+            "explicit backup transport must preserve privacy on the next default export"
+        );
+    }
+
+    #[test]
+    fn public_corpus_export_never_includes_private_generated_works_or_assets() {
+        let f = private_fixture();
+        let bundle = export_fixture(&f, false, "public.json");
+        let text = bundle.to_string();
+        assert!(!text.contains("PRIVATE_USER_ARTIFACT"));
+        assert!(!text.contains("PRIVATE_USER_PAYLOAD"));
+        assert!(!text.contains("PRIVATE_SCREENSHOT_PATH"));
+        assert_eq!(bundle["works"].as_array().unwrap().len(), 1);
+    }
 }

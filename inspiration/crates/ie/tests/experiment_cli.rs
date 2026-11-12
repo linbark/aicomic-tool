@@ -217,6 +217,41 @@ fn a_bare_reviewer_flag_never_becomes_a_human_identity() {
 }
 
 #[test]
+fn a_new_private_person_remains_honest_cold_start_without_a_kernel() {
+    let f = Fixture::new();
+    f.seed();
+    let initialized = f.success(&["person", "init", "--person", "fixture-person"]);
+    assert!(initialized.is_object());
+    let fitted = f.success(&["fit", "--person", "fixture-person"]);
+    assert_eq!(fitted["status"], "cold_start");
+    assert_eq!(fitted["counts"]["raw"], 0);
+    assert_eq!(fitted["fitted"], false);
+    assert_eq!(fitted["activated"], false);
+    let shown = f.success(&["kernel", "show", "--person", "fixture-person"]);
+    assert_eq!(shown["counts"]["raw"], 0);
+    assert_eq!(shown["counts"]["usable"], 0);
+    assert_eq!(shown["kernels"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn personal_modes_cannot_be_silently_ignored_or_activated_with_false() {
+    let f = Fixture::new();
+    f.seed();
+    let out = f.run(&[
+        "brew",
+        "--recipe",
+        "missing.recipe.json",
+        "--person",
+        "fixture-person",
+    ]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("personal-candidates"));
+    let out = f.run(&["fit", "--person", "fixture-person", "--activate", "false"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("activate"));
+}
+
+#[test]
 fn malformed_candidate_ids_are_not_silently_dropped_by_cli() {
     let f = Fixture::new();
     f.seed();

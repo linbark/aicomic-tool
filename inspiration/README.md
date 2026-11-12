@@ -89,6 +89,36 @@ ie experiment stats --db /path/to/experiment.db
 - 配方按完整定义哈希及共同条件分组，不直接改写药液质量或配方权重。n=1 仅为本条件下一次判断，不能宣称普遍更美。当前没有真实用户视觉评价时，正式样本必须为 0。
 - 内容覆盖是源码文字/内嵌素材检查，不是 DOM 真实可见性证明；生成器配置是操作者声明，不是独立认证；静态通过不是美感分，捕获哈希也不是数字签名。字体仍使用本机系统字体，不能承诺跨平台像素一致。
 
+## 第三阶段：明确个人用途、冷启动与内核候选
+
+实现与验证见[第三阶段验收](../docs/design/炼丹炉个人闭环验收.md)。
+
+升级到 schema 25 后，真实个人选择与演练分开。视觉审稿票不会自动灌入某个人的内核；必须同时明确本人、reviewer 和 `personal_preference` 用途。
+
+```sh
+ie person init --db /path/to/private.db --person <new-local-id>
+# 只填写用户明确表达的真实选择；以下参数是占位，不是示例真人评分
+ie experiment record --db /path/to/private.db --experiment <id> \
+  --manifest-hash <actual-hash> --winner <A|B|tie|abstain> \
+  --source human --reviewer <local-id> --person <same-local-id> --intent personal_preference
+ie fit --db /path/to/private.db --person <local-id>
+ie kernel show --db /path/to/private.db --person <local-id>
+# 已有核验过的成品参照；清单为 {"scope":"ui-static","artifact_ids":[...]}。
+ie brew --db /path/to/private.db --person <local-id> --personal-candidates candidates.json
+# 试用需先通过验证，再分别显式 --activate 和 --apply-personal；这两个开关不接受 false 值。
+# 如果视觉记录已保存但个人桥接失败，可幂等修复：
+ie person bridge --db /path/to/private.db --person <local-id> \
+  --evaluation <actual-id> --intent personal_preference
+```
+
+- 每张最终截图成为独立的 **private generated work**；从实际 PNG 冻结留白、细节密度两个较可信像素代理。不是复制原药材向量，不将配方 ID 或赢家当特征，缺失不补 0。像素代理不等于美感。
+- 来源只消费明确 human 个人选择，旧 judgment/kernel 默认 legacy，simulate 新数据标 demo；已有演练人格不升格真人，真人身份也不能拿去跑演练。演练拟合必须显式 `fit --source demo --person demo`。
+- 先按规范化页面/截图对取最新真人票，再排除 tie、abstain、零特征差与无共同可信特征；重复/倒序和演示不凑样本。少于 10 个可用对不拟合；10 起仅 L0 草稿，不自动替换内核。
+- 试用门槛还要求至少 20 个可用对、5 个独立内容组、10 个训练对/3 个训练组、8 个按组留出对，胜过常数基线且 95% Wilson 下界高于 0.5；全部通过仍只代表工程试用，不是稳定审美证明。没有显式 `--activate` 就不启用。
+- 训练仅从冻结真人证据计算并保存 train-only mean/std、词表/掩码、分组、参数、数据与特征哈希。新增语料、演练或 live 向量重提不改变旧内核的打分尺度。
+- 只有 active human、scope/特征契约匹配、当前证据完整且显式 `--apply-personal` 时，才对同条件已渲染候选排序。冷启动/草稿/演练/旧内核/缺证据都保持原序，不外推未渲染配方。新丹药冻结完整选择轨迹和原药液身份，不能用个人化绕过硬约束。
+- 个人生成作品及其素材默认不公开导出；显式个人导出往返也保留 private，不静默改成公开。身份、具体选择、特征与本机数据库不提交仓库。local consent 是用途声明，不是身份认证或加密。
+
 ## 命令
 
 ```sh
@@ -96,7 +126,7 @@ ie extract  --db data/inspiration/inspiration.db --root data/inspiration [--limi
 ie vision   --db ... --root ... --model gemini-3.1-flash-lite [--limit N] [--thinking 0]
 ie stats    --db data/inspiration/inspiration.db
 ie simulate --db <db> --person demo --n 200 [--seed 7] [--mode random|active]
-ie fit      --db <db> --person demo
+ie fit      --db <db> --person demo --source demo
 ```
 
 `ie vision` 默认走 Gemini，需要环境变量 `GEMINI_API_KEY`；只在进程内读取，不写库、不落盘、不打印。
@@ -241,7 +271,7 @@ ie import --db /tmp/other.db --in finds.json --root /tmp/other
 - **幂等**：同一份包导入两次，各表行数不变（实测 865 作品 / 851 素材 / 897 观察 / 5106 度量 / 4921 证据）。
 - **图片可选**：默认只带 sha 与路径；`--with-assets` 把 blob 以 base64 塞进包（163 张 finds ≈ 8.6 MB），
   导入端按 sha 落到 `<root>/blobs/xx/<sha>`，天然去重。
-- **个人数据默认不导出**：内核、判定、会话需要 `--with-personal` 显式打开。导出会保留这些行，但**当前版本不导入个人数据**（导入时会明确提示），避免把别人的口味静默合进你的库。
+- **个人数据默认不导出**：`--with-personal` 仅显式包含 person/kernel/kernel_claim，以及 private 作品及其素材；私有作品的 visibility 在往返中保留。当前语料包**不包含 judgment/session、实验/成品/评价/冻结特征的完整证据图，也不恢复个人内核训练状态**，不能当作个人数据完整备份；应另存 SQLite 一致性备份。
 - **`--dry-run`** 会完整跑一遍再回滚，只报数量。
 - **两种格式**：`.json`（一个 bundle 对象，便于肉眼查看）与 `.ndjson`（一行一条，导入端流式消费，
   内存只占一行）。导入按首行 `{"_type":"header"}` 自动识别，不需要额外参数。
