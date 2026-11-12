@@ -58,7 +58,7 @@ pub fn refine(o: &RefineOpts<'_>) -> Result<()> {
 }
 
 /// Return only bottles actually produced/reused by this invocation, never max(id).
-fn refine_selected(o: &RefineOpts<'_>) -> Result<Vec<i64>> {
+pub(crate) fn refine_selected(o: &RefineOpts<'_>) -> Result<Vec<i64>> {
     let conn = Connection::open(o.db)?;
     conn.busy_timeout(Duration::from_secs(10))?;
     let (asset_path, title, _collection): (String, String, String) = conn
@@ -488,7 +488,7 @@ pub fn brew(o: &BrewOpts<'_>) -> Result<()> {
     brew_value(o, r, None).map(|_| ())
 }
 
-fn brew_value(
+pub(crate) fn brew_value(
     o: &BrewOpts<'_>,
     r: serde_json::Value,
     personal_trace: Option<&serde_json::Value>,

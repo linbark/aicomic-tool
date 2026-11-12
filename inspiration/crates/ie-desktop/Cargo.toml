@@ -1,0 +1,18 @@
+[package]
+name = "ie-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "炼丹炉 · 原生本地素材工作台"
+
+[[bin]]
+name = "ie-desktop"
+path = "src/main.rs"
+
+[dependencies]
+iced = { version = "=0.14.0", default-features = false, features = ["wgpu", "tiny-skia", "tokio", "image-without-codecs", "advanced"] }
+ie = { path = "../ie" }
+serde_json = "1"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+tokio = { version = "1", features = ["rt", "time"] }
+rfd = "0.15"

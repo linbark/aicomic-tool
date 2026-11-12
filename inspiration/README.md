@@ -7,9 +7,39 @@
 
 ```text
 inspiration/
-├── crates/ie/            # CLI：extract / simulate / fit / stats
+├── crates/ie/            # 共享引擎 + CLI
+├── crates/ie-desktop/    # 独立 Rust / Iced 原生桌面工作台
+├── packaging/macos/     # 本机 APP / ZIP 打包
 └── Cargo.toml
 ```
+
+## 可视化桌面界面
+
+已实现 **素材库 → 炼丹台 → 丹药规格 → 匿名成品 / 我的偏好** 四页原生界面。设计见[界面设计](../docs/design/炼丹炉可视化界面设计.md)，实际窗口、回归和限制见[界面验收](../docs/design/炼丹炉可视化界面验收.md)。不使用 WebView、Node 或本地 HTTP 服务。
+
+从仓库根目录启动已有素材库（只读）：
+
+```sh
+cargo run --manifest-path inspiration/Cargo.toml -p ie-desktop -- \
+  --db data/inspiration/inspiration.db --root data/inspiration \
+  --recipes docs/design/inspiration/recipes
+```
+
+不传 `--db` 进入欢迎页，不读取默认数据库；也可在界面中选择已有库。原生打开数据库会推断其父目录为素材根；新副本保存素材根提示，重新打开时可采用，明确 `--root` 始终优先。**启动 / 打开已有库一律只读**，点击“建立工作副本”另存为新路径后才可炼药、炼制或记录；只升级新副本，不改写原库，素材文件仍引用原位置，不会一起复制。
+
+- 素材网格、搜索 / 分页、药液当前版本和历史、颜色样本；本地炼药仅计算 palette / spacing，不请求模型。
+- 本地配方选择与比例、严格约束炼制、人可读冻结规格、结构预检和 Brief 新目录导出；结构分不是美感分。
+- 已有匿名 A/B 图、明确身份与私人用途、提交确认、冷启动状态。演示库强制 demo，不创建真人样本；GUI 不自动拟合或激活内核。
+- 原库、缺图、无结果、忙碌、取消、后台异常和旧结果竞态都有保护。Cmd/Ctrl+F / R / O / 1–4 与 Escape；默认跟系统浅深色。
+
+从本目录打包 Mac 应用：
+
+```sh
+bash packaging/macos/package.sh
+# 默认输出 dist/macos-<本机架构>/；已有输出不会覆盖，可指定 --output 新目录
+```
+
+打包脚本用 AppKit/Swift **仅生成构建时 ICNS**，运行产物只有 Rust 原生程序与图标，无 Swift 脚本运行依赖。当前仅本机 Apple Silicon Mac 实测，本地 ad-hoc 签名，不是 Developer ID 公证发行版。新素材采集、生成成品与外部模型配置仍沿用 CLI；GUI 当前审阅已有实验，不提供一键生成整套页面或完整 CLI 功能映射。
 
 ## 构建
 
@@ -17,7 +47,7 @@ inspiration/
 cd inspiration && cargo build --release --offline
 ```
 
-依赖只用本地已缓存的 crate（image / rusqlite / rayon / serde_json），不联网。
+默认 member 保留为 CLI，引擎使用 image / rusqlite / rayon / serde_json 等依赖；GUI 显式选 `-p ie-desktop` 并增加 Iced / rfd。上述 `--offline` 构建要求本地已有相应依赖缓存。
 
 ### 原型回归验证
 

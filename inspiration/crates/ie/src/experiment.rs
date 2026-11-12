@@ -1169,6 +1169,48 @@ mod tests {
     }
 
     #[test]
+    fn blind_accepts_unchanged_fractional_static_measurements_after_persistence() {
+        let f = Fixture::new();
+        f.pill(1, frozen("recipe.fractional-a"));
+        f.pill(2, frozen("recipe.fractional-b"));
+        let created = create(&CreateOpts {
+            db: &f.db,
+            pill_a: 1,
+            pill_b: 2,
+            content: &json!({"strings":["共同标题","共同正文"]}),
+            conditions: &json!({"viewport":{"width":160,"height":120},"theme":"light",
+                "task":"unchanged fractional static measurements",
+                "generator":{"kind":"fixture","version":"mock-only"}}),
+        })
+        .unwrap();
+        let id = created["id"].as_i64().unwrap();
+        let body = "<style>small{font-size:13px}h1{font-size:48px}</style><small>Mock fixture only</small><h1>共同标题</h1><p>共同正文</p>";
+        for arm in ["a", "b"] {
+            let html = f.html(&format!("fractional-{arm}.html"), body);
+            let attached = f.attach(id, arm, &html).unwrap();
+            assert_eq!(attached["content_report"]["status"], "compliant");
+            assert_eq!(attached["content_report"]["static_checks"]["passed"], true);
+            assert_eq!(
+                attached["content_report"]["static_checks"]["measurements"]["type_ratio"]
+                    .as_f64()
+                    .unwrap()
+                    .to_bits(),
+                (48.0_f64 / 13.0).to_bits()
+            );
+            assert_ne!(attached["capture_receipt"]["renderer"]["kind"], "chrome");
+        }
+        // This real public round trip reloads the stored report and recomputes
+        // source measurements. No tolerance or skipped evidence checks is allowed.
+        let exported = blind(&BlindOpts {
+            db: &f.db,
+            experiment_id: id,
+            out_dir: &f.root.join("fractional-public"),
+        })
+        .expect("unchanged compliant artifacts must survive exact JSON persistence");
+        assert_eq!(exported["manifest_hash"].as_str().unwrap().len(), 64);
+    }
+
+    #[test]
     fn blind_exports_only_stable_anonymous_screenshots_and_a_hashed_shared_rubric() {
         let f = Fixture::new();
         let id = f.ready();
