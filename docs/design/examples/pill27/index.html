@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Harbor — 把发布变成一件安静的事</title>
+<style>
+  :root{
+    --bg:#FDFCFD; --text:#2B2B2B; --muted:#6E7476; --border:#DBE0E1; --accent:#90A1A2;
+    --s1:8px; --s2:16px; --s3:24px; --s4:32px; --margin:181px; --gap:64px;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+    font:400 18px/1.6 -apple-system,"Helvetica Neue","PingFang SC",sans-serif;
+    -webkit-font-smoothing:antialiased}
+  .wrap{max-width:838px;margin:0 auto;padding:0 var(--s3)}
+  header{border-bottom:1px solid var(--border)}
+  nav{display:flex;justify-content:space-between;align-items:center;height:56px;font-size:14px}
+  nav .mark{font-weight:600;letter-spacing:.01em}
+  nav a{color:var(--muted);text-decoration:none;margin-left:var(--s3)}
+  .hero{padding:calc(var(--gap) * 2) 0 var(--gap)}
+  h1{margin:0;font-size:72px;line-height:1.02;letter-spacing:-.03em;font-weight:600}
+  .lede{margin:var(--s3) 0 0;font-size:18px;color:var(--muted);max-width:52ch}
+  .actions{margin-top:var(--s4);display:flex;gap:var(--s2);align-items:center}
+  .btn{height:48px;display:inline-flex;align-items:center;padding:0 var(--s3);border-radius:2px;
+    background:var(--text);color:var(--bg);text-decoration:none;font-size:15px}
+  .btn.ghost{background:transparent;color:var(--text);border:1px solid var(--border)}
+  .note{font-size:13px;color:var(--muted)}
+  section{border-top:1px solid var(--border);padding:var(--gap) 0}
+  .row{display:grid;grid-template-columns:1fr 1fr;gap:var(--s4)}
+  h2{margin:0 0 var(--s2);font-size:24px;line-height:1.25;letter-spacing:-.01em;font-weight:600}
+  p{margin:0;color:var(--muted);font-size:16px}
+  .num{font-size:56px;font-weight:600;letter-spacing:-.03em;line-height:1}
+  .num small{display:block;font-size:13px;font-weight:400;color:var(--muted);margin-top:var(--s1);letter-spacing:0}
+  figure{margin:0;padding:var(--s4);border:1px solid var(--border);border-radius:2px}
+  figure .bar{height:6px;background:var(--accent);width:38%}
+  figure figcaption{margin-top:var(--s2);font-size:13px;color:var(--muted)}
+  footer{padding:var(--gap) 0 calc(var(--gap) + var(--s4));font-size:13px;color:var(--muted)}
+  @media(max-width:760px){
+    h1{font-size:44px} .row{grid-template-columns:1fr;gap:var(--s3)} .hero{padding:var(--gap) 0}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <nav>
+      <span class="mark">Harbor</span>
+      <span><a href="#">产品</a><a href="#">文档</a><a href="#">定价</a></span>
+    </nav>
+  </header>
+
+  <section class="hero" style="border-top:0">
+    <h1>发布本该<br>安静地发生。</h1>
+    <p class="lede">Harbor 把部署、回滚、灰度收进一条时间线。没有仪表盘墙，没有报警电话，只有每次发布后的一行记录。</p>
+    <div class="actions">
+      <a class="btn" href="#">用 Git 账号开始</a>
+      <a class="btn ghost" href="#">看一次真实发布</a>
+      <span class="note">前 3 个服务免费</span>
+    </div>
+  </section>
+
+  <section>
+    <div class="row">
+      <div><div class="num">41s<small>首次部署耗时中位数</small></div></div>
+      <div>
+        <h2>回滚是一次点击</h2>
+        <p>每次发布都留完整快照，回滚不重建环境，只切换指针。</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="row">
+      <div>
+        <h2>灰度按流量，不按心情</h2>
+        <p>1% → 10% → 50% → 100%，每档自动观察 5 分钟，指标越界即停。</p>
+      </div>
+      <figure>
+        <div class="bar"></div>
+        <figcaption>一次 1% 灰度中的请求分布</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section>
+    <div class="row">
+      <div>
+        <h2>记录写给三个月后的你</h2>
+        <p>谁发的、改了什么、影响了哪些服务，都写在同一条时间线里。</p>
+      </div>
+      <div>
+        <h2>不绑云厂商</h2>
+        <p>自有机器、托管集群、单机 Docker，同一套命令。</p>
+      </div>
+    </div>
+  </section>
+
+  <footer>© 2026 Harbor · 由灵感引擎丹药 #27 生成</footer>
+</div>
+</body>
+</html>

@@ -224,8 +224,19 @@ pub fn verify(db: &str, pill_id: i64, html: &Path) -> Result<()> {
             .and_then(|h| value.get(h..h + 7))
             .map(|s| s.to_string())
     };
-    let body_bg = resolve(&block, "background").or_else(|| vars.get("--paper").cloned());
-    let body_fg = resolve(&block, "color").or_else(|| vars.get("--ink").cloned());
+    let pick =
+        |names: &[&str]| -> Option<String> { names.iter().find_map(|n| vars.get(*n).cloned()) };
+    let body_bg = resolve(&block, "background")
+        .or_else(|| pick(&["--bg", "--background", "--paper", "--surface"]))
+        .or_else(|| vars.values().next().cloned());
+    let body_fg = resolve(&block, "color")
+        .or_else(|| pick(&["--text", "--ink", "--fg", "--foreground"]))
+        .or_else(|| {
+            let bg = vars.get("--bg").cloned();
+            vars.iter()
+                .find(|(k, v)| Some(*v) != bg.as_ref().map(|_| *v) && **k != "--bg")
+                .map(|(_, v)| v.clone())
+        });
     let contrast = match (body_bg, body_fg) {
         (Some(bg), Some(fg)) => contrast_ratio(&bg, &fg),
         _ => 0.0,

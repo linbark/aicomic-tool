@@ -21,6 +21,8 @@ pub struct RunOpts<'a> {
     pub base_url: &'a str,
     pub thinking: u32,
     pub seed: u64,
+    pub repeats: usize,
+    pub dimension: String,
 }
 
 struct Candidate {
@@ -125,9 +127,16 @@ pub fn run(o: &RunOpts<'_>) -> Result<()> {
                 .wrapping_add(1442695040888963407);
             let flip = (rng >> 11) % 2 == 1;
             let (left, right) = if flip { (j, i) } else { (i, j) };
+            let criterion = match o.dimension.as_str() {
+                "hierarchy" => "只看层级是否清楚",
+                "consistency" => "只看体系是否自洽",
+                "restraint" => "只看是否克制、有没有堆砌",
+                "executability" => "只看能否被直接执行",
+                _ => "综合层级、自洽、克制、可执行",
+            };
             let prompt = format!(
-                "你是设计评审。下面是两份设计规格，只有文字。\n\n【候选 1】\n{}\n\n【候选 2】\n{}\n\n                 哪一份更好？标准：层级更清楚、体系更自洽、更克制、更可执行。\n                 只输出 JSON：{{\"winner\":\"1\"|\"2\"|\"tie\",\"reason\":\"一句话\",\"confidence\":0.0}}，不要解释文字。",
-                cands[left].prompt, cands[right].prompt
+                "你是设计评审。下面是两份设计规格，只有文字。\n\n【候选 1】\n{}\n\n【候选 2】\n{}\n\n问题：{}，哪一份更好？\n只输出 JSON：{{\"winner\":\"1\"|\"2\"|\"tie\",\"reason\":\"一句话\",\"confidence\":0.0}}，不要解释文字。",
+                cands[left].prompt, cands[right].prompt, criterion
             );
             let body = if o.provider == "openai" {
                 openai_text_body(&prompt, o.model, 400)
@@ -137,24 +146,30 @@ pub fn run(o: &RunOpts<'_>) -> Result<()> {
                     "generationConfig": {"responseMimeType":"application/json","temperature":0.2,"maxOutputTokens":400,"thinkingConfig":{"thinkingBudget":o.thinking}}
                 })
             };
-            let outcome = if o.provider == "openai" {
-                call_openai(&client, o.base_url, &key, &body)
-            } else {
-                call(&client, o.base_url, o.model, &key, &body)
-            };
-            let v = match outcome {
-                CallOutcome::Ok(v, _) => v,
-                CallOutcome::RateLimited(i) => bail!("限流：{}", i.body),
-                CallOutcome::Failed(e) => bail!("成对评判失败：{e}"),
-            };
-            let winner = v["winner"].as_str().unwrap_or("tie");
-            let reason = v["reason"].as_str().unwrap_or("").to_string();
-            let win_for_left = match winner {
-                "1" => 1.0,
-                "2" => 0.0,
-                _ => 0.5,
-            };
-            // 转回 (i, j) 顺序：win for i
+            let mut ll: f64 = 0.0;
+            let mut reason = String::new();
+            for _ in 0..o.repeats.max(1) {
+                let outcome = if o.provider == "openai" {
+                    call_openai(&client, o.base_url, &key, &body)
+                } else {
+                    call(&client, o.base_url, o.model, &key, &body)
+                };
+                let v = match outcome {
+                    CallOutcome::Ok(v, _) => v,
+                    CallOutcome::RateLimited(i) => bail!("限流：{}", i.body),
+                    CallOutcome::Failed(e) => bail!("成对评判失败：{e}"),
+                };
+                let winner = v["winner"].as_str().unwrap_or("tie");
+                ll += match winner {
+                    "1" => 1.0,
+                    "2" => 0.0,
+                    _ => 0.5,
+                };
+                if reason.is_empty() {
+                    reason = v["reason"].as_str().unwrap_or("").to_string();
+                }
+            }
+            let win_for_left = ll / o.repeats.max(1) as f64;
             let win_for_i = if flip {
                 1.0 - win_for_left
             } else {

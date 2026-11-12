@@ -358,6 +358,14 @@ fn main() -> Result<()> {
                         .and_then(|v| v.parse().ok())
                         .unwrap_or(0);
                     let seed: u64 = opts.get("seed").and_then(|v| v.parse().ok()).unwrap_or(7);
+                    let repeats: usize = opts
+                        .get("repeats")
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(3);
+                    let dimension = opts
+                        .get("dimension")
+                        .cloned()
+                        .unwrap_or_else(|| "overall".to_string());
                     judge::run(&judge::RunOpts {
                         db: &db,
                         pills,
@@ -366,6 +374,8 @@ fn main() -> Result<()> {
                         base_url: &base_url,
                         thinking,
                         seed,
+                        repeats,
+                        dimension,
                     })
                 }
                 "list" => judge::list(&db),
