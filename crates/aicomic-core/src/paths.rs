@@ -63,12 +63,35 @@ pub(crate) fn safe_join(base: &Path, relative: impl AsRef<Path>) -> Result<PathB
             _ => return Err(Error::UnsafePath(raw.into())),
         }
         if let Ok(meta) = std::fs::symlink_metadata(&result)
-            && meta.file_type().is_symlink()
+            && is_link(&meta)
         {
             return Err(Error::UnsafePath(raw.into()));
         }
     }
     Ok(result)
+}
+
+fn is_link(metadata: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        // Junctions and other reparse points are not necessarily symlinks.
+        if metadata.file_attributes() & 0x400 != 0 {
+            return true;
+        }
+    }
+    metadata.file_type().is_symlink()
+}
+
+// Directory synchronization is available through std on Unix. Windows process-
+// termination recovery uses synced files plus atomic renames; no power-loss
+// guarantee is claimed for directory entries on Windows.
+pub(crate) fn sync_directory(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    std::fs::File::open(path)?.sync_all()?;
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
 }
 
 pub(crate) fn component(value: &str) -> Result<()> {

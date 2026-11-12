@@ -12,9 +12,11 @@ impl Store {
             ));
         }
         let mut conn = self.lock()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        operations::ensure_ready(&tx, &self.paths)?;
         let (pid, item_id, shot_id, folder) = match target {
             AssetTarget::Item(id) => {
-                let item: AssetItem = get(&conn, "characters", id)?;
+                let item: AssetItem = get(&tx, "characters", id)?;
                 (
                     item.project_id,
                     Some(id),
@@ -23,10 +25,10 @@ impl Store {
                 )
             }
             AssetTarget::Shot(id) => {
-                let shot: Shot = get(&conn, "shots", id)?;
-                let scene: Scene = get(&conn, "scenes", shot.scene_id)?;
+                let shot: Shot = get(&tx, "shots", id)?;
+                let scene: Scene = get(&tx, "scenes", shot.scene_id)?;
                 (
-                    target_project(&conn, "shot", id)?,
+                    target_project(&tx, "shot", id)?,
                     None,
                     Some(id),
                     format!(
@@ -36,7 +38,7 @@ impl Store {
                 )
             }
         };
-        let project: Project = get(&conn, "projects", pid)?;
+        let project: Project = get(&tx, "projects", pid)?;
         let extension = source
             .extension()
             .and_then(|e| e.to_str())
@@ -49,29 +51,31 @@ impl Store {
             uuid::Uuid::new_v4().simple(),
             extension
         );
-        let destination = self.asset_path(&relative)?;
-        std::fs::create_dir_all(
-            destination
-                .parent()
-                .ok_or_else(|| Error::Invalid("missing media parent".into()))?,
+        let operation = operations::Operation::prepare(
+            &self.paths,
+            &tx,
+            Vec::new(),
+            None,
+            Some(format!("data/{relative}")),
         )?;
-        std::fs::copy(source, &destination)?;
-        let mut copied = CopiedFile {
-            path: destination,
-            keep: false,
+        let result = (|| -> Result<Asset> {
+            operation.copy_from(source)?;
+            let file_type = file_type(&extension);
+            let metadata = if file_type == "image" {
+                image_metadata(&operation.copied_path()?)
+            } else {
+                serde_json::json!({})
+            };
+            let id = identity::allocate(&tx, "assets")?;
+            tx.execute("INSERT INTO assets(id,character_id,shot_id,file_path,file_type,meta_data,is_favorite,created_at) VALUES(?,?,?,?,?,?,?,CURRENT_TIMESTAMP)",params![id,item_id,shot_id,relative,file_type,metadata.to_string(),item_id.is_some()])?;
+            get(&tx, "assets", id)
+        })();
+        let asset = match result {
+            Ok(asset) => asset,
+            Err(error) => return Err(operation.abort(error)),
         };
-        let file_type = file_type(&extension);
-        let metadata = if file_type == "image" {
-            image_metadata(&copied.path)
-        } else {
-            serde_json::json!({})
-        };
-        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let id = identity::allocate(&tx, "assets")?;
-        tx.execute("INSERT INTO assets(id,character_id,shot_id,file_path,file_type,meta_data,is_favorite,created_at) VALUES(?,?,?,?,?,?,?,CURRENT_TIMESTAMP)",params![id,item_id,shot_id,relative,file_type,metadata.to_string(),item_id.is_some()])?;
-        let asset = get(&tx, "assets", id)?;
-        tx.commit()?;
-        copied.keep = true;
+        operation.commit_main(tx)?;
+        operation.complete(&mut conn)?;
         Ok(asset)
     }
     pub fn register_asset_for_shot(
@@ -80,13 +84,14 @@ impl Store {
         relative: &str,
         metadata: Option<Value>,
     ) -> Result<Asset> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        operations::ensure_ready(&tx, &self.paths)?;
         if !self.asset_path(relative)?.is_file() {
             return Err(Error::Invalid(
                 "registered media must exist in data directory".into(),
             ));
         }
-        let mut conn = self.lock()?;
-        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         require(&tx, "shots", shot_id)?;
         let extension = Path::new(relative)
             .extension()
@@ -114,9 +119,11 @@ impl Store {
             ));
         }
         let mut conn = self.lock()?;
-        let shot: Shot = get(&conn, "shots", shot_id)?;
-        let scene: Scene = get(&conn, "scenes", shot.scene_id)?;
-        let project: Project = get(&conn, "projects", target_project(&conn, "shot", shot_id)?)?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        operations::ensure_ready(&tx, &self.paths)?;
+        let shot: Shot = get(&tx, "shots", shot_id)?;
+        let scene: Scene = get(&tx, "scenes", shot.scene_id)?;
+        let project: Project = get(&tx, "projects", target_project(&tx, "shot", shot_id)?)?;
         let relative = format!(
             "{}/storyboard/episode_{}/scene_{}/shot_{}/video/{}.{}",
             project.uuid,
@@ -126,26 +133,34 @@ impl Store {
             uuid::Uuid::new_v4().simple(),
             extension
         );
-        let destination = self.asset_path(&relative)?;
-        std::fs::create_dir_all(destination.parent().unwrap())?;
-        std::fs::copy(source, &destination)?;
-        let mut copied = CopiedFile {
-            path: destination,
-            keep: false,
-        };
-        let tx = conn.transaction()?;
         tx.execute(
             "UPDATE shots SET video_path=? WHERE id=?",
             params![relative, shot_id],
         )?;
-        let mut removal = StagedRemoval::new(&self.paths.root)?;
-        if let Some(old) = shot.video_path {
-            stage_unreferenced(self, &tx, &mut removal, &old)?;
+        let mut originals = Vec::new();
+        if let Some(old) = shot.video_path
+            && unreferenced(&tx, &old)?
+        {
+            self.asset_path(&old)?;
+            originals.push(format!("data/{}", old.replace('\\', "/")));
         }
-        let updated = get(&tx, "shots", shot_id)?;
-        tx.commit()?;
-        copied.keep = true;
-        removal.committed = true;
+        let operation = operations::Operation::prepare(
+            &self.paths,
+            &tx,
+            originals,
+            None,
+            Some(format!("data/{relative}")),
+        )?;
+        let copied = operation.copy_from(source).and_then(|()| operation.stage());
+        if let Err(error) = copied {
+            return Err(operation.abort(error));
+        }
+        let updated = match get(&tx, "shots", shot_id) {
+            Ok(row) => row,
+            Err(error) => return Err(operation.abort(error)),
+        };
+        operation.commit_main(tx)?;
+        operation.complete(&mut conn)?;
         Ok(updated)
     }
     pub fn delete_project(&self, id: i64) -> Result<()> {
@@ -169,29 +184,17 @@ impl Store {
 
     fn delete_domain(&self, table: &str, id: i64) -> Result<()> {
         let mut conn = self.lock()?;
-        require(&conn, table, id)?;
-        let attached = if table == "projects" {
-            memory_cleanup::attach_existing(&conn, &self.paths.resolve("memory_store.db")?)?
-        } else {
-            false
-        };
-        let result = self.delete_domain_transaction(&mut conn, table, id, attached);
-        if attached {
-            let detached = conn.execute_batch("DETACH DATABASE aicomic_project_memory");
-            if result.is_ok() {
-                detached?;
-            }
-        }
-        result
+        self.delete_domain_transaction(&mut conn, table, id)
     }
-    fn delete_domain_transaction(
-        &self,
-        conn: &mut Connection,
-        table: &str,
-        id: i64,
-        attached: bool,
-    ) -> Result<()> {
+    fn delete_domain_transaction(&self, conn: &mut Connection, table: &str, id: i64) -> Result<()> {
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        operations::ensure_ready(&tx, &self.paths)?;
+        require(&tx, table, id)?;
+        let memory = if table == "projects" {
+            memory_cleanup::Prepared::existing(&tx, &self.paths.resolve("memory_store.db")?, id)?
+        } else {
+            None
+        };
         let eps = if table == "projects" {
             ids(
                 &tx,
@@ -277,21 +280,31 @@ impl Store {
             tx.execute("DELETE FROM ai_action_runs WHERE project_id=?", [id])?;
             tx.execute("DELETE FROM projects WHERE id=?", [id])?;
         }
-        let mut removal = StagedRemoval::new(&self.paths.root)?;
+        let mut originals = Vec::new();
         for file in files {
-            if !file.is_empty() {
-                stage_unreferenced(self, &tx, &mut removal, &file)?;
+            if !file.is_empty() && unreferenced(&tx, &file)? {
+                self.asset_path(&file)?;
+                originals.push(format!("data/{}", file.replace('\\', "/")));
             }
         }
         if table == "projects" {
-            removal.take(self.paths.project_dir(id)?)?;
-            if attached {
-                memory_cleanup::delete_project(&tx, id)?;
-            }
+            originals.push(format!("projects/{id}"));
         }
-        tx.commit()?;
-        removal.committed = true;
-        Ok(())
+        let operation = operations::Operation::prepare(
+            &self.paths,
+            &tx,
+            originals,
+            (table == "projects").then_some(id),
+            None,
+        )?;
+        if let Err(error) = operation.stage() {
+            return Err(operation.abort(error));
+        }
+        operation.commit_main(tx)?;
+        if let Some(memory) = memory {
+            memory.commit().map_err(|error| operation.pending(error))?;
+        }
+        operation.complete(conn)
     }
 }
 
@@ -307,63 +320,10 @@ fn in_ids(ids: &[i64]) -> String {
         ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",")
     }
 }
-fn stage_unreferenced(
-    store: &Store,
-    conn: &Connection,
-    removal: &mut StagedRemoval,
-    relative: &str,
-) -> Result<()> {
+fn unreferenced(conn: &Connection, relative: &str) -> Result<bool> {
     let normalized = relative.replace('\\', "/");
     let n:i64=conn.query_row("SELECT (SELECT count(*) FROM assets WHERE replace(file_path,'\\','/')=?)+(SELECT count(*) FROM shots WHERE replace(video_path,'\\','/')=?)",params![normalized,normalized],|r|r.get(0))?;
-    if n == 0 {
-        removal.take(store.asset_path(relative)?)?;
-    }
-    Ok(())
-}
-struct CopiedFile {
-    path: PathBuf,
-    keep: bool,
-}
-impl Drop for CopiedFile {
-    fn drop(&mut self) {
-        if !self.keep {
-            let _ = std::fs::remove_file(&self.path);
-        }
-    }
-}
-// Files are quarantined until SQLite commits. Any failure restores the originals.
-struct StagedRemoval {
-    temp: tempfile::TempDir,
-    moved: Vec<(PathBuf, PathBuf)>,
-    committed: bool,
-}
-impl StagedRemoval {
-    fn new(root: &Path) -> Result<Self> {
-        Ok(Self {
-            temp: tempfile::Builder::new()
-                .prefix(".aicomic-trash-")
-                .tempdir_in(root)?,
-            moved: vec![],
-            committed: false,
-        })
-    }
-    fn take(&mut self, path: PathBuf) -> Result<()> {
-        if path.try_exists()? {
-            let target = self.temp.path().join(self.moved.len().to_string());
-            std::fs::rename(&path, &target)?;
-            self.moved.push((path, target));
-        }
-        Ok(())
-    }
-}
-impl Drop for StagedRemoval {
-    fn drop(&mut self) {
-        if !self.committed {
-            for (original, staged) in self.moved.iter().rev() {
-                let _ = std::fs::rename(staged, original);
-            }
-        }
-    }
+    Ok(n == 0)
 }
 fn category_folder(category: &str) -> &str {
     match category {
@@ -393,7 +353,13 @@ pub fn file_type(extension: &str) -> &'static str {
 }
 
 fn image_metadata(path: &Path) -> Value {
-    let Ok((width, height)) = image::image_dimensions(path) else {
+    // Private copies deliberately have no user-controlled extension. Detect
+    // their format from bytes rather than the quarantine filename.
+    let dimensions = image::ImageReader::open(path)
+        .and_then(|reader| reader.with_guessed_format())
+        .ok()
+        .and_then(|reader| reader.into_dimensions().ok());
+    let Some((width, height)) = dimensions else {
         return serde_json::json!({});
     };
     let mut metadata = serde_json::json!({"width":width,"height":height,"raw_parameters":""});

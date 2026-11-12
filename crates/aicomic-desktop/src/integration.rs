@@ -12,7 +12,7 @@ pub fn source_evidences(store: &Store, key: EpisodeKey, ids: &[String]) -> Resul
             .map_err(|e| e.to_string())?,
     ))
 }
-fn checked_episode(store: &Store, key: EpisodeKey) -> Result<(), String> {
+pub(crate) fn checked_episode(store: &Store, key: EpisodeKey) -> Result<(), String> {
     store.project(key.project).map_err(|e| e.to_string())?;
     if key.episode == 0 {
         return Ok(());
@@ -29,8 +29,75 @@ fn checked_episode(store: &Store, key: EpisodeKey) -> Result<(), String> {
 fn episode_id(key: EpisodeKey) -> Option<i64> {
     (key.episode > 0).then_some(key.episode)
 }
+/// The same frozen visual snapshot is used by preparation and every later model
+/// stage; a changed source must require a newly confirmed Run, not a silent mix.
+pub fn locked_visual_dna(store: &Store, project: i64) -> Result<Value, String> {
+    let mut locked = Vec::new();
+    for item in store
+        .asset_items(project)
+        .map_err(|error| error.to_string())?
+    {
+        if let Some(dna) = store
+            .read_context(
+                project,
+                &format!("visual_dna.asset_item_{}.v1.json", item.id),
+            )
+            .map_err(|error| error.to_string())?
+        {
+            if !dna.is_object() {
+                return Err("当前Visual DNA必须为JSON对象".into());
+            }
+            locked.push(json!({"name":item.name,"category":item.category,"visual_dna":dna}));
+        }
+    }
+    Ok(json!(locked))
+}
+
+/// Current projections come only from authoritative persisted settings, never
+/// from an old Run's creative artifacts. Read all sources before replacing any.
+pub fn sync_current_settings(store: &Store, project: i64) -> Result<usize, String> {
+    store.project(project).map_err(|error| error.to_string())?;
+    let bible = store
+        .read_context(project, "series_bible.v1.json")
+        .map_err(|error| error.to_string())?
+        .unwrap_or_else(|| json!({}));
+    if !bible.is_object() {
+        return Err("当前故事设定必须为JSON对象，未替换记忆投影".into());
+    }
+    let mut visual_dna = Vec::new();
+    for item in store
+        .asset_items(project)
+        .map_err(|error| error.to_string())?
+    {
+        let Some(dna) = store
+            .read_context(
+                project,
+                &format!("visual_dna.asset_item_{}.v1.json", item.id),
+            )
+            .map_err(|error| error.to_string())?
+        else {
+            continue;
+        };
+        if !dna.is_object() {
+            return Err("当前Visual DNA必须为JSON对象，未替换记忆投影".into());
+        }
+        let normalized = if dna["character_core"].is_object() {
+            dna
+        } else {
+            json!({"character_core":{"visual_dna":dna.get("visual_dna").unwrap_or(&dna),"attire":dna.get("attire")},
+                "technical_specs":dna.get("technical_specs"),"stable_diffusion_tags":dna.get("stable_diffusion_tags")})
+        };
+        visual_dna.push((item.id, normalized));
+    }
+    MemoryStore::open_root(&store.paths().root)
+        .map_err(|error| error.to_string())?
+        .sync_current_settings(project, &bible, &visual_dna)
+        .map_err(|error| error.to_string())
+}
+
 pub fn prepare_memory(store: &Store, key: EpisodeKey, script: &str) -> Result<Vec<String>, String> {
     checked_episode(store, key)?;
+    sync_current_settings(store, key.project)?;
     let memory = MemoryStore::open_root(&store.paths().root).map_err(|e| e.to_string())?;
     let project = key.project.to_string();
     let episode = key.episode.to_string();
@@ -140,6 +207,24 @@ pub fn apply_memory(
         .map_err(|e| e.to_string())?
         .unwrap_or_else(|| json!({}));
     let inherited = &request["context"]["artifacts"];
+    if matches!(
+        request["action"].as_str(),
+        Some("visual_dna" | "visual_dna_ingest")
+    ) {
+        let item = request["context"]["item_id"]
+            .as_i64()
+            .filter(|id| *id > 0)
+            .ok_or("VisualDNA 运行缺少真实素材 item_id")?;
+        if store
+            .asset_item(item)
+            .map_err(|error| error.to_string())?
+            .project_id
+            != key.project
+        {
+            return Err("VisualDNA 素材不属于当前项目，未写入记忆".into());
+        }
+    }
+    sync_current_settings(store, key.project)?;
     let memory = MemoryStore::open_root(&store.paths().root).map_err(|e| e.to_string())?;
     let requested = request["context"]["source_evidence_ids"]
         .as_array()
@@ -197,51 +282,6 @@ pub fn apply_memory(
             )
             .map_err(|e| e.to_string())?;
     }
-    let bible = if let Some(bible) =
-        produced_artifact(artifacts, inherited, "series_bible").filter(|v| v.is_object())
-    {
-        Some(bible.clone())
-    } else {
-        store
-            .read_context(key.project, "series_bible.v1.json")
-            .map_err(|e| e.to_string())?
-    };
-    if let Some(bible) = bible {
-        memory
-            .index_series_bible(key.project, &bible)
-            .map_err(|e| e.to_string())?;
-    }
-    // Identical DNA can be newly generated for a different item. That action's
-    // explicit target takes precedence over equality with its creative context.
-    let explicit_visual = matches!(
-        request["action"].as_str(),
-        Some("visual_dna" | "visual_dna_ingest")
-    );
-    if let Some(dna) = produced_artifact(artifacts, inherited, "visual_dna")
-        .or_else(|| {
-            explicit_visual
-                .then(|| artifacts.get("visual_dna"))
-                .flatten()
-        })
-        .filter(|v| v.is_object())
-    {
-        let item_id = request["context"]["item_id"]
-            .as_i64()
-            .filter(|id| *id > 0)
-            .ok_or("VisualDNA 运行缺少真实素材 item_id")?;
-        let item = store.asset_item(item_id).map_err(|e| e.to_string())?;
-        if item.project_id != key.project {
-            return Err("VisualDNA 素材不属于当前项目，未写入记忆".into());
-        }
-        let dna = if dna["character_core"].is_object() {
-            dna.clone()
-        } else {
-            json!({"character_core":{"visual_dna":dna.get("visual_dna").unwrap_or(dna)},"technical_specs":dna["technical_specs"],"stable_diffusion_tags":dna["stable_diffusion_tags"]})
-        };
-        memory
-            .index_visual_dna(key.project, item_id, &dna)
-            .map_err(|e| e.to_string())?;
-    }
     let approved = artifacts
         .get("approved_changeset")
         .filter(|v| v.is_object());
@@ -275,7 +315,7 @@ pub fn apply_memory(
             {
                 return Err("已批准素材入库计划包含缺失名称或未知 kind".into());
             }
-            let asset = existing
+            existing
                 .iter()
                 .find(|asset| asset.name.trim() == name)
                 .ok_or_else(|| format!("主库尚未写入素材 {name}，未伪造素材 ID"))?;
@@ -296,21 +336,6 @@ pub fn apply_memory(
                     .or_else(|| item["base_prompt"].as_str())
                     .unwrap_or("");
                 snapshots.push(json!({"snapshot_id":stable_hex_id(&["snapshot",&entity_id,"visual_v1"]),"project_id":key.project,"entity_id":entity_id,"valid_from_story_order":if key.episode==0{format!("project:{}:asset_ingest",key.project)}else{format!("episode:{}:asset_ingest",key.episode)},"fields":{"visual":{"description":item["description"],"stable_diffusion_tags":tags,"visual_dna":dna}},"why":"assets_visual_dna","evidence_ids":source_ids.iter().take(20).collect::<Vec<_>>(),"status":"confirmed","confidence":1.0,"source_kind":"system"}));
-                let stored = store
-                    .read_context(
-                        key.project,
-                        &format!("visual_dna.asset_item_{}.v1.json", asset.id),
-                    )
-                    .map_err(|e| e.to_string())?
-                    .ok_or_else(|| format!("素材 {} 的 VisualDNA 文件尚未写入主库", asset.id))?;
-                let normalized = if stored["character_core"].is_object() {
-                    stored
-                } else {
-                    json!({"character_core":{"visual_dna":stored.get("visual_dna").cloned().unwrap_or(dna),"attire":stored["attire"]},"technical_specs":stored["technical_specs"],"stable_diffusion_tags":stored["stable_diffusion_tags"].as_str().filter(|s|!s.is_empty()).unwrap_or(tags)})
-                };
-                memory
-                    .index_visual_dna(key.project, asset.id, &normalized)
-                    .map_err(|e| e.to_string())?;
             }
         }
         let payload = json!({"schema_version":"changeset.v0","project_id":key.project,"episode_id":episode_id(key),"story_order_base":if key.episode==0{format!("project:{}:asset_ingest",key.project)}else{format!("episode:{}:asset_ingest",key.episode)},"evidence_ids":source_ids,"entities":entities,"snapshots":snapshots,"materialize":{"write_static_bible":true}});
@@ -358,6 +383,121 @@ mod tests {
         ids
     }
     #[test]
+    fn preparing_memory_synchronizes_current_settings_before_retrieval() {
+        let (dir, store, key) = fixture();
+        store
+            .write_context(
+                key.project,
+                "series_bible.v1.json",
+                &json!({"constraints":["不得复活"]}),
+            )
+            .unwrap();
+        prepare_memory(&store, key, "创作下一集").unwrap();
+        let current = MemoryStore::open_root(dir.path())
+            .unwrap()
+            .retrieve_for_task(key.project, "创作下一集", None, None)
+            .unwrap();
+        assert!(current.prompt_fragments["negative_constraints"].contains("不得复活"));
+        store
+            .write_context(
+                key.project,
+                "series_bible.v1.json",
+                &json!({"constraints":[]}),
+            )
+            .unwrap();
+        prepare_memory(&store, key, "继续创作").unwrap();
+        let current = MemoryStore::open_root(dir.path())
+            .unwrap()
+            .retrieve_for_task(key.project, "继续创作", None, None)
+            .unwrap();
+        assert!(current.layers["negative_constraints"].records.is_empty());
+        assert!(
+            !current
+                .prompt_fragments
+                .values()
+                .any(|fragment| fragment.contains("不得复活"))
+        );
+    }
+
+    #[test]
+    fn replaying_an_old_run_never_republishes_old_bible_or_visual_settings() {
+        let (dir, store, key) = fixture();
+        let item = store
+            .create_asset_item(key.project, "角色", "persona_visual", None)
+            .unwrap();
+        let old_bible = json!({"constraints":["旧禁忌"]});
+        let old_dna = json!({"character_core":{"visual_dna":{"eyes":"old-blue"}}});
+        store
+            .write_context(key.project, "series_bible.v1.json", &old_bible)
+            .unwrap();
+        store
+            .write_context(
+                key.project,
+                &format!("visual_dna.asset_item_{}.v1.json", item.id),
+                &old_dna,
+            )
+            .unwrap();
+        source(&store, key, "old-settings-run");
+        let artifacts = json!({"series_bible":old_bible,"visual_dna":old_dna});
+        apply_memory(&store, key, "old-settings-run", &artifacts, "done").unwrap();
+        store
+            .write_context(
+                key.project,
+                "series_bible.v1.json",
+                &json!({"constraints":["新禁忌"]}),
+            )
+            .unwrap();
+        store
+            .write_context(
+                key.project,
+                &format!("visual_dna.asset_item_{}.v1.json", item.id),
+                &json!({"visual_dna":{"eyes":"current-green"}}),
+            )
+            .unwrap();
+        apply_memory(&store, key, "old-settings-run", &artifacts, "done").unwrap();
+        let memory = MemoryStore::open_root(dir.path()).unwrap();
+        let current = memory
+            .retrieve_for_task(key.project, "角色视觉规则", None, None)
+            .unwrap();
+        assert!(
+            current
+                .prompt_fragments
+                .values()
+                .any(|fragment| fragment.contains("新禁忌"))
+        );
+        assert!(
+            current
+                .prompt_fragments
+                .values()
+                .any(|fragment| fragment.contains("current-green"))
+        );
+        assert!(
+            current
+                .prompt_fragments
+                .values()
+                .all(|fragment| !fragment.contains("旧禁忌") && !fragment.contains("old-blue"))
+        );
+        drop(memory);
+        store
+            .write_context(key.project, "series_bible.v1.json", &json!({}))
+            .unwrap();
+        store
+            .write_context(
+                key.project,
+                &format!("visual_dna.asset_item_{}.v1.json", item.id),
+                &json!({}),
+            )
+            .unwrap();
+        apply_memory(&store, key, "old-settings-run", &artifacts, "done").unwrap();
+        let current = MemoryStore::open_root(dir.path())
+            .unwrap()
+            .retrieve_for_task(key.project, "角色视觉规则", None, None)
+            .unwrap();
+        assert!(current.layers["negative_constraints"].records.is_empty());
+        assert!(current.layers["L2_static"].records.is_empty());
+    }
+
+    #[test]
     fn prepare_evidence_is_stable_after_repeat_and_restart() {
         let (dir, store, key) = fixture();
         let first = prepare_memory(&store, key, "林青推开城门，捡起玉剑。").unwrap();
@@ -387,6 +527,13 @@ mod tests {
         let (dir, store, key) = fixture();
         source(&store, key, "writer-run");
         let artifacts = json!({"series_bible":{"world_rules":{"life":"不能复活"},"constraints":["不允许现代枪械"]},"beat_sheet":[{"title":"初遇","beat_type":"setup"}],"shots":[{"action_text":"林青捡起玉剑并受伤"}],"qc_report":{"issues":[{"type":"continuity","message":"道具检查"}],"revised_script_fountain":"修订完成"}});
+        store
+            .write_context(
+                key.project,
+                "series_bible.v1.json",
+                &artifacts["series_bible"],
+            )
+            .unwrap();
         apply_memory(&store, key, "writer-run", &artifacts, "done").unwrap();
         let before = MemoryStore::open_root(dir.path())
             .unwrap()
@@ -540,6 +687,20 @@ mod project_run_tests {
         let dna = json!({"character_core":{"visual_dna":{"eyes":"blue"}},"stable_diffusion_tags":"blue eyes"});
         let artifacts =
             json!({"series_bible":{"world_rules":{"life":"不可复活"}},"visual_dna":dna});
+        store
+            .write_context(
+                project.id,
+                "series_bible.v1.json",
+                &artifacts["series_bible"],
+            )
+            .unwrap();
+        store
+            .write_context(
+                project.id,
+                &format!("visual_dna.asset_item_{}.v1.json", item.id),
+                &dna,
+            )
+            .unwrap();
         apply_memory(&store, key, "project-run", &artifacts, "done").unwrap();
         apply_memory(&store, key, "project-run", &artifacts, "done").unwrap();
         assert!(store.episodes(project.id).unwrap().is_empty());
@@ -654,6 +815,13 @@ mod incremental_tests {
             "action":"visual_dna_ingest", "context":{"item_id":item.id,"artifacts":artifacts}
         })).unwrap();
 
+        store
+            .write_context(
+                project.id,
+                &format!("visual_dna.asset_item_{}.v1.json", item.id),
+                &artifacts["visual_dna"],
+            )
+            .unwrap();
         apply_memory(&store, key, "new-item-same-dna", &artifacts, "done").unwrap();
         let records = MemoryStore::open_root(dir.path())
             .unwrap()

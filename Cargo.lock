@@ -48,6 +48,7 @@ version = "0.1.0"
 dependencies = [
  "image",
  "png",
+ "ring",
  "rusqlite",
  "serde",
  "serde_json",
@@ -71,6 +72,7 @@ dependencies = [
  "rfd",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "uuid",

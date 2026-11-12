@@ -1,5 +1,6 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+mod activity;
 mod app;
 mod board;
 mod context_form;
@@ -9,8 +10,10 @@ mod geometry;
 mod integration;
 mod presentation;
 mod production;
+mod run_commit;
 mod session;
 mod shortcuts;
+mod task_context;
 mod ui;
 
 use std::path::PathBuf;

@@ -15,6 +15,6 @@ pub use prompts::{PromptRegistry, PromptTemplate};
 pub use settings::{AiProvider, AiSettings};
 pub use store::{ContextStore, StageMeta};
 pub use workflow::{
-    ExecutionInput, ReviewDecision, WorkflowEngine, WorkflowEvent, WorkflowResult,
-    reusable_artifacts,
+    ExecutionInput, ReviewDecision, TaskContextProvider, WorkflowEngine, WorkflowEvent,
+    WorkflowResult, reusable_artifacts,
 };

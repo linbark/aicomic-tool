@@ -1,10 +1,14 @@
 use aicomic_ai::{
-    AiError, AiSettings, ContextStore, ExecutionInput, ReviewDecision, WorkflowEngine,
+    AiError, AiSettings, ContextStore, ExecutionInput, ReviewDecision, TaskContextProvider,
+    WorkflowEngine,
 };
 use serde_json::{Value, json};
 use std::{
+    future::Future,
     io::{Read, Write},
     net::TcpListener,
+    pin::Pin,
+    sync::{Arc, Mutex},
     thread,
 };
 
@@ -72,6 +76,403 @@ fn settings(url: String) -> AiSettings {
         base_url: url,
         ..Default::default()
     }
+}
+
+#[derive(Debug)]
+struct CurrentTaskContext {
+    store: ContextStore,
+    stages: Mutex<Vec<String>>,
+}
+impl TaskContextProvider for CurrentTaskContext {
+    fn retrieve<'a>(
+        &'a self,
+        input: &'a ExecutionInput,
+        stage: &'a str,
+    ) -> Pin<Box<dyn Future<Output = aicomic_ai::Result<Value>> + Send + 'a>> {
+        Box::pin(async move {
+            tokio::task::yield_now().await;
+            let bible = self
+                .store
+                .get_context(&input.project_id, "series_bible", "v1")?;
+            let mut stages = self.stages.lock().unwrap();
+            stages.push(stage.into());
+            Ok(json!({"fresh_call":stages.len(),"current_bible":bible}))
+        })
+    }
+}
+fn request_context(request: &Value) -> Value {
+    let user = request["messages"][1]["content"].as_str().unwrap();
+    serde_json::from_str(
+        user.rsplit_once("\n\n### 创作上下文（遵循已确认设定）\n")
+            .unwrap()
+            .1,
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn task_context_is_fresh_for_every_script_stage_and_json_repair() {
+    let root = tempfile::tempdir().unwrap();
+    let (url, handle) = provider(vec![
+        json!({"series_bible":{"title":"Architect新设定"},"beat_sheet":[]}),
+        json!("broken writer output"),
+        json!({"script_fountain":"新剧本"}),
+        json!({"issues":[]}),
+    ]);
+    let engine = WorkflowEngine::new(root.path().into(), settings(url));
+    let saved_bible = json!({"title":"磁盘当前设定"});
+    let saved_outline = json!({"title":"磁盘当前项目大纲"});
+    engine
+        .store()
+        .put_context("12", "series_bible", "v1", &saved_bible)
+        .unwrap();
+    engine
+        .store()
+        .put_context("12", "project_outline", "v1", &saved_outline)
+        .unwrap();
+    let fresh = Arc::new(CurrentTaskContext {
+        store: engine.store().clone(),
+        stages: Mutex::new(vec![]),
+    });
+    let engine = engine.with_task_context(fresh.clone());
+    let mut request = input("workflow_script", "fresh-script-run");
+    request.context = json!({
+        "retrieved_memory":{"stale_memory":"不得沿用"},
+        "series_bible":{"title":"输入旧Bible"},
+        "project_outline":{"title":"输入旧项目大纲"},
+        "current_outline":{"title":"输入旧编辑大纲"},
+        "artifacts":{
+            "series_bible":{"title":"产物旧Bible"},
+            "project_outline":{"title":"产物旧项目大纲"},
+            "script":"需保留的创作产物"
+        },
+        "unknown_extension":{"keep":true}
+    });
+    let original = serde_json::to_value(&request).unwrap();
+    engine.execute(request).await.unwrap();
+    let requests = handle.join().unwrap();
+    assert_eq!(
+        *fresh.stages.lock().unwrap(),
+        ["architect", "writer", "writer.repair", "qc.1"]
+    );
+    for (index, request) in requests.iter().enumerate() {
+        let context = request_context(request);
+        let expected_bible = if index == 0 {
+            saved_bible.clone()
+        } else {
+            json!({"title":"Architect新设定"})
+        };
+        let provided = &context["provided"];
+        assert_eq!(
+            provided["retrieved_memory"],
+            json!({"fresh_call":index+1,"current_bible":expected_bible})
+        );
+        assert_eq!(context["series_bible"], expected_bible);
+        assert_eq!(provided["series_bible"], expected_bible);
+        assert_eq!(provided["artifacts"]["series_bible"], expected_bible);
+        assert_eq!(context["project_outline"], saved_outline);
+        assert_eq!(provided["project_outline"], saved_outline);
+        assert_eq!(provided["current_outline"], saved_outline);
+        assert_eq!(provided["artifacts"]["project_outline"], saved_outline);
+        assert_eq!(provided["artifacts"]["script"], "需保留的创作产物");
+        assert_eq!(provided["unknown_extension"], json!({"keep":true}));
+        assert!(!context.to_string().contains("不得沿用"));
+        let stage = ["architect", "writer", "writer.repair", "qc.1"][index];
+        assert_eq!(
+            engine
+                .store()
+                .read_stage("12", "fresh-script-run", &format!("{stage}.context"))
+                .unwrap()
+                .unwrap(),
+            context
+        );
+    }
+    assert_eq!(
+        engine
+            .store()
+            .read_run("12", "fresh-script-run")
+            .unwrap()
+            .unwrap()["request"],
+        original
+    );
+}
+
+#[tokio::test]
+async fn task_context_replaces_visual_dna_only_from_an_owned_current_source() {
+    let root = tempfile::tempdir().unwrap();
+    let cases = [
+        json!({"item_id":7}),
+        json!({"item_id":7,"version":"v2"}),
+        json!({"item_id":8}),
+        json!({}),
+        json!({"item_id":0}),
+        json!({"item_id":-1}),
+        json!({"item_id":"7"}),
+        json!({"item_id":7}), // No hook: preserve the legacy supplied copies.
+    ];
+    let (url, handle) = provider(vec![json!("生成结果"); cases.len()]);
+    let engine = WorkflowEngine::new(root.path().into(), settings(url));
+    let current = json!({"hair":"当前黑发"});
+    let versioned = json!({"hair":"当前白发"});
+    engine
+        .store()
+        .put_context("12", "visual_dna.asset_item_7", "v1", &current)
+        .unwrap();
+    engine
+        .store()
+        .put_context("12", "visual_dna.asset_item_7", "v2", &versioned)
+        .unwrap();
+    engine
+        .store()
+        .put_context(
+            "13",
+            "visual_dna.asset_item_8",
+            "v1",
+            &json!({"hair":"其它项目设定"}),
+        )
+        .unwrap();
+    let refreshed = engine
+        .clone()
+        .with_task_context(Arc::new(CurrentTaskContext {
+            store: engine.store().clone(),
+            stages: Mutex::new(vec![]),
+        }));
+    for (index, mut context) in cases.into_iter().enumerate() {
+        context["visual_dna"] = json!({"hair":"输入过期DNA"});
+        context["artifacts"] = json!({"visual_dna":{"hair":"产物过期DNA"},"script":"保留创作产物"});
+        context["locked_visual_dna"] = json!({"hair":"用户确认的冻结输入"});
+        context["unknown_extension"] = json!({"keep":true});
+        let mut request = input("script_optimize", &format!("fresh-dna-{index}"));
+        request.context = context;
+        let original = serde_json::to_value(&request).unwrap();
+        let selected = if index == 7 { &engine } else { &refreshed };
+        selected.execute(request).await.unwrap();
+        assert_eq!(
+            selected
+                .store()
+                .read_run("12", &format!("fresh-dna-{index}"))
+                .unwrap()
+                .unwrap()["request"],
+            original
+        );
+    }
+    for (index, request) in handle.join().unwrap().iter().enumerate() {
+        let provided = &request_context(request)["provided"];
+        match index {
+            0 | 1 => {
+                let expected = if index == 0 { &current } else { &versioned };
+                assert_eq!(&provided["visual_dna"], expected);
+                assert_eq!(&provided["artifacts"]["visual_dna"], expected);
+            }
+            7 => {
+                assert_eq!(provided["visual_dna"]["hair"], "输入过期DNA");
+                assert_eq!(provided["artifacts"]["visual_dna"]["hair"], "产物过期DNA");
+            }
+            _ => {
+                assert!(provided.get("visual_dna").is_none());
+                assert!(provided["artifacts"].get("visual_dna").is_none());
+            }
+        }
+        assert_eq!(
+            provided["locked_visual_dna"],
+            json!({"hair":"用户确认的冻结输入"})
+        );
+        assert_eq!(provided["artifacts"]["script"], "保留创作产物");
+        assert_eq!(provided["unknown_extension"], json!({"keep":true}));
+    }
+}
+
+#[tokio::test]
+async fn restarted_resume_refreshes_old_memory_and_audits_without_rewriting_input() {
+    let root = tempfile::tempdir().unwrap();
+    let changeset = json!({"schema_version":"changeset.v0","entities":[]});
+    let (url, handle) = provider(vec![changeset.clone(), changeset]);
+    let engine = WorkflowEngine::new(root.path().into(), settings(url.clone()));
+    let mut request = input("memory_extract_changeset", "fresh-resume-run");
+    request.context = json!({"retrieved_memory":{"old_memory":"保留于历史输入"},"series_bible":{"title":"过期输入设定"}});
+    let original = serde_json::to_value(&request).unwrap();
+    engine.execute(request).await.unwrap();
+    assert!(
+        engine
+            .store()
+            .read_stage("12", "fresh-resume-run", "changeset.extract.context")
+            .unwrap()
+            .is_none()
+    );
+    let request_path = engine
+        .store()
+        .run_dir("12", "fresh-resume-run")
+        .unwrap()
+        .join("request.json");
+    let original_bytes = std::fs::read(&request_path).unwrap();
+    engine
+        .store()
+        .put_context("12", "series_bible", "v1", &json!({"title":"重启前新设定"}))
+        .unwrap();
+    drop(engine);
+
+    let restarted = WorkflowEngine::new(root.path().into(), settings(url));
+    let fresh = Arc::new(CurrentTaskContext {
+        store: restarted.store().clone(),
+        stages: Mutex::new(vec![]),
+    });
+    let restarted = restarted.with_task_context(fresh.clone());
+    let result = restarted
+        .resume("12", "fresh-resume-run", ReviewDecision::Regenerate, None)
+        .await
+        .unwrap();
+    assert_eq!(result.waiting_for.as_deref(), Some("review_changeset"));
+    let requests = handle.join().unwrap();
+    assert_eq!(
+        request_context(&requests[0])["provided"]["retrieved_memory"],
+        original["context"]["retrieved_memory"]
+    );
+    let context = request_context(&requests[1]);
+    assert_eq!(*fresh.stages.lock().unwrap(), ["changeset.extract"]);
+    assert_eq!(
+        context["provided"]["retrieved_memory"],
+        json!({"fresh_call":1,"current_bible":{"title":"重启前新设定"}})
+    );
+    assert!(!context.to_string().contains("保留于历史输入"));
+    assert_eq!(
+        context["provided"]["series_bible"],
+        json!({"title":"重启前新设定"})
+    );
+    let audit = restarted
+        .store()
+        .read_stage("12", "fresh-resume-run", "changeset.extract.context")
+        .unwrap()
+        .unwrap();
+    assert_eq!(audit["provided"], context["provided"]);
+    assert_eq!(audit["series_bible"], context["series_bible"]);
+    assert_eq!(std::fs::read(request_path).unwrap(), original_bytes);
+    assert_eq!(
+        restarted
+            .store()
+            .read_stage("12", "fresh-resume-run", "chat.interrupt")
+            .unwrap()
+            .unwrap()["resume_state"]["input"],
+        original
+    );
+}
+
+#[derive(Debug)]
+struct UnavailableTaskContext {
+    invalid: bool,
+    stages: Mutex<Vec<String>>,
+}
+impl TaskContextProvider for UnavailableTaskContext {
+    fn retrieve<'a>(
+        &'a self,
+        _input: &'a ExecutionInput,
+        stage: &'a str,
+    ) -> Pin<Box<dyn Future<Output = aicomic_ai::Result<Value>> + Send + 'a>> {
+        Box::pin(async move {
+            self.stages.lock().unwrap().push(stage.into());
+            if self.invalid {
+                Ok(json!([]))
+            } else {
+                Err(AiError::InvalidState(
+                    "private adapter error mock-only".into(),
+                ))
+            }
+        })
+    }
+}
+
+#[tokio::test]
+async fn unavailable_task_context_blocks_models_and_keeps_failed_runs_auditable() {
+    let root = tempfile::tempdir().unwrap();
+    let (url, handle) = provider(vec![json!({"schema_version":"changeset.v0","entities":[]})]);
+    let original_engine = WorkflowEngine::new(root.path().into(), settings(url));
+    let mut old_input = input("memory_extract_changeset", "context-failed-resume");
+    old_input.context = json!({"retrieved_memory":{"stale_memory":"不得回退"}});
+    original_engine.execute(old_input.clone()).await.unwrap();
+    handle.join().unwrap();
+    let request_path = original_engine
+        .store()
+        .run_dir("12", "context-failed-resume")
+        .unwrap()
+        .join("request.json");
+    let original_bytes = std::fs::read(&request_path).unwrap();
+    drop(original_engine);
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    for invalid in [false, true] {
+        let context_provider = Arc::new(UnavailableTaskContext {
+            invalid,
+            stages: Mutex::new(vec![]),
+        });
+        let engine = WorkflowEngine::new(
+            root.path().into(),
+            settings(format!("http://{}", listener.local_addr().unwrap())),
+        )
+        .with_task_context(context_provider.clone());
+        let (run, stage, original, result) = if invalid {
+            (
+                "context-failed-resume",
+                "changeset.extract",
+                serde_json::to_value(&old_input).unwrap(),
+                engine
+                    .resume(
+                        "12",
+                        "context-failed-resume",
+                        ReviewDecision::Regenerate,
+                        None,
+                    )
+                    .await,
+            )
+        } else {
+            let mut request = input("outline_generate", "context-failed-execute");
+            request.context = old_input.context.clone();
+            let original = serde_json::to_value(&request).unwrap();
+            (
+                "context-failed-execute",
+                "outline_generate",
+                original,
+                engine.execute(request).await,
+            )
+        };
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("任务上下文"));
+        assert!(!error.contains("private adapter error"));
+        assert!(!error.contains("mock-only"));
+        assert_eq!(*context_provider.stages.lock().unwrap(), [stage]);
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        let snapshot = engine.store().read_run("12", run).unwrap().unwrap();
+        assert_eq!(snapshot["request"], original);
+        assert_eq!(snapshot["response"]["status"], "error");
+        assert!(!snapshot["response"].to_string().contains("mock-only"));
+        let audit = engine
+            .store()
+            .read_stage("12", run, &format!("{stage}.context"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(audit["status"], "error");
+        assert_eq!(
+            audit["error"],
+            if invalid {
+                "task_context_invalid"
+            } else {
+                "task_context_unavailable"
+            }
+        );
+        assert!(!audit.to_string().contains("不得回退"));
+        assert!(
+            !engine
+                .store()
+                .read_stage("12", run, "chat.error")
+                .unwrap()
+                .unwrap()
+                .to_string()
+                .contains("mock-only")
+        );
+    }
+    assert_eq!(std::fs::read(request_path).unwrap(), original_bytes);
 }
 
 #[tokio::test]
@@ -198,8 +599,14 @@ async fn failed_provider_writes_error_status_and_never_fabricates_output() {
 async fn connection_test_only_sends_a_tiny_user_initiated_request() {
     let root = tempfile::tempdir().unwrap();
     let (url, handle) = provider(vec![json!("OK")]);
-    let engine = WorkflowEngine::new(root.path().to_path_buf(), settings(url));
+    let unavailable = Arc::new(UnavailableTaskContext {
+        invalid: false,
+        stages: Mutex::new(vec![]),
+    });
+    let engine = WorkflowEngine::new(root.path().to_path_buf(), settings(url))
+        .with_task_context(unavailable.clone());
     assert!(engine.test_connection().await.unwrap().contains("成功"));
+    assert!(unavailable.stages.lock().unwrap().is_empty());
     handle.join().unwrap();
 }
 

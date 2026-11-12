@@ -203,11 +203,36 @@ impl ContextStore {
         let mut runs = Vec::new();
         for entry in fs::read_dir(dir)? {
             let path = entry?.path();
-            if path.is_dir()
-                && let Some(meta) = read_json(&path.join("meta.json"))?
-            {
-                runs.push(meta);
+            if !path.is_dir() {
+                continue;
             }
+            if let Some(meta) = read_json(&path.join("meta.json"))? {
+                runs.push(meta);
+                continue;
+            }
+            // A snapshot writes response before metadata. Keep interrupted writes
+            // and legacy stage-only reviews discoverable without rewriting them.
+            let Some(run) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if component(run).is_err() {
+                continue;
+            }
+            let request = read_json(&path.join("request.json"))?;
+            let response = read_json(&path.join("response.json"))?;
+            let stage = read_json(&path.join("stages/chat.status.json"))?;
+            if request.is_none() && response.is_none() && stage.is_none() {
+                continue;
+            }
+            runs.push(json!({
+                "project_id":project.parse::<i64>().map(|id| json!(id)).unwrap_or_else(|_| json!(project)),
+                "run_id":run,
+                "action":request.as_ref().and_then(|v| v.get("action")),
+                "episode_id":request.as_ref().and_then(|v| v.get("episode_id")),
+                "status":stage.as_ref().and_then(|v| v.get("status"))
+                    .or_else(|| response.as_ref().and_then(|v| v.get("status"))),
+                "metadata_incomplete":true
+            }));
         }
         runs.sort_by_key(|v| std::cmp::Reverse(v["created_at_ms"].as_u64().unwrap_or(0)));
         Ok(runs)

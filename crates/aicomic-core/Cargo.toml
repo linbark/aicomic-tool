@@ -14,3 +14,4 @@ tempfile = "3"
 zip = { version = "7.4", default-features = false }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
 png = "0.18"
+ring = "=0.17.14"

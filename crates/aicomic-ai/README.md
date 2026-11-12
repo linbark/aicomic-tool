@@ -32,6 +32,44 @@ AI 层不直接查询或修改核心数据库、记忆数据库。
 保留大纲、剧本、视觉资产等内容，剥离 `approved_*`、入库计划、待审 Changeset、Run ID、
 状态及其他执行标记；应用也可在构造上下文前调用这个函数。原 Run 的恢复审核状态不经过此清理。
 
+### 每次生成前刷新当前设定投影
+
+应用可通过 `WorkflowEngine::with_task_context(Arc<dyn TaskContextProvider>)` 注入 Adapter；
+AI crate 不依赖 core/memory。接口从 crate 根导出，签名为：
+
+```rust,ignore
+pub trait TaskContextProvider: std::fmt::Debug + Send + Sync {
+    fn retrieve<'a>(
+        &'a self,
+        input: &'a ExecutionInput,
+        stage: &'a str,
+    ) -> std::pin::Pin<Box<
+        dyn std::future::Future<Output = aicomic_ai::Result<serde_json::Value>> + Send + 'a
+    >>;
+}
+```
+
+返回值是最新 `retrieved_memory` **对象本身**，不是整个 `context`；空记忆返回 `{}`。
+Adapter 应按原 Run 的项目/分集检索，并在每次调用时同步当前设定投影，不能复用旧输入里的记忆快照。
+每次实际生成、JSON 修复、多阶段步骤及跨进程恢复后的重新生成都异步调用此接口；
+连接探测与模型目录不调用。默认不配置，保持旧库调用与旧 Run 恢复行为。
+
+刷新只作用于本次请求的上下文副本，替换而不合并旧 `provided.retrieved_memory`。
+已知的 `series_bible/project_outline/current_outline` 副本（含 `provided.artifacts` 下的同名字段）
+同步为当前读取结果，当前源不存在则移除，避免旧副本冒充已确认设定；其它创作产物和扩展字段不在此处清理。
+优化项目大纲仍以显式 `current_outline` 编辑为准。`provided.visual_dna` 及
+`provided.artifacts.visual_dna` 仅在输入有明确正整数 `item_id`，且当前项目的
+`visual_dna.asset_item_{item_id}.{version}` 当前源存在时替换为该值（`version` 默认 `v1`）；
+无明确归属或当前源已不存在则移除这两个旧副本，不使用旧产物兜底。
+`locked_visual_dna` 是用户确认的冻结输入，不在 AI 层重写；配置 Adapter 的应用须校验它与当前源一致，否则阻断请求。
+原 Run 输入与恢复状态不因刷新被改写。
+启用后，每个生成请求先保存 `{stage}.context` 审计，内容为实际发送的
+`series_bible/project_outline/provided`（最新记忆位于 `provided.retrieved_memory`）；
+审计写入失败同样禁止模型请求。检索失败或返回非对象时 fail-closed，不回退旧记忆、不请求模型；
+失败阶段记录 `status=error` 和 `task_context_unavailable/task_context_invalid`，原 Run 仍可审计。
+Adapter 原始错误可能含敏感信息，因此不会进入 Run/事件；调用方收到不含原始错误的任务上下文错误。
+Adapter 的记忆及 `Debug` 输出不得包含密钥。
+
 `WorkflowResult` 包含 `run_id/status/artifacts/output_text/waiting_for`。
 通过 `with_events(tokio::sync::mpsc::UnboundedSender<WorkflowEvent>)` 可接收持久化后的阶段事件。
 也可读取 `ContextStore::read_stage/list_stages/read_run/list_runs`。

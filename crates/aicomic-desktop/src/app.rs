@@ -1,10 +1,12 @@
 use crate::Options;
+use crate::activity::{self, ProjectActivityLease, ProjectActivityTracker};
 use crate::board::{Board, BoardCard, BoardView};
 use crate::context_form::{ContextForm, ContextFormMessage};
 use crate::editor::{ReadableEditor, dark_editor};
 use crate::event_matrix::{self, MatrixMessage};
 use crate::presentation::{field_label, readable, readable_text};
 use crate::production::{Gate, ProductionState, StageState};
+use crate::run_commit::{self, PendingCommit};
 use crate::session::{EditorSession, EpisodeKey};
 use crate::ui;
 use aicomic_ai::{
@@ -117,12 +119,6 @@ const ASSET_CATEGORIES: [AssetCategory; 12] = [
     AssetCategory("ai_preset", "AI 预设"),
 ];
 #[derive(Clone)]
-struct PendingCommit {
-    run_id: String,
-    workflow_status: String,
-    artifacts: Value,
-}
-#[derive(Clone)]
 struct PendingRun {
     key: EpisodeKey,
     input: ExecutionInput,
@@ -190,6 +186,73 @@ impl fmt::Display for ModelChoice {
 }
 
 #[derive(Debug, Clone)]
+pub enum ImportFailure {
+    Failed(String),
+    CommittedPending {
+        operation_id: String,
+        reason: String,
+    },
+    RecoveryRequired {
+        operation_id: String,
+        reason: String,
+    },
+}
+
+impl From<aicomic_core::Error> for ImportFailure {
+    fn from(error: aicomic_core::Error) -> Self {
+        match error {
+            aicomic_core::Error::CommittedPending {
+                operation_id,
+                reason,
+            } => Self::CommittedPending {
+                operation_id,
+                reason,
+            },
+            aicomic_core::Error::RecoveryRequired {
+                operation_id,
+                reason,
+            } => Self::RecoveryRequired {
+                operation_id,
+                reason,
+            },
+            error => Self::Failed(error.to_string()),
+        }
+    }
+}
+
+impl fmt::Display for ImportFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Failed(message) => formatter.write_str(message),
+            Self::CommittedPending {
+                operation_id,
+                reason,
+            } => write!(
+                formatter,
+                "operation {operation_id} committed; cleanup pending: {reason}"
+            ),
+            Self::RecoveryRequired {
+                operation_id,
+                reason,
+            } => write!(
+                formatter,
+                "operation {operation_id} requires recovery: {reason}"
+            ),
+        }
+    }
+}
+
+fn import_media_batch(
+    paths: &[PathBuf],
+    mut import: impl FnMut(&std::path::Path) -> aicomic_core::Result<()>,
+) -> Result<bool, ImportFailure> {
+    for path in paths {
+        import(path).map_err(ImportFailure::from)?;
+    }
+    Ok(!paths.is_empty())
+}
+
+#[derive(Debug, Clone)]
 pub enum Message {
     Page(Page),
     Project(Choice),
@@ -249,7 +312,7 @@ pub enum Message {
     CreateItem,
     DeleteItem(i64),
     ImportMedia,
-    Imported(Result<(), String>),
+    Imported(i64, i64, Result<bool, ImportFailure>),
     OpenMedia(PathBuf),
     DeleteAsset(i64),
     CreateEvent,
@@ -307,6 +370,7 @@ pub struct App {
     outputs: HashMap<EpisodeKey, Value>,
     board: BoardView,
     busy: Option<(EpisodeKey, String, iced::task::Handle)>,
+    activity: ProjectActivityTracker,
     paused: Option<(EpisodeKey, String)>,
     settings: AiSettings,
     settings_tokens: String,
@@ -552,6 +616,28 @@ fn run_status_label(status: &str) -> &str {
     }
 }
 
+async fn prepare_run_evidence(
+    store: Store,
+    key: EpisodeKey,
+    script: String,
+    lease: ProjectActivityLease,
+    #[cfg(test)] before: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+) -> Result<(Vec<String>, Value), String> {
+    if lease.project() != key.project {
+        return Err("原文写入租约与项目不一致".into());
+    }
+    activity::run_blocking(Some(lease), move || {
+        #[cfg(test)]
+        if let Some(before) = before {
+            before();
+        }
+        let ids = crate::integration::prepare_memory(&store, key, &script)?;
+        let quotes = crate::integration::source_evidences(&store, key, &ids)?;
+        Ok((ids, quotes))
+    })
+    .await?
+}
+
 impl App {
     pub fn new(store: Store, options: Options) -> Self {
         let settings = AiSettings::load(&options.root).unwrap_or_default();
@@ -577,6 +663,7 @@ impl App {
             outputs: HashMap::new(),
             board: BoardView::default(),
             busy: None,
+            activity: ProjectActivityTracker::default(),
             paused: None,
             settings_tokens: settings
                 .max_tokens
@@ -675,6 +762,13 @@ impl App {
         if let Some(action) = app.options.preview.clone() {
             let _ = app.update(Message::Run(action));
         }
+        match app.store.recovery_warnings() {
+            Ok(warnings) if !warnings.is_empty() => {
+                app.status = format!("恢复警告：{} · {}", warnings.join("；"), app.status);
+            }
+            Err(error) => app.fail(format!("读取存储恢复警告失败：{error}")),
+            _ => {}
+        }
         app
     }
 
@@ -765,13 +859,8 @@ impl App {
             .is_some_and(|value| !value.is_empty())
     }
     fn has_structure(&self) -> bool {
-        self.artifacts().is_some_and(|artifacts| {
-            artifacts["outline"].is_object()
-                || artifacts["outline"].is_string()
-                || artifacts["beat_sheet"]
-                    .as_array()
-                    .is_some_and(|beats| !beats.is_empty())
-        })
+        self.artifacts()
+            .is_some_and(crate::production::has_structure)
     }
     fn has_assets(&self) -> bool {
         !self.items.is_empty()
@@ -820,41 +909,42 @@ impl App {
             ),
         ]
     }
-    fn invalidate_after_run(&mut self, key: EpisodeKey, artifacts: &Value) {
-        let mut changed = false;
-        if artifacts
-            .get("project_outline")
-            .is_some_and(Value::is_object)
-        {
-            self.production.invalidate(0, Gate::Outline);
-            changed = true;
-        }
-        if artifacts.get("assets_visual_dna").is_some()
-            || artifacts.get("asset_ingest_plan").is_some()
-        {
-            self.production.invalidate(0, Gate::Assets);
-            changed = true;
-        }
-        if artifacts.get("outline").is_some() || artifacts.get("beat_sheet").is_some() {
-            self.production.invalidate(key.episode, Gate::Structure);
-            changed = true;
-        }
-        if artifacts.get("shots").is_some() {
-            self.production.invalidate(key.episode, Gate::Storyboard);
-            changed = true;
-        }
-        if changed {
-            self.persist_production();
-        }
-    }
-    fn persist_production(&mut self) {
-        if let Some(pid) = self.pid()
-            && let Err(error) = self.production.save(&ContextStore::new(self.root()), pid)
+    fn persist_production(&mut self) -> bool {
+        let Some(pid) = self.pid() else {
+            return false;
+        };
+        let contexts = ContextStore::new(self.root());
+        if let Err(error) = ProductionState::try_load(&contexts, pid)
+            .and_then(|_| self.production.save(&contexts, pid))
         {
             self.fail(error);
+            return false;
         }
+        true
     }
     fn toggle_gate(&mut self, gate: Gate) {
+        let Some(project) = self.pid() else {
+            return;
+        };
+        if self
+            .busy
+            .as_ref()
+            .is_some_and(|(key, _, _)| key.project == project)
+            || self
+                .pending_commits
+                .keys()
+                .any(|key| key.project == project)
+        {
+            self.fail("请先完成运行结果写入，再确认制作闸门");
+            return;
+        }
+        self.production = match ProductionState::refresh(&self.store, project) {
+            Ok(state) => state,
+            Err(error) => {
+                self.fail(error);
+                return;
+            }
+        };
         let episode = self.session.current.map(|key| key.episode).unwrap_or(0);
         let confirmed = self.production.confirmed(episode, gate);
         if !confirmed {
@@ -869,8 +959,16 @@ impl App {
                 return;
             }
         }
-        self.production.set(episode, gate, !confirmed);
-        self.persist_production();
+        let previous = self.production.clone();
+        if confirmed {
+            self.production.invalidate(episode, gate);
+        } else {
+            self.production.set(episode, gate, true);
+        }
+        if !self.persist_production() {
+            self.production = previous;
+            return;
+        }
         self.status = if confirmed {
             format!("{} 已撤销", gate.label())
         } else {
@@ -962,6 +1060,7 @@ impl App {
     fn select_project(&mut self, choice: Choice) {
         self.sync_editor();
         self.pending_run = None;
+        self.pending_delete = None;
         self.project = Some(choice);
         self.context_form.load(json!({}));
         self.context_document_ready = false;
@@ -996,12 +1095,22 @@ impl App {
         }
         for episode in &self.episodes {
             if episode["exec_artifacts"].is_object() {
-                self.outputs
-                    .entry(EpisodeKey {
-                        project: pid,
-                        episode: id(episode),
-                    })
-                    .or_insert_with(|| episode["exec_artifacts"].clone());
+                let key = EpisodeKey {
+                    project: pid,
+                    episode: id(episode),
+                };
+                if !self.pending_commits.contains_key(&key)
+                    && !self
+                        .busy
+                        .as_ref()
+                        .is_some_and(|(active, _, _)| *active == key)
+                {
+                    self.outputs.insert(key, episode["exec_artifacts"].clone());
+                } else {
+                    self.outputs
+                        .entry(key)
+                        .or_insert_with(|| episode["exec_artifacts"].clone());
+                }
             }
         }
         match self.store.asset_items(pid) {
@@ -1036,7 +1145,13 @@ impl App {
             }
         }
         let contexts = ContextStore::new(self.root());
-        self.production = ProductionState::load(&contexts, pid);
+        self.production = match ProductionState::refresh(&self.store, pid) {
+            Ok(state) => state,
+            Err(error) => {
+                self.fail(error);
+                ProductionState::default()
+            }
+        };
         self.series_bible = contexts
             .get_context(&pid.to_string(), "series_bible", "v1")
             .ok()
@@ -1066,36 +1181,42 @@ impl App {
         if let Ok(runs) = contexts.list_runs(&pid.to_string()) {
             self.run_list = stringify(runs);
         }
-        for run in &self.run_list {
-            let run_id = label(run, "run_id");
-            if let Ok(Some(stage)) =
-                contexts.read_stage(&pid.to_string(), run_id, "desktop.materialization")
-                && stage["status"] == "error"
-                && stage["artifacts"].is_object()
-            {
-                let key = EpisodeKey {
-                    project: pid,
-                    episode: stage["episode_id"].as_i64().unwrap_or(0),
-                };
-                if key.episode < 0
-                    || (key.episode > 0
-                        && !self
-                            .episodes
-                            .iter()
-                            .any(|episode| id(episode) == key.episode))
-                {
-                    continue;
+        match run_commit::recover(&self.store, pid) {
+            Ok(recovered) => {
+                for (key, pending) in recovered {
+                    if self
+                        .busy
+                        .as_ref()
+                        .is_some_and(|(_, run, _)| run == &pending.run_id)
+                    {
+                        continue;
+                    }
+                    if self.episodes.iter().any(|episode| {
+                        id(episode) == key.episode
+                            && label(episode, "last_exec_run_id") == pending.run_id
+                    }) {
+                        self.outputs.insert(key, pending.artifacts.clone());
+                    }
+                    if !self
+                        .run_list
+                        .iter()
+                        .any(|run| label(run, "run_id") == pending.run_id)
+                    {
+                        self.run_list
+                            .push(json!({"run_id":pending.run_id,"episode_id":key.episode,
+                            "status":pending.workflow_status,"action":"待提交结果"}));
+                    }
+                    self.pending_commits.entry(key).or_insert(pending);
                 }
-                self.pending_commits
-                    .entry(key)
-                    .or_insert_with(|| PendingCommit {
-                        run_id: run_id.into(),
-                        workflow_status: label(&stage, "workflow_status").into(),
-                        artifacts: stage["artifacts"].clone(),
-                    });
             }
+            Err(error) => self.fail(format!("运行提交恢复失败：{error}")),
         }
-        if let Ok(memory) = MemoryStore::open_root(&self.root()) {
+        self.memory_records.clear();
+        self.changesets.clear();
+        self.conflicts.clear();
+        let memory = crate::integration::sync_current_settings(&self.store, pid)
+            .and_then(|_| MemoryStore::open_root(&self.root()).map_err(|error| error.to_string()));
+        if let Ok(memory) = memory {
             let mut query = MemoryQuery::new(pid);
             query.top_k = 100;
             if !self.memory_search.is_empty() {
@@ -1110,6 +1231,8 @@ impl App {
             if let Ok(rows) = memory.list_conflicts(pid, None, 100) {
                 self.conflicts = rows;
             }
+        } else if let Err(error) = memory {
+            self.fail(format!("当前设定投影同步失败：{error}"));
         }
     }
     fn sync_editor(&mut self) {
@@ -1125,6 +1248,7 @@ impl App {
             .is_some_and(|key| key.episode != episode_id)
         {
             self.pending_run = None;
+            self.pending_delete = None;
         }
         self.paused = None;
         let Some(pid) = self.pid() else {
@@ -1189,32 +1313,14 @@ impl App {
             return false;
         };
         let (script, revision) = (draft.text.clone(), draft.revision);
-        let previous = self.store.episode(key.episode).ok();
-        let was_locked = previous
-            .as_ref()
-            .is_some_and(|episode| episode.script_locked);
-        let previous_script = previous
-            .as_ref()
-            .and_then(|episode| episode.description.clone())
-            .unwrap_or_default();
-        match self
-            .store
-            .update_episode(key.episode, &self.title, Some(&script))
-        {
-            Ok(_) => {
+        match crate::production::save_script(&self.store, key, &self.title, &script) {
+            Ok(saved) => {
                 self.session.saved(key, revision);
-                if was_locked && previous_script != script {
-                    let _ = self.store.patch_episode(
-                        key.episode,
-                        EpisodeUpdate {
-                            script_locked: Some(false),
-                            ..EpisodeUpdate::default()
-                        },
-                    );
-                    self.status = "已保存 · 剧本已修改，锁定解除".into();
+                self.status = if saved.unlocked {
+                    "已保存 · 剧本已修改，锁定解除".into()
                 } else {
-                    self.status = "已保存到本地".into();
-                }
+                    "已保存到本地".into()
+                };
                 self.reload();
                 true
             }
@@ -1295,6 +1401,7 @@ impl App {
             }
             self.session.current.ok_or("请先选择一集剧本")?
         };
+        crate::production::validate_generation(&self.store, key, &action)?;
         let contexts = ContextStore::new(self.root());
         let mut context = json!({"series_bible":contexts.get_context(&project.to_string(),"series_bible","v1").map_err(|e|e.to_string())?,"artifacts":aicomic_ai::reusable_artifacts(&self.outputs.get(&key).cloned().unwrap_or_else(||json!({})))});
         let script = match action.as_str() {
@@ -1332,27 +1439,8 @@ impl App {
                 if !(1..=200).contains(&max) {
                     return Err("分镜上限应为 1–200 的整数".into());
                 }
-                let locked_visual_dna = self
-                    .items
-                    .iter()
-                    .filter_map(|item| {
-                        let item_id = id(item);
-                        let visual_dna = contexts
-                            .get_context(
-                                &project.to_string(),
-                                &format!("visual_dna.asset_item_{item_id}"),
-                                "v1",
-                            )
-                            .ok()
-                            .flatten()?;
-                        Some(json!({
-                            "name": label(item, "name"),
-                            "category": label(item, "category"),
-                            "visual_dna": visual_dna,
-                        }))
-                    })
-                    .collect::<Vec<_>>();
-                context["locked_visual_dna"] = json!(locked_visual_dna);
+                context["locked_visual_dna"] =
+                    crate::integration::locked_visual_dna(&self.store, project)?;
                 context["max_shots"] = json!(max);
                 context["aspect_ratio"] = json!(self.aspect_ratio);
                 context["prompt_style"] = json!(if self.prompt_style.starts_with("Midjourney") {
@@ -1401,6 +1489,207 @@ impl App {
             },
         ))
     }
+    fn finish_delete(
+        &mut self,
+        project: bool,
+        target: i64,
+        owner: Option<i64>,
+        result: aicomic_core::Result<()>,
+    ) -> Task<Message> {
+        let pending_notice = match result {
+            Ok(()) => None,
+            Err(aicomic_core::Error::CommittedPending {
+                operation_id,
+                reason,
+            }) => Some(format!(
+                "删除已提交，清理待恢复 · {operation_id} · {reason}"
+            )),
+            Err(error @ aicomic_core::Error::RecoveryRequired { .. }) => {
+                self.pending_delete = Some((project, target));
+                self.fail(format!("删除现场已保留，请先恢复后再操作：{error}"));
+                return Task::none();
+            }
+            Err(error) => {
+                self.fail(error);
+                return Task::none();
+            }
+        };
+        let selection_removed = if project {
+            self.pid() == Some(target)
+        } else {
+            self.session
+                .current
+                .is_some_and(|key| key.episode == target)
+        };
+        let retained = |key: &EpisodeKey| {
+            if project {
+                key.project != target
+            } else {
+                key.episode != target
+            }
+        };
+        self.session.drafts.retain(|key, _| retained(key));
+        self.outputs.retain(|key, _| retained(key));
+        self.pending_commits.retain(|key, _| retained(key));
+        if self.paused.as_ref().is_some_and(|(key, _)| !retained(key)) {
+            self.paused = None;
+        }
+        if !selection_removed {
+            self.reload_projects();
+            if self.pid() == owner {
+                self.reload();
+            }
+            self.status = pending_notice.unwrap_or_else(|| "删除已完成".into());
+            return Task::none();
+        }
+        self.paused = None;
+        self.session.current = None;
+        self.media.clear();
+        self.memory_records.clear();
+        self.changesets.clear();
+        self.conflicts.clear();
+        self.events.clear();
+        self.matrix_events.clear();
+        self.items.clear();
+        self.scenes.clear();
+        self.reload_projects();
+        if let Some(choice) = self.projects.first().cloned() {
+            self.select_project(choice);
+        } else {
+            self.project = None;
+            self.episodes.clear();
+            self.context_form.load(json!({}));
+            self.context_document_ready = false;
+        }
+        self.status = pending_notice.unwrap_or_else(|| "删除已完成".into());
+        Task::none()
+    }
+
+    fn refresh_asset_owner(&mut self, project: i64) -> Result<(), String> {
+        let reconciled = ProductionState::refresh(&self.store, project).map(|_| ());
+        if self.pid() == Some(project) {
+            self.reload();
+            if let Some(item) = self.selected_item {
+                self.media = stringify(
+                    self.store
+                        .assets_for_item(item)
+                        .map_err(|error| error.to_string())?,
+                );
+                if self
+                    .selected_visual_asset
+                    .is_some_and(|selected| !self.media.iter().any(|row| id(row) == selected))
+                {
+                    self.selected_visual_asset = None;
+                }
+            }
+        }
+        reconciled
+    }
+
+    fn finish_asset_delete(
+        &mut self,
+        item: bool,
+        target: i64,
+        owner: Option<i64>,
+        result: aicomic_core::Result<()>,
+    ) -> Task<Message> {
+        let notice = match result {
+            Ok(()) => "素材删除已完成".to_owned(),
+            Err(aicomic_core::Error::CommittedPending {
+                operation_id,
+                reason,
+            }) => format!("素材删除已提交，清理待恢复 · {operation_id} · {reason}"),
+            Err(error @ aicomic_core::Error::RecoveryRequired { .. }) => {
+                self.fail(format!("素材删除现场已保留，请先恢复后再操作：{error}"));
+                return Task::none();
+            }
+            Err(error) => {
+                self.fail(error);
+                return Task::none();
+            }
+        };
+        if item {
+            self.items.retain(|row| id(row) != target);
+            if self.selected_item == Some(target) {
+                self.selected_item = None;
+                self.selected_visual_asset = None;
+                self.media.clear();
+            }
+        } else {
+            self.media.retain(|row| id(row) != target);
+            if self.selected_visual_asset == Some(target) {
+                self.selected_visual_asset = None;
+            }
+        }
+        let refreshed = owner
+            .map(|project| self.refresh_asset_owner(project))
+            .transpose();
+        self.status = notice;
+        if let Err(error) = refreshed {
+            self.status
+                .push_str(&format!("；制作状态刷新失败：{error}"));
+        }
+        Task::none()
+    }
+
+    fn deletion_blocked(&mut self, project: Option<i64>, protect_pending: bool) -> bool {
+        let project =
+            project.filter(|project| *project > 0 && self.store.project(*project).is_ok());
+        let active = match project {
+            Some(project) => {
+                self.activity.is_active(project)
+                    || self
+                        .busy
+                        .as_ref()
+                        .is_some_and(|(key, _, _)| key.project == project)
+            }
+            None => self.activity.any_active() || self.busy.is_some(),
+        };
+        let pending = protect_pending
+            && self
+                .pending_commits
+                .keys()
+                .any(|key| project.is_none_or(|project| key.project == project));
+        if active || pending {
+            self.fail(
+                "原项目仍有后台写入或待提交产物，请先取消或完成任务，等待后台结束后再次确认删除",
+            );
+            true
+        } else {
+            false
+        }
+    }
+
+    fn asset_project(&self, asset: i64) -> Option<i64> {
+        let asset = self.store.asset(asset).ok()?;
+        let mut project = None;
+        if let Some(item) = asset.character_id {
+            project = Some(self.store.asset_item(item).ok()?.project_id);
+        }
+        if let Some(shot) = asset.shot_id {
+            let shot = self.store.shot(shot).ok()?;
+            let scene = self.store.scene(shot.scene_id).ok()?;
+            let owner = self.store.episode(scene.episode_id).ok()?.project_id;
+            if project.is_some_and(|project| project != owner) {
+                return None;
+            }
+            project = Some(owner);
+        }
+        project
+    }
+
+    fn workflow_engine(&self, lease: ProjectActivityLease) -> WorkflowEngine {
+        WorkflowEngine::new(self.root(), self.settings.clone()).with_task_context(
+            std::sync::Arc::new(
+                crate::task_context::CurrentTaskContext::new(
+                    self.store.clone(),
+                    self.memory_service.clone(),
+                )
+                .with_activity(lease),
+            ),
+        )
+    }
+
     fn start_run(&mut self, pending: PendingRun) -> Task<Message> {
         let PendingRun {
             key,
@@ -1429,7 +1718,14 @@ impl App {
             "confirmed_at_ms": confirmed_at_ms
         });
         let run_id = input.run_id.clone();
-        let engine = WorkflowEngine::new(self.root(), self.settings.clone());
+        let lease = match self.activity.enter(key.project) {
+            Ok(lease) => lease,
+            Err(error) => {
+                self.fail(error);
+                return Task::none();
+            }
+        };
+        let engine = self.workflow_engine(lease.clone());
         let task_id = run_id.clone();
         if key.episode > 0
             && let Err(e) = self.store.patch_episode(
@@ -1444,27 +1740,23 @@ impl App {
             self.fail(e);
             return Task::none();
         }
-        let memory = self.memory_service.clone();
         let evidence_store = self.store.clone();
         let evidence_text = input.script.clone();
         let (task, handle) = Task::perform(
             async move {
-                let evidence = tokio::task::spawn_blocking(move || {
-                    let ids =
-                        crate::integration::prepare_memory(&evidence_store, key, &evidence_text)?;
-                    let quotes = crate::integration::source_evidences(&evidence_store, key, &ids)?;
-                    Ok::<_, String>((ids, quotes))
-                })
-                .await
-                .map_err(|e| e.to_string())??;
+                let worker_activity = lease.clone();
+                let _activity = lease;
+                let evidence = prepare_run_evidence(
+                    evidence_store,
+                    key,
+                    evidence_text,
+                    worker_activity,
+                    #[cfg(test)]
+                    None,
+                )
+                .await?;
                 input.context["source_evidence_ids"] = json!(evidence.0);
                 input.context["source_evidences"] = evidence.1;
-                let retrieved = memory
-                    .task_context(key.project, input.script.clone(), None)
-                    .await
-                    .map_err(|e| e.to_string())?;
-                input.context["retrieved_memory"] =
-                    serde_json::to_value(retrieved).map_err(|e| e.to_string())?;
                 engine.execute(input).await.map_err(|e| e.to_string())
             },
             move |result| Message::RunComplete(key, task_id.clone(), result),
@@ -1505,7 +1797,13 @@ impl App {
             return;
         };
         let contexts = ContextStore::new(self.root());
-        self.production = ProductionState::load(&contexts, pid);
+        self.production = match ProductionState::refresh(&self.store, pid) {
+            Ok(state) => state,
+            Err(error) => {
+                self.fail(error);
+                ProductionState::default()
+            }
+        };
         self.series_bible = contexts
             .get_context(&pid.to_string(), "series_bible", "v1")
             .ok()
@@ -1559,42 +1857,18 @@ impl App {
             }
         }
     }
-    fn materialize(&self, key: EpisodeKey, pending: &PendingCommit) -> Result<(), String> {
-        if key.episode > 0 {
-            self.store
-                .apply_workflow_artifacts(
-                    key.project,
-                    key.episode,
-                    &pending.run_id,
-                    &pending.artifacts,
-                )
-                .map_err(|e| e.to_string())?;
-        }
-        crate::integration::apply_memory(
-            &self.store,
-            key,
-            &pending.run_id,
-            &pending.artifacts,
-            &pending.workflow_status,
-        )?;
-        if key.episode > 0 {
-            self.store
-                .patch_episode(
-                    key.episode,
-                    EpisodeUpdate {
-                        last_exec_run_id: Some(pending.run_id.clone()),
-                        exec_status: Some(pending.workflow_status.clone()),
-                        exec_artifacts: Some(pending.artifacts.clone()),
-                        ..EpisodeUpdate::default()
-                    },
-                )
-                .map_err(|e| e.to_string())?;
-        }
-        ContextStore::new(self.root()).write_stage(&key.project.to_string(),&pending.run_id,"desktop.materialization",&json!({"status":"done","episode_id":key.episode,"workflow_status":pending.workflow_status})).map_err(|e|e.to_string())
-    }
     fn remember_failed_commit(&mut self, key: EpisodeKey, pending: PendingCommit, error: &str) {
-        let _=ContextStore::new(self.root()).write_stage(&key.project.to_string(),&pending.run_id,"desktop.materialization",&json!({"status":"error","episode_id":key.episode,"workflow_status":pending.workflow_status,"artifacts":pending.artifacts,"error":error}));
-        if key.episode > 0 {
+        if let Err(record_error) = run_commit::record_failure(&self.store, key, &pending, error) {
+            self.fail(format!("{error}；重试标记保存失败：{record_error}"));
+        }
+        if key.episode > 0
+            && self.store.episode(key.episode).is_ok_and(|episode| {
+                episode
+                    .last_exec_run_id
+                    .as_deref()
+                    .is_none_or(|run| run == pending.run_id)
+            })
+        {
             let _ = self.store.patch_episode(
                 key.episode,
                 EpisodeUpdate {
@@ -1608,6 +1882,20 @@ impl App {
         self.pending_commits.insert(key, pending);
     }
     fn commit_key(&self) -> Option<EpisodeKey> {
+        if self.page == Page::Runs {
+            if let Some((key, _)) = self.pending_commits.iter().find(|(key, pending)| {
+                Some(key.project) == self.pid() && pending.run_id == self.selected_run
+            }) {
+                return Some(*key);
+            }
+            if self
+                .session
+                .current
+                .is_some_and(|key| self.pending_commits.contains_key(&key))
+            {
+                return self.session.current;
+            }
+        }
         if self.page.is_episode_scoped() {
             self.session.current
         } else {
@@ -1770,68 +2058,33 @@ impl App {
             }
             Message::DeleteEpisode(id) => self.pending_delete = Some((false, id)),
             Message::ConfirmDelete(confirm) => {
-                if let Some((project, target)) = self.pending_delete.take()
+                if !confirm {
+                    self.pending_delete = None;
+                }
+                if let Some((project, target)) = self.pending_delete
                     && confirm
                 {
-                    if self.busy.as_ref().is_some_and(|(key, _, _)| {
-                        if project {
-                            key.project == target
-                        } else {
-                            key.episode == target
+                    let owner = if project {
+                        Some(target)
+                    } else {
+                        match self.store.episode(target) {
+                            Ok(episode) => Some(episode.project_id),
+                            Err(error) => {
+                                self.fail(error);
+                                return Task::none();
+                            }
                         }
-                    }) {
-                        let _ = self.update(Message::Cancel);
+                    };
+                    if self.deletion_blocked(owner, false) {
+                        return Task::none();
                     }
+                    self.pending_delete = None;
                     let result = if project {
                         self.store.delete_project(target)
                     } else {
                         self.store.delete_episode(target)
                     };
-                    match result {
-                        Ok(_) => {
-                            self.session.drafts.retain(|key, _| {
-                                if project {
-                                    key.project != target
-                                } else {
-                                    key.episode != target
-                                }
-                            });
-                            self.outputs.retain(|key, _| {
-                                if project {
-                                    key.project != target
-                                } else {
-                                    key.episode != target
-                                }
-                            });
-                            self.pending_commits.retain(|key, _| {
-                                if project {
-                                    key.project != target
-                                } else {
-                                    key.episode != target
-                                }
-                            });
-                            self.paused = None;
-                            self.session.current = None;
-                            self.media.clear();
-                            self.memory_records.clear();
-                            self.changesets.clear();
-                            self.conflicts.clear();
-                            self.events.clear();
-                            self.matrix_events.clear();
-                            self.items.clear();
-                            self.scenes.clear();
-                            self.reload_projects();
-                            if let Some(choice) = self.projects.first().cloned() {
-                                self.select_project(choice);
-                            } else {
-                                self.project = None;
-                                self.episodes.clear();
-                                self.context_form.load(json!({}));
-                                self.context_document_ready = false;
-                            }
-                        }
-                        Err(e) => self.fail(e),
-                    }
+                    return self.finish_delete(project, target, owner, result);
                 }
             }
             Message::Episode(id, step) => self.select_episode(id, step),
@@ -1911,13 +2164,13 @@ impl App {
                 match result {
                     Ok(result) => {
                         self.outputs.insert(key, result.artifacts.clone());
-                        self.invalidate_after_run(key, &result.artifacts);
                         let pending = PendingCommit {
                             run_id: run_id.clone(),
                             workflow_status: result.status.clone(),
                             artifacts: result.artifacts.clone(),
+                            waiting_for: result.waiting_for.clone(),
                         };
-                        let applied = self.materialize(key, &pending);
+                        let applied = run_commit::apply(&self.store, key, &pending);
                         if result.status == "paused" {
                             self.paused = Some((key, run_id.clone()));
                             self.status =
@@ -1999,10 +2252,18 @@ impl App {
                     if self.session.current != Some(key) {
                         return Task::none();
                     }
-                    let engine = WorkflowEngine::new(self.root(), self.settings.clone());
+                    let lease = match self.activity.enter(key.project) {
+                        Ok(lease) => lease,
+                        Err(error) => {
+                            self.fail(error);
+                            return Task::none();
+                        }
+                    };
+                    let engine = self.workflow_engine(lease.clone());
                     let task_run = run.clone();
                     let (task, handle) = Task::perform(
                         async move {
+                            let _activity = lease;
                             engine
                                 .resume(
                                     &key.project.to_string(),
@@ -2317,12 +2578,8 @@ impl App {
                             &value,
                         ) {
                             Ok(_) => {
-                                if self.context_kind == "project_outline" {
-                                    self.production.invalidate(0, Gate::Outline);
-                                    self.persist_production();
-                                }
-                                self.reload();
                                 self.status = "项目上下文已保存".into();
+                                self.reload();
                             }
                             Err(e) => self.fail(e),
                         },
@@ -2381,8 +2638,6 @@ impl App {
                         Ok(item) => {
                             self.selected_item = Some(item.id);
                             self.new_name.clear();
-                            self.production.invalidate(0, Gate::Assets);
-                            self.persist_production();
                             self.reload();
                             return self.update(Message::SelectItem(item.id));
                         }
@@ -2391,77 +2646,102 @@ impl App {
                 }
             }
             Message::DeleteItem(item) => {
-                if self.pid().is_some_and(|pid| {
-                    self.busy
-                        .as_ref()
-                        .is_some_and(|(key, _, _)| key.project == pid && key.episode == 0)
-                        || self.pending_commits.contains_key(&EpisodeKey {
-                            project: pid,
-                            episode: 0,
-                        })
-                }) {
-                    self.fail("项目任务执行中或结果待写入，请先完成或取消任务后删除资产");
+                let owner = self.store.asset_item(item).ok().map(|item| item.project_id);
+                if self.deletion_blocked(owner, true) {
                     return Task::none();
                 }
-                match self.store.delete_asset_item(item) {
-                    Ok(_) => {
-                        self.selected_item = None;
-                        self.media.clear();
-                        self.production.invalidate(0, Gate::Assets);
-                        self.persist_production();
-                        self.reload();
-                    }
-                    Err(e) => self.fail(e),
-                }
+                let result = self.store.delete_asset_item(item);
+                return self.finish_asset_delete(true, item, owner, result);
             }
             Message::ImportMedia => {
                 if let Some(item) = self.selected_item {
+                    let project = match self.store.asset_item(item) {
+                        Ok(item) => item.project_id,
+                        Err(error) => {
+                            self.fail(error);
+                            return Task::none();
+                        }
+                    };
+                    let lease = match self.activity.enter(project) {
+                        Ok(lease) => lease,
+                        Err(error) => {
+                            self.fail(error);
+                            return Task::none();
+                        }
+                    };
                     let store = self.store.clone();
                     return Task::perform(
                         async move {
-                            let paths = rfd::AsyncFileDialog::new()
+                            let worker_activity = lease.clone();
+                            let _activity = lease;
+                            let Some(paths) = rfd::AsyncFileDialog::new()
                                 .set_title("导入素材")
                                 .pick_files()
-                                .await;
-                            if let Some(paths) = paths {
-                                for path in paths {
+                                .await
+                            else {
+                                return Ok(false);
+                            };
+                            let paths = paths
+                                .into_iter()
+                                .map(|path| path.path().to_path_buf())
+                                .collect::<Vec<_>>();
+                            activity::run_blocking(Some(worker_activity), move || {
+                                import_media_batch(&paths, |path| {
                                     store
-                                        .import_asset(path.path(), AssetTarget::Item(item))
-                                        .map_err(|e| e.to_string())?;
-                                }
-                            }
-                            Ok(())
+                                        .import_asset(path, AssetTarget::Item(item))
+                                        .map(|_| ())
+                                })
+                            })
+                            .await
+                            .map_err(ImportFailure::Failed)?
                         },
-                        Message::Imported,
+                        move |result| Message::Imported(project, item, result),
                     );
                 }
             }
-            Message::Imported(result) => match result {
-                Ok(_) => {
-                    self.status = "素材已导入".into();
-                    self.production.invalidate(0, Gate::Assets);
-                    self.persist_production();
-                    if let Some(item) = self.selected_item {
-                        return self.update(Message::SelectItem(item));
+            Message::Imported(project, _item, result) => {
+                // A partial import may have changed files before returning an
+                // error; always reconcile its original project, not the view.
+                let reconciled = self.refresh_asset_owner(project);
+                match result {
+                    Ok(true) => self.status = "素材已导入".into(),
+                    Ok(false) => self.status = "已取消素材导入".into(),
+                    Err(ImportFailure::CommittedPending {
+                        operation_id,
+                        reason,
+                    }) => {
+                        self.status = format!(
+                            "素材导入已提交，清理待恢复；请先恢复再导入 · {operation_id} · {reason}"
+                        );
                     }
+                    Err(ImportFailure::RecoveryRequired {
+                        operation_id,
+                        reason,
+                    }) => {
+                        self.fail(format!(
+                            "素材导入现场已保留，请先恢复再导入 · {operation_id} · {reason}"
+                        ));
+                    }
+                    Err(ImportFailure::Failed(error)) => self.fail(error),
                 }
-                Err(e) => self.fail(e),
-            },
+                if let Err(error) = reconciled {
+                    self.status
+                        .push_str(&format!("；制作状态刷新失败：{error}"));
+                }
+            }
             Message::OpenMedia(path) => {
                 if let Err(e) = open::that_detached(path) {
                     self.fail(e);
                 }
             }
-            Message::DeleteAsset(asset) => match self.store.delete_asset(asset) {
-                Ok(_) => {
-                    self.production.invalidate(0, Gate::Assets);
-                    self.persist_production();
-                    if let Some(item) = self.selected_item {
-                        return self.update(Message::SelectItem(item));
-                    }
+            Message::DeleteAsset(asset) => {
+                let owner = self.asset_project(asset);
+                if self.deletion_blocked(owner, true) {
+                    return Task::none();
                 }
-                Err(e) => self.fail(e),
-            },
+                let result = self.store.delete_asset(asset);
+                return self.finish_asset_delete(false, asset, owner, result);
+            }
             Message::CreateEvent => {
                 if let Some(pid) = self.pid()
                     && !self.new_name.trim().is_empty()
@@ -2622,7 +2902,7 @@ impl App {
                 if let Some(key) = self.commit_key()
                     && let Some(pending) = self.pending_commits.get(&key).cloned()
                 {
-                    match self.materialize(key, &pending) {
+                    match run_commit::apply(&self.store, key, &pending) {
                         Ok(()) => {
                             self.pending_commits.remove(&key);
                             self.status = "运行结果已完整写入".into();
@@ -2664,9 +2944,31 @@ impl App {
             Message::RebuildMemory => {
                 if let Some(pid) = self.pid() {
                     let service = self.memory_service.clone();
+                    let store = self.store.clone();
+                    let lease = match self.activity.enter(pid) {
+                        Ok(lease) => lease,
+                        Err(error) => {
+                            self.fail(error);
+                            return Task::none();
+                        }
+                    };
                     self.status = "正在重建语义索引…".into();
                     return Task::perform(
-                        async move { service.rebuild(pid).await.map_err(|e| e.to_string()) },
+                        async move {
+                            activity::finish(lease, async move {
+                                crate::task_context::synchronize(
+                                    store,
+                                    EpisodeKey {
+                                        project: pid,
+                                        episode: 0,
+                                    },
+                                    None,
+                                )
+                                .await?;
+                                service.rebuild(pid).await.map_err(|e| e.to_string())
+                            })
+                            .await?
+                        },
                         Message::MemoryRebuilt,
                     );
                 }
@@ -2679,15 +2981,35 @@ impl App {
                 if let Some(pid) = self.pid() {
                     let service = self.memory_service.clone();
                     let query = self.memory_search.clone();
+                    let store = self.store.clone();
+                    let lease = match self.activity.enter(pid) {
+                        Ok(lease) => lease,
+                        Err(error) => {
+                            self.fail(error);
+                            return Task::none();
+                        }
+                    };
                     self.memory_request += 1;
                     let request = self.memory_request;
                     return Task::perform(
                         async move {
-                            service
-                                .semantic_search(pid, query, 30)
-                                .await
-                                .map(stringify)
-                                .map_err(|e| e.to_string())
+                            activity::finish(lease, async move {
+                                crate::task_context::synchronize(
+                                    store,
+                                    EpisodeKey {
+                                        project: pid,
+                                        episode: 0,
+                                    },
+                                    None,
+                                )
+                                .await?;
+                                service
+                                    .semantic_search(pid, query, 30)
+                                    .await
+                                    .map(stringify)
+                                    .map_err(|e| e.to_string())
+                            })
+                            .await?
                         },
                         move |result| Message::MemoryFound(pid, request, result),
                     );
@@ -2739,10 +3061,8 @@ impl App {
                         },
                     ) {
                         Ok(_) => {
-                            self.production.invalidate(0, Gate::Assets);
-                            self.persist_production();
-                            self.reload();
                             self.status = "资产条目已保存".into();
+                            self.reload();
                         }
                         Err(e) => self.fail(e),
                     }
@@ -2820,10 +3140,7 @@ impl App {
                         .unwrap_or_default()
                 }
             });
-            if let Err(e) = self
-                .store
-                .update_episode(key.episode, &title, Some(&draft.text))
-            {
+            if let Err(e) = crate::production::save_script(&self.store, key, &title, &draft.text) {
                 self.fail(e);
                 return false;
             }
@@ -4587,7 +4904,7 @@ impl App {
                 container(
                     row![
                         ui::chip("前置条件", ui::Tone::Gold),
-                        ui::muted("剧本尚未锁定。生成仍会先保存当前剧本，但建议先完成锁定。"),
+                        ui::muted("剧本尚未锁定。请先锁定正文、确认结构并冻结资产，再生成分镜。"),
                         space::horizontal(),
                         button("锁定剧本")
                             .style(ui::secondary)
@@ -4654,7 +4971,7 @@ impl App {
                     ui::Tone::Indigo,
                 ),
                 space::horizontal(),
-                ui::muted("闸门只是检查点；不会阻止你预览生成参数。"),
+                ui::muted("参数可查看；生成前必须通过剧本、结构和资产闸门。"),
             ]
             .spacing(10)
             .align_y(iced::Center),
@@ -4718,7 +5035,7 @@ impl App {
             column![
                 ui::eyebrow("STORYBOARD · 空白"),
                 ui::display("分镜表还空着。"),
-                text("生成前建议先锁定剧本、冻结资产。分镜会把剧本编译成可检查的镜头行，并保留在运行记录里。")
+                text("生成前需要锁定剧本、确认结构并冻结资产。分镜会把剧本编译成可检查的镜头行，并保留在运行记录里。")
                     .size(14)
                     .color(ui::TEXT_SECONDARY)
                     .line_height(1.7),
@@ -6892,6 +7209,408 @@ mod tests {
         );
     }
     #[test]
+    fn completing_a_project_run_after_navigation_only_invalidates_its_own_gates() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        let first = store.create_project("生成中的项目", None).unwrap();
+        let second = store.create_project("正在查看的项目", None).unwrap();
+        let contexts = ContextStore::new(root.path().into());
+        for project in [first.id, second.id] {
+            contexts
+                .put_context(
+                    &project.to_string(),
+                    "project_outline",
+                    "v1",
+                    &json!({"title":"旧大纲"}),
+                )
+                .unwrap();
+        }
+        let mut production = ProductionState::default();
+        production.set(0, Gate::Outline, true);
+        production.save(&contexts, first.id).unwrap();
+        production.save(&contexts, second.id).unwrap();
+        let mut app = App::new(
+            store,
+            Options {
+                root: root.path().into(),
+                ..Options::default()
+            },
+        );
+        let key = EpisodeKey {
+            project: first.id,
+            episode: 0,
+        };
+        let (_, handle) = Task::<Message>::none().abortable();
+        app.busy = Some((key, "origin-run".into(), handle));
+        let _ = app.update(Message::Project(Choice {
+            id: second.id,
+            name: second.name,
+        }));
+        // The engine publishes this context before delivering its completion.
+        contexts
+            .put_context(
+                &first.id.to_string(),
+                "project_outline",
+                "v1",
+                &json!({"title":"新大纲"}),
+            )
+            .unwrap();
+        let _ = app.update(Message::RunComplete(
+            key,
+            "origin-run".into(),
+            Ok(WorkflowResult {
+                run_id: "origin-run".into(),
+                status: "done".into(),
+                artifacts: json!({"project_outline":{"title":"新大纲"}}),
+                output_text: String::new(),
+                waiting_for: None,
+            }),
+        ));
+        assert!(!ProductionState::load(&contexts, first.id).outline_approved);
+        assert!(ProductionState::load(&contexts, second.id).outline_approved);
+        assert!(app.production.outline_approved);
+        assert_eq!(app.pid(), Some(second.id));
+    }
+
+    #[test]
+    fn reopening_recovers_approved_results_with_missing_or_older_commit_markers() {
+        for old_marker in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let store = Store::open(root.path()).unwrap();
+            let project = store.create_project("恢复项目", None).unwrap();
+            let episode = store
+                .create_episode(project.id, "第一集", Some("拾起玉剑"))
+                .unwrap();
+            let run = "approved-before-exit";
+            let artifacts = json!({"approved_asset_ingest_plan":{"items":[{"name":"玉剑","kind":"prop","category":"prop"}]}});
+            let contexts = ContextStore::new(root.path().into());
+            contexts.snapshot_run(&project.id.to_string(), run,
+                &json!({"project_id":project.id.to_string(),"episode_id":episode.id,"action":"episode_execute"}),
+                &json!({"run_id":run,"status":"done","artifacts":artifacts,"output_text":"批准完成","waiting_for":null}),
+                &json!({"episode_id":episode.id})).unwrap();
+            contexts
+                .write_stage(
+                    &project.id.to_string(),
+                    run,
+                    "chat.status",
+                    &json!({"status":"done"}),
+                )
+                .unwrap();
+            if old_marker {
+                contexts.write_stage(&project.id.to_string(), run, "desktop.materialization", &json!({"status":"done","episode_id":episode.id,"workflow_status":"paused"})).unwrap();
+            }
+            store
+                .patch_episode(
+                    episode.id,
+                    EpisodeUpdate {
+                        last_exec_run_id: Some(run.into()),
+                        exec_status: Some("paused".into()),
+                        ..EpisodeUpdate::default()
+                    },
+                )
+                .unwrap();
+            let mut app = App::new(
+                store.clone(),
+                Options {
+                    root: root.path().into(),
+                    ..Options::default()
+                },
+            );
+            let _ = app.update(Message::ApplyArtifacts);
+            assert_eq!(
+                store.asset_items(project.id).unwrap().len(),
+                1,
+                "older marker: {old_marker}"
+            );
+            assert_eq!(store.episode(episode.id).unwrap().exec_status, "done");
+            assert_eq!(
+                store.episode(episode.id).unwrap().exec_artifacts,
+                Some(artifacts)
+            );
+            drop(app);
+            let mut reopened = App::new(
+                store.clone(),
+                Options {
+                    root: root.path().into(),
+                    ..Options::default()
+                },
+            );
+            let _ = reopened.update(Message::ApplyArtifacts);
+            assert_eq!(store.asset_items(project.id).unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn successive_reviews_of_one_run_recover_each_snapshot_without_duplicate_writes() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        let project = store.create_project("多次审核", None).unwrap();
+        let episode = store
+            .create_episode(project.id, "原分集", Some("拾起玉剑"))
+            .unwrap();
+        let run = "multi-review";
+        store
+            .patch_episode(
+                episode.id,
+                EpisodeUpdate {
+                    last_exec_run_id: Some(run.into()),
+                    ..EpisodeUpdate::default()
+                },
+            )
+            .unwrap();
+        let contexts = ContextStore::new(root.path().into());
+        let record = |artifacts: &Value, status: &str, waiting_for: Option<&str>| {
+            contexts.snapshot_run(&project.id.to_string(), run,
+                &json!({"project_id":project.id.to_string(),"episode_id":episode.id,"action":"episode_execute"}),
+                &json!({"run_id":run,"status":status,"artifacts":artifacts,"waiting_for":waiting_for}),
+                &json!({"episode_id":episode.id})).unwrap();
+            contexts
+                .write_stage(
+                    &project.id.to_string(),
+                    run,
+                    "chat.status",
+                    &json!({"status":status,"waiting_for":waiting_for}),
+                )
+                .unwrap();
+        };
+        let split = json!({"episodes":[{"title":"新分集","script":"新的一集"}]});
+        let plan = json!({"items":[{"name":"玉剑","kind":"prop","category":"prop"}]});
+        let mut artifacts = json!({"outline":{"logline":"故事结构"},"split_episodes":split});
+        record(&artifacts, "paused", Some("confirm_split"));
+        let mut app = App::new(
+            store.clone(),
+            Options {
+                root: root.path().into(),
+                ..Options::default()
+            },
+        );
+        let _ = app.update(Message::ApplyArtifacts);
+        assert_eq!(store.episodes(project.id).unwrap().len(), 1);
+        drop(app);
+
+        artifacts["approved_split_episodes"] = split;
+        artifacts["asset_ingest_plan"] = plan.clone();
+        record(&artifacts, "paused", Some("confirm_ingest"));
+        let mut app = App::new(
+            store.clone(),
+            Options {
+                root: root.path().into(),
+                ..Options::default()
+            },
+        );
+        let key = app.session.current.unwrap();
+        assert_eq!(app.outputs[&key], artifacts);
+        assert_eq!(app.paused, Some((key, run.into())));
+        let _ = app.update(Message::Review(true));
+        assert!(
+            app.busy.is_none(),
+            "review must wait for the preceding snapshot to commit"
+        );
+        let _ = app.update(Message::ApplyArtifacts);
+        assert_eq!(store.episodes(project.id).unwrap().len(), 2);
+        drop(app);
+
+        artifacts["approved_asset_ingest_plan"] = plan;
+        record(&artifacts, "done", None);
+        let mut app = App::new(
+            store.clone(),
+            Options {
+                root: root.path().into(),
+                ..Options::default()
+            },
+        );
+        let _ = app.update(Message::ApplyArtifacts);
+        assert_eq!(store.episodes(project.id).unwrap().len(), 2);
+        assert_eq!(store.asset_items(project.id).unwrap().len(), 1);
+        let _ = app.update(Message::ToggleGate(Gate::Structure));
+        assert!(
+            ProductionState::load(&contexts, project.id).confirmed(episode.id, Gate::Structure)
+        );
+        drop(app);
+        let mut reopened = App::new(
+            store.clone(),
+            Options {
+                root: root.path().into(),
+                ..Options::default()
+            },
+        );
+        let _ = reopened.update(Message::ApplyArtifacts);
+        assert_eq!(store.episodes(project.id).unwrap().len(), 2);
+        assert_eq!(store.asset_items(project.id).unwrap().len(), 1);
+        assert!(
+            ProductionState::load(&contexts, project.id).confirmed(episode.id, Gate::Structure),
+            "a completed snapshot must not revoke later human approval"
+        );
+    }
+
+    #[test]
+    fn legacy_stage_only_reviews_restore_their_artifacts_before_approval() {
+        for flat in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let store = Store::open(root.path()).unwrap();
+            let project = store.create_project("旧项目", None).unwrap();
+            let episode = store
+                .create_episode(project.id, "旧分集", Some("拾起玉剑"))
+                .unwrap();
+            let run = "legacy-review";
+            let artifacts = json!({"asset_ingest_plan":{"items":[{"name":"待审玉剑","kind":"prop","category":"prop"}]}});
+            let contexts = ContextStore::new(root.path().into());
+            let state = if flat {
+                json!({"project_id":project.uuid,"project_id_pk":project.id,"episode_id":episode.id,
+                    "run_id":run,"script_text":"拾起玉剑","step_index":4,"artifacts":artifacts})
+            } else {
+                json!({"schema_version":1,"input":{"project_id":project.id.to_string(),"episode_id":episode.id,
+                    "run_id":run,"script":"拾起玉剑","action":"episode_execute","context":{}},
+                    "next_step":1,"steps":[{"action_key":"episode_asset_ingest","input_text":"","why":""}],
+                    "artifacts":artifacts,"kind":"confirm_ingest"})
+            };
+            contexts
+                .write_stage(
+                    &project.id.to_string(),
+                    run,
+                    "chat.status",
+                    &json!({"status":"paused","waiting_for":"confirm_ingest"}),
+                )
+                .unwrap();
+            contexts
+                .write_stage(
+                    &project.id.to_string(),
+                    run,
+                    "chat.interrupt",
+                    &json!({"kind":"confirm_ingest","resume_state":state}),
+                )
+                .unwrap();
+            store
+                .patch_episode(
+                    episode.id,
+                    EpisodeUpdate {
+                        last_exec_run_id: Some(run.into()),
+                        exec_status: Some("paused".into()),
+                        ..EpisodeUpdate::default()
+                    },
+                )
+                .unwrap();
+            let mut app = App::new(
+                store.clone(),
+                Options {
+                    root: root.path().into(),
+                    ..Options::default()
+                },
+            );
+            let _ = app.update(Message::Page(Page::Runs));
+            assert!(
+                app.run_list
+                    .iter()
+                    .any(|entry| label(entry, "run_id") == run),
+                "a recoverable Run without metadata must remain visible"
+            );
+            let _ = app.update(Message::ScriptStep(1));
+            assert!(app.editor.text().contains("待审玉剑"), "flat: {flat}");
+            let _ = app.update(Message::ApplyArtifacts);
+            assert_eq!(
+                store.episode(episode.id).unwrap().exec_artifacts,
+                Some(artifacts)
+            );
+            assert!(
+                store.asset_items(project.id).unwrap().is_empty(),
+                "unapproved assets must not be ingested"
+            );
+            let task = app.update(Message::Review(true));
+            assert!(
+                app.busy.is_some(),
+                "the original Run can continue after replaying its snapshot"
+            );
+            drop(task); // Do not poll the task or contact a model.
+            let _ = app.update(Message::Cancel);
+        }
+    }
+
+    #[test]
+    fn production_save_failure_keeps_the_snapshot_retryable_across_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        let project = store.create_project("制作状态异常", None).unwrap();
+        let episode = store
+            .create_episode(project.id, "第一集", Some("拾起玉剑"))
+            .unwrap();
+        let run = "production-write-failure";
+        let artifacts = json!({"approved_asset_ingest_plan":{"items":[{"name":"玉剑","kind":"prop","category":"prop"}]}});
+        let contexts = ContextStore::new(root.path().into());
+        let unsupported = json!({"schema_version":"future.production","outline_approved":true,"unknown_field":"保留"});
+        contexts
+            .put_context(
+                &project.id.to_string(),
+                "production_state",
+                "v1",
+                &unsupported,
+            )
+            .unwrap();
+        contexts.snapshot_run(&project.id.to_string(),run,
+            &json!({"project_id":project.id.to_string(),"episode_id":episode.id,"action":"episode_execute"}),
+            &json!({"run_id":run,"status":"done","artifacts":artifacts}),&json!({"episode_id":episode.id})).unwrap();
+        contexts
+            .write_stage(
+                &project.id.to_string(),
+                run,
+                "chat.status",
+                &json!({"status":"done"}),
+            )
+            .unwrap();
+        store
+            .patch_episode(
+                episode.id,
+                EpisodeUpdate {
+                    last_exec_run_id: Some(run.into()),
+                    ..EpisodeUpdate::default()
+                },
+            )
+            .unwrap();
+        let mut app = App::new(
+            store.clone(),
+            Options {
+                root: root.path().into(),
+                ..Options::default()
+            },
+        );
+        let _ = app.update(Message::ApplyArtifacts);
+        assert_eq!(
+            store.episode(episode.id).unwrap().exec_status,
+            "apply_failed"
+        );
+        assert_eq!(
+            contexts
+                .get_context(&project.id.to_string(), "production_state", "v1")
+                .unwrap(),
+            Some(unsupported)
+        );
+        assert_eq!(
+            contexts
+                .read_stage(&project.id.to_string(), run, "desktop.materialization")
+                .unwrap()
+                .unwrap()["status"],
+            "error"
+        );
+        drop(app);
+        ProductionState::default()
+            .save(&contexts, project.id)
+            .unwrap();
+        let mut reopened = App::new(
+            store.clone(),
+            Options {
+                root: root.path().into(),
+                ..Options::default()
+            },
+        );
+        let _ = reopened.update(Message::ApplyArtifacts);
+        assert_eq!(store.episode(episode.id).unwrap().exec_status, "done");
+        assert_eq!(
+            store.asset_items(project.id).unwrap().len(),
+            1,
+            "retry must not duplicate the already committed core writes"
+        );
+    }
+
+    #[test]
     fn live_run_inspection_refreshes_the_selected_stage_without_changing_script() {
         let root = tempfile::tempdir().unwrap();
         let store = Store::open(root.path()).unwrap();
@@ -6943,6 +7662,548 @@ mod tests {
         assert_eq!(app.editor.text(), draft);
     }
     #[test]
+    fn cancelled_writer_must_quiesce_before_explicit_project_delete_confirmation() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        let project = store.create_project("原项目", None).unwrap();
+        let episode = store
+            .create_episode(project.id, "原分集", Some("原稿"))
+            .unwrap();
+        let other = store.create_project("其它项目", None).unwrap();
+        let mut app = App::new(
+            store.clone(),
+            Options {
+                root: root.path().into(),
+                ..Options::default()
+            },
+        );
+        let key = EpisodeKey {
+            project: project.id,
+            episode: episode.id,
+        };
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = std::sync::Mutex::new(release_rx);
+        let worker = runtime.spawn(prepare_run_evidence(
+            store.clone(),
+            key,
+            "真实后台证据".into(),
+            app.activity.enter(project.id).unwrap(),
+            Some(std::sync::Arc::new(move || {
+                started_tx.send(()).unwrap();
+                release_rx.lock().unwrap().recv().unwrap();
+            })),
+        ));
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        worker.abort();
+        assert!(runtime.block_on(worker).unwrap_err().is_cancelled());
+        let (_, handle) = Task::<Message>::none().abortable();
+        app.busy = Some((key, "cancelled-writer".into(), handle));
+        let _ = app.update(Message::Cancel);
+        assert!(app.busy.is_none());
+        app.pending_delete = Some((true, project.id));
+        let _ = app.update(Message::ConfirmDelete(true));
+        let kept_project = store.project(project.id).is_ok();
+        let kept_confirmation = app.pending_delete == Some((true, project.id));
+        app.pending_delete = Some((true, other.id));
+        let _ = app.update(Message::ConfirmDelete(true));
+        let other_deleted = store.project(other.id).is_err();
+        release_tx.send(()).unwrap();
+        runtime.shutdown_timeout(Duration::from_secs(5));
+        assert!(!app.activity.is_active(project.id));
+        let no_queued_delete = store.project(project.id).is_ok();
+        app.pending_delete = Some((true, project.id));
+        let _ = app.update(Message::ConfirmDelete(true));
+        assert!(
+            kept_project,
+            "aborting the visible task did not stop the real writer"
+        );
+        assert!(
+            kept_confirmation,
+            "a denied confirmation must remain available"
+        );
+        assert!(other_deleted, "a writer must not block a different project");
+        assert!(
+            no_queued_delete,
+            "writer exit must not auto-execute an old deletion request"
+        );
+        assert!(
+            store.project(project.id).is_err(),
+            "only a new explicit confirmation deletes after quiescence"
+        );
+    }
+
+    #[test]
+    fn every_destructive_target_uses_its_real_project_not_the_current_view() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        let original = store.create_project("后台原项目", None).unwrap();
+        let episode = store
+            .create_episode(original.id, "原分集", Some("原文"))
+            .unwrap();
+        let item = store
+            .create_asset_item(original.id, "原角色", "persona_visual", None)
+            .unwrap();
+        let scene = store.create_scene(episode.id, "原场景", 1).unwrap();
+        let shot = store.create_shot(scene.id, "原镜头", 1).unwrap();
+        let source = root.path().join("source.txt");
+        std::fs::write(&source, "隔离素材").unwrap();
+        let item_asset = store
+            .import_asset(&source, AssetTarget::Item(item.id))
+            .unwrap();
+        let shot_asset = store
+            .import_asset(&source, AssetTarget::Shot(shot.id))
+            .unwrap();
+        let other = store.create_project("当前项目", None).unwrap();
+        let other_episode = store
+            .create_episode(other.id, "当前分集", Some("保留原稿"))
+            .unwrap();
+        let other_item = store
+            .create_asset_item(other.id, "可删除角色", "persona_visual", None)
+            .unwrap();
+        let mut app = App::new(
+            store.clone(),
+            Options {
+                root: root.path().into(),
+                ..Options::default()
+            },
+        );
+        let _ = app.update(Message::Project(Choice {
+            id: other.id,
+            name: other.name,
+        }));
+        let current = EpisodeKey {
+            project: other.id,
+            episode: other_episode.id,
+        };
+        let lease = app.activity.enter(original.id).unwrap();
+        let _ = app.update(Message::DeleteItem(item.id));
+        assert!(store.asset_item(item.id).is_ok());
+        let _ = app.update(Message::DeleteAsset(item_asset.id));
+        assert!(store.asset(item_asset.id).is_ok());
+        let _ = app.update(Message::DeleteAsset(shot_asset.id));
+        assert!(store.asset(shot_asset.id).is_ok());
+        let _ = app.update(Message::DeleteEpisode(episode.id));
+        let _ = app.update(Message::ConfirmDelete(true));
+        assert!(store.episode(episode.id).is_ok());
+        assert_eq!(app.pending_delete, Some((false, episode.id)));
+        let _ = app.update(Message::DeleteItem(other_item.id));
+        assert!(store.asset_item(other_item.id).is_err());
+        drop(lease);
+        let _ = app.update(Message::ConfirmDelete(true));
+        assert!(store.episode(episode.id).is_err());
+        assert_eq!(app.pid(), Some(other.id));
+        assert_eq!(app.session.current, Some(current));
+        assert_eq!(app.session.draft().unwrap().text, "保留原稿");
+    }
+
+    #[test]
+    fn startup_shows_preserved_legacy_quarantine_warnings_even_without_a_project() {
+        for with_project in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let trash = root.path().join(".aicomic-trash-legacy");
+            std::fs::create_dir(&trash).unwrap();
+            let original = trash.join("0");
+            std::fs::write(&original, "保留的用户素材").unwrap();
+            let store = Store::open(root.path()).unwrap();
+            if with_project {
+                store.create_project("正常项目", None).unwrap();
+            }
+            let mut app = App::new(
+                store,
+                Options {
+                    root: root.path().into(),
+                    ..Options::default()
+                },
+            );
+            assert!(
+                app.status.contains("恢复警告") && app.status.contains(".aicomic-trash-legacy"),
+                "startup status: {}",
+                app.status
+            );
+            assert_eq!(
+                std::fs::read_to_string(&original).unwrap(),
+                "保留的用户素材"
+            );
+            app.status = "后续实际运行状态".into();
+            let _ = app.update(Message::Refresh);
+            assert_eq!(
+                app.status, "后续实际运行状态",
+                "startup warnings must not overwrite later work on every reload"
+            );
+        }
+    }
+
+    #[test]
+    fn unresolved_legacy_ownership_is_conservative_while_any_writer_remains_active() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        let project = store.create_project("活动项目", None).unwrap();
+        let mut app = App::new(
+            store,
+            Options {
+                root: root.path().into(),
+                ..Options::default()
+            },
+        );
+        let lease = app.activity.enter(project.id).unwrap();
+        assert!(app.deletion_blocked(None, false));
+        assert!(app.deletion_blocked(Some(0), false));
+        assert!(app.deletion_blocked(Some(project.id + 1000), false));
+        drop(lease);
+        assert!(!app.deletion_blocked(None, false));
+    }
+
+    fn asset_result_fixture() -> (tempfile::TempDir, Store, App, EpisodeKey, i64, i64) {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        let project = store.create_project("素材结果", None).unwrap();
+        let episode = store
+            .create_episode(project.id, "原分集", Some("保留原稿"))
+            .unwrap();
+        let item = store
+            .create_asset_item(project.id, "角色", "persona_visual", None)
+            .unwrap();
+        let source = root.path().join("source.txt");
+        std::fs::write(&source, "隔离素材").unwrap();
+        let asset = store
+            .import_asset(&source, AssetTarget::Item(item.id))
+            .unwrap();
+        let mut production = ProductionState::refresh(&store, project.id).unwrap();
+        production.set(0, Gate::Assets, true);
+        production
+            .save(&ContextStore::new(root.path().into()), project.id)
+            .unwrap();
+        let mut app = App::new(
+            store.clone(),
+            Options {
+                root: root.path().into(),
+                ..Options::default()
+            },
+        );
+        let _ = app.update(Message::SelectItem(item.id));
+        app.selected_visual_asset = Some(asset.id);
+        (
+            root,
+            store,
+            app,
+            EpisodeKey {
+                project: project.id,
+                episode: episode.id,
+            },
+            item.id,
+            asset.id,
+        )
+    }
+
+    #[test]
+    fn item_delete_completion_refreshes_committed_rows_but_preserves_recovery_selection() {
+        for committed in [false, true] {
+            let (root, store, mut app, key, item, asset) = asset_result_fixture();
+            let error = if committed {
+                store.delete_asset_item(item).unwrap();
+                aicomic_core::Error::CommittedPending {
+                    operation_id: "item-operation".into(),
+                    reason: "待清理".into(),
+                }
+            } else {
+                aicomic_core::Error::RecoveryRequired {
+                    operation_id: "item-preserved".into(),
+                    reason: "保留现场".into(),
+                }
+            };
+            let _ = app.finish_asset_delete(true, item, Some(key.project), Err(error));
+            if committed {
+                assert!(app.selected_item.is_none());
+                assert!(app.selected_visual_asset.is_none());
+                assert!(app.media.is_empty());
+                assert!(!app.items.iter().any(|row| id(row) == item));
+                assert!(
+                    !ProductionState::load(&ContextStore::new(root.path().into()), key.project)
+                        .assets_frozen
+                );
+                assert!(
+                    app.status.contains("已提交")
+                        && app.status.contains("待恢复")
+                        && app.status.contains("item-operation")
+                );
+                assert!(!app.status.contains("操作失败"));
+            } else {
+                assert_eq!(app.selected_item, Some(item));
+                assert_eq!(app.selected_visual_asset, Some(asset));
+                assert!(app.media.iter().any(|row| id(row) == asset));
+                assert!(app.production.assets_frozen);
+                assert!(app.status.contains("item-preserved") && app.status.contains("保留"));
+            }
+        }
+    }
+
+    #[test]
+    fn media_delete_completion_clears_only_the_deleted_visual_selection_after_commit() {
+        for committed in [false, true] {
+            for selected_target in [false, true] {
+                let (root, store, mut app, key, item, asset) = asset_result_fixture();
+                let second = store
+                    .import_asset(&root.path().join("source.txt"), AssetTarget::Item(item))
+                    .unwrap();
+                let mut production = ProductionState::refresh(&store, key.project).unwrap();
+                production.set(0, Gate::Assets, true);
+                production
+                    .save(&ContextStore::new(root.path().into()), key.project)
+                    .unwrap();
+                app.reload();
+                let _ = app.update(Message::SelectItem(item));
+                let selected = if selected_target { asset } else { second.id };
+                app.selected_visual_asset = Some(selected);
+                let error = if committed {
+                    store.delete_asset(asset).unwrap();
+                    aicomic_core::Error::CommittedPending {
+                        operation_id: "media-operation".into(),
+                        reason: "待清理".into(),
+                    }
+                } else {
+                    aicomic_core::Error::RecoveryRequired {
+                        operation_id: "media-preserved".into(),
+                        reason: "保留现场".into(),
+                    }
+                };
+                let _ = app.finish_asset_delete(false, asset, Some(key.project), Err(error));
+                assert_eq!(app.selected_item, Some(item));
+                assert!(app.media.iter().any(|row| id(row) == second.id));
+                if committed {
+                    assert!(!app.media.iter().any(|row| id(row) == asset));
+                    assert_eq!(
+                        app.selected_visual_asset,
+                        (!selected_target).then_some(second.id)
+                    );
+                    assert!(!app.production.assets_frozen);
+                    assert!(
+                        app.status.contains("已提交")
+                            && app.status.contains("待恢复")
+                            && app.status.contains("media-operation")
+                    );
+                    assert!(!app.status.contains("操作失败"));
+                } else {
+                    assert_eq!(app.selected_visual_asset, Some(selected));
+                    assert!(app.media.iter().any(|row| id(row) == asset));
+                    assert!(app.production.assets_frozen);
+                    assert!(app.status.contains("media-preserved") && app.status.contains("保留"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn import_pending_stops_the_batch_and_reports_committed_rows_without_losing_selection() {
+        for committed in [false, true] {
+            let (root, store, mut app, key, item, asset) = asset_result_fixture();
+            let paths = vec![
+                root.path().join("source.txt"),
+                root.path().join("source.txt"),
+            ];
+            let mut attempts = 0;
+            let result = import_media_batch(&paths, |path| {
+                attempts += 1;
+                if committed {
+                    store.import_asset(path, AssetTarget::Item(item))?;
+                    Err(aicomic_core::Error::CommittedPending {
+                        operation_id: "import-operation".into(),
+                        reason: "等待清理".into(),
+                    })
+                } else {
+                    Err(aicomic_core::Error::RecoveryRequired {
+                        operation_id: "import-preserved".into(),
+                        reason: "保留现场".into(),
+                    })
+                }
+            });
+            assert_eq!(
+                attempts, 1,
+                "neither pending outcome permits importing remaining files"
+            );
+            assert!(matches!(
+                &result,
+                Err(ImportFailure::CommittedPending { .. })
+                    | Err(ImportFailure::RecoveryRequired { .. })
+            ));
+            let _ = app.update(Message::Imported(key.project, item, result));
+            assert_eq!(app.selected_item, Some(item));
+            assert_eq!(app.selected_visual_asset, Some(asset));
+            assert_eq!(app.session.current, Some(key));
+            assert_eq!(app.session.draft().unwrap().text, "保留原稿");
+            if committed {
+                assert_eq!(app.media.len(), 2);
+                assert!(!app.production.assets_frozen);
+                assert!(
+                    app.status.contains("已提交")
+                        && app.status.contains("待恢复")
+                        && app.status.contains("import-operation")
+                        && app.status.contains("先恢复")
+                );
+                assert!(!app.status.contains("操作失败"));
+            } else {
+                assert_eq!(app.media.len(), 1);
+                assert!(app.production.assets_frozen);
+                assert!(
+                    app.status.contains("import-preserved")
+                        && app.status.contains("保留")
+                        && app.status.contains("先恢复")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn deletion_completion_distinguishes_committed_cleanup_from_preserved_recovery() {
+        for committed in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let store = Store::open(root.path()).unwrap();
+            let project = store.create_project("删除目标", None).unwrap();
+            let episode = store
+                .create_episode(project.id, "原分集", Some("原稿"))
+                .unwrap();
+            let other = store.create_project("保留项目", None).unwrap();
+            let mut app = App::new(
+                store.clone(),
+                Options {
+                    root: root.path().into(),
+                    ..Options::default()
+                },
+            );
+            let key = EpisodeKey {
+                project: project.id,
+                episode: episode.id,
+            };
+            let error = if committed {
+                store.delete_project(project.id).unwrap();
+                aicomic_core::Error::CommittedPending {
+                    operation_id: "operation-pending".into(),
+                    reason: "等待清理".into(),
+                }
+            } else {
+                aicomic_core::Error::RecoveryRequired {
+                    operation_id: "operation-preserved".into(),
+                    reason: "保留恢复现场".into(),
+                }
+            };
+            let _ = app.finish_delete(true, project.id, Some(project.id), Err(error));
+            if committed {
+                assert_eq!(app.pid(), Some(other.id));
+                assert!(!app.session.drafts.contains_key(&key));
+                assert!(app.status.contains("operation-pending") && app.status.contains("待恢复"));
+                assert!(!app.status.contains("操作失败"));
+            } else {
+                assert_eq!(app.pid(), Some(project.id));
+                assert_eq!(app.session.current, Some(key));
+                assert_eq!(app.session.draft().unwrap().text, "原稿");
+                assert_eq!(app.pending_delete, Some((true, project.id)));
+                assert!(app.status.contains("operation-preserved") && app.status.contains("保留"));
+            }
+        }
+    }
+
+    #[test]
+    fn project_navigation_discards_unconfirmed_deletions_instead_of_relabeling_the_target() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        let first = store.create_project("原项目", None).unwrap();
+        store
+            .create_episode(first.id, "第一集", Some("原文"))
+            .unwrap();
+        let other = store.create_project("其它项目", None).unwrap();
+        let episode = store
+            .create_episode(other.id, "另一集", Some("另一原文"))
+            .unwrap();
+        let next = store
+            .create_episode(other.id, "第三集", Some("第三原文"))
+            .unwrap();
+        let mut app = App::new(
+            store,
+            Options {
+                root: root.path().into(),
+                ..Options::default()
+            },
+        );
+        let _ = app.update(Message::DeleteProject);
+        let _ = app.update(Message::Project(Choice {
+            id: other.id,
+            name: other.name,
+        }));
+        assert!(app.pending_delete.is_none());
+        let _ = app.update(Message::DeleteEpisode(episode.id));
+        let _ = app.update(Message::Episode(next.id, 0));
+        assert!(app.pending_delete.is_none());
+    }
+
+    #[test]
+    fn task_creation_reserves_original_project_activity_without_polling_or_requesting_models() {
+        for operation in ["run", "review", "rebuild", "search", "import"] {
+            let root = tempfile::tempdir().unwrap();
+            let store = Store::open(root.path()).unwrap();
+            let project = store.create_project("预留后台活动", None).unwrap();
+            let episode = store
+                .create_episode(project.id, "第一集", Some("原文"))
+                .unwrap();
+            let item = store
+                .create_asset_item(project.id, "角色", "persona_visual", None)
+                .unwrap();
+            let mut app = App::new(
+                store.clone(),
+                Options {
+                    root: root.path().into(),
+                    ..Options::default()
+                },
+            );
+            let key = EpisodeKey {
+                project: project.id,
+                episode: episode.id,
+            };
+            let task = match operation {
+                "run" => {
+                    app.settings.api_key = "not-sent".into();
+                    let _ = app.update(Message::Run("script_optimize".into()));
+                    app.update(Message::ConfirmRun)
+                }
+                "review" => {
+                    app.paused = Some((key, "unpolled-review".into()));
+                    app.update(Message::Review(true))
+                }
+                "rebuild" => app.update(Message::RebuildMemory),
+                "search" => app.update(Message::SemanticSearch),
+                _ => {
+                    app.selected_item = Some(item.id);
+                    app.update(Message::ImportMedia)
+                }
+            };
+            assert!(
+                app.activity.is_active(project.id),
+                "lease must predate Task execution: {operation}"
+            );
+            app.pending_delete = Some((true, project.id));
+            let _ = app.update(Message::ConfirmDelete(true));
+            assert!(store.project(project.id).is_ok());
+            assert_eq!(app.pending_delete, Some((true, project.id)));
+            let late_run = app.busy.as_ref().map(|(_, run, _)| run.clone());
+            let _ = app.update(Message::Cancel);
+            drop(task); // No GUI dialog, model request, or background worker was started.
+            assert!(
+                !app.activity.is_active(project.id),
+                "dropping an unpolled task releases its reservation: {operation}"
+            );
+            if let Some(run) = late_run {
+                let _ = app.update(Message::RunComplete(key,run.clone(),Ok(WorkflowResult {run_id:run,status:"done".into(),
+                    artifacts:json!({"approved_asset_ingest_plan":{"items":[{"name":"过期回调不可写入","kind":"prop"}]}}),output_text:String::new(),waiting_for:None})));
+                assert_eq!(store.asset_items(project.id).unwrap().len(), 1);
+            }
+            assert!(
+                store.project(project.id).is_ok(),
+                "writer completion must not enqueue deletion"
+            );
+        }
+    }
+
+    #[test]
     fn asset_deletion_is_blocked_while_project_run_or_materialization_needs_it() {
         let root = tempfile::tempdir().unwrap();
         let store = Store::open(root.path()).unwrap();
@@ -6972,6 +8233,7 @@ mod tests {
                 run_id: "visual".into(),
                 workflow_status: "done".into(),
                 artifacts: json!({}),
+                waiting_for: None,
             },
         );
         let _ = app.update(Message::DeleteItem(item.id));
@@ -7082,6 +8344,22 @@ mod tests {
             )
             .unwrap();
         app.reload();
+        app.toggle_script_lock();
+        let key = app.session.current.unwrap();
+        let artifacts = json!({"outline":{"scenes":[{"title":"旧车站"}]}});
+        store
+            .patch_episode(
+                key.episode,
+                EpisodeUpdate {
+                    exec_artifacts: Some(artifacts.clone()),
+                    ..EpisodeUpdate::default()
+                },
+            )
+            .unwrap();
+        app.outputs.insert(key, artifacts);
+        app.reload();
+        let _ = app.update(Message::ToggleGate(Gate::Structure));
+        let _ = app.update(Message::ToggleGate(Gate::Assets));
         app.max_shots = "12".into();
         app.aspect_ratio = "16:9".into();
         app.prompt_style = "Midjourney v6".into();
@@ -7116,6 +8394,347 @@ mod tests {
         assert!(app.save_script());
         assert!(!store.episode(key.episode).unwrap().script_locked);
         assert!(app.status.contains("锁定解除"));
+    }
+
+    #[test]
+    fn closing_saves_changed_script_and_invalidates_only_that_episodes_confirmations() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        let mut app = App::new(
+            store.clone(),
+            Options {
+                root: root.path().into(),
+                demo: true,
+                ..Options::default()
+            },
+        );
+        let key = app.session.current.unwrap();
+        let other_episode = id(&app.episodes[1]);
+        app.toggle_script_lock();
+        app.production.set(0, Gate::Outline, true);
+        app.production.set(0, Gate::Assets, true);
+        for episode in [key.episode, other_episode] {
+            app.production.set(episode, Gate::Structure, true);
+            app.production.set(episode, Gate::Storyboard, true);
+        }
+        app.persist_production();
+        app.reload();
+        app.page = Page::Script;
+        app.step = 0;
+        app.editor = text_editor::Content::with_text("关闭窗口时保存的新正文");
+        let _ = app.update(Message::Close);
+        let saved = store.episode(key.episode).unwrap();
+        assert_eq!(saved.description.as_deref(), Some("关闭窗口时保存的新正文"));
+        assert!(!saved.script_locked);
+        let production = ProductionState::load(&ContextStore::new(root.path().into()), key.project);
+        assert!(!production.confirmed(key.episode, Gate::Structure));
+        assert!(!production.confirmed(key.episode, Gate::Storyboard));
+        assert!(production.confirmed(other_episode, Gate::Structure));
+        assert!(production.confirmed(other_episode, Gate::Storyboard));
+        assert!(production.outline_approved);
+        assert!(production.assets_frozen);
+    }
+
+    #[test]
+    fn storyboard_generation_requires_current_gates_and_rechecks_them_at_confirmation() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        let mut app = App::new(
+            store.clone(),
+            Options {
+                root: root.path().into(),
+                demo: true,
+                ..Options::default()
+            },
+        );
+        app.settings.api_key = "not-sent-test-key".into();
+        let key = app.session.current.unwrap();
+        let _ = app.update(Message::Run("workflow_storyboard".into()));
+        assert!(
+            app.pending_run.is_none(),
+            "unlocked scripts cannot enter generation"
+        );
+        assert!(app.busy.is_none());
+        let _ = app.update(Message::ToggleScriptLock);
+        let _ = app.update(Message::Run("workflow_storyboard".into()));
+        assert!(app.pending_run.is_none(), "structure must be confirmed");
+        let artifacts = json!({"outline":{"scenes":[{"title":"月台"}]}});
+        store
+            .patch_episode(
+                key.episode,
+                EpisodeUpdate {
+                    exec_artifacts: Some(artifacts.clone()),
+                    ..EpisodeUpdate::default()
+                },
+            )
+            .unwrap();
+        app.outputs.insert(key, artifacts);
+        app.reload();
+        let _ = app.update(Message::ToggleGate(Gate::Structure));
+        let _ = app.update(Message::Run("workflow_storyboard".into()));
+        assert!(
+            app.pending_run.is_none(),
+            "shared assets must exist and be frozen"
+        );
+        store
+            .create_asset_item(key.project, "林夏", "persona_visual", Some("主角"))
+            .unwrap();
+        app.reload();
+        let _ = app.update(Message::ToggleGate(Gate::Assets));
+        let _ = app.update(Message::Run("workflow_storyboard".into()));
+        assert!(
+            app.pending_run.is_some(),
+            "valid production inputs allow the preview"
+        );
+        let _ = app.update(Message::ToggleGate(Gate::Assets));
+        let task = app.update(Message::ConfirmRun);
+        assert!(
+            app.busy.is_none(),
+            "revoking a gate after preview must prevent a request"
+        );
+        assert!(app.pending_run.is_none());
+        assert!(app.status.contains("资产"));
+        drop(task);
+    }
+
+    #[test]
+    fn unchanged_asset_save_preserves_gates_but_real_changes_invalidate_all_storyboards() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        let mut app = App::new(
+            store.clone(),
+            Options {
+                root: root.path().into(),
+                demo: true,
+                ..Options::default()
+            },
+        );
+        let project = app.pid().unwrap();
+        let item = store
+            .create_asset_item(project, "林夏", "persona_visual", Some("主角"))
+            .unwrap();
+        app.reload();
+        let _ = app.update(Message::SelectItem(item.id));
+        app.production.set(0, Gate::Assets, true);
+        for episode in &app.episodes {
+            app.production.set(id(episode), Gate::Structure, true);
+            app.production.set(id(episode), Gate::Storyboard, true);
+        }
+        app.persist_production();
+        let _ = app.update(Message::SaveItem);
+        let contexts = ContextStore::new(root.path().into());
+        let saved = ProductionState::load(&contexts, project);
+        assert!(
+            saved.assets_frozen,
+            "same user-visible values are not an asset revision"
+        );
+        assert!(
+            app.episodes
+                .iter()
+                .all(|episode| saved.confirmed(id(episode), Gate::Storyboard))
+        );
+        let _ = app.update(Message::ItemField("name", "改名后的角色".into()));
+        let _ = app.update(Message::SaveItem);
+        let saved = ProductionState::load(&contexts, project);
+        assert!(!saved.assets_frozen);
+        assert!(
+            app.episodes
+                .iter()
+                .all(|episode| !saved.confirmed(id(episode), Gate::Storyboard))
+        );
+        assert!(
+            app.episodes
+                .iter()
+                .all(|episode| saved.confirmed(id(episode), Gate::Structure))
+        );
+    }
+
+    #[test]
+    fn completing_media_import_after_navigation_only_invalidates_its_original_project() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        let first = store.create_project("导入中的项目", None).unwrap();
+        let first_item = store
+            .create_asset_item(first.id, "原资产", "prop", Some("道具"))
+            .unwrap();
+        let second = store.create_project("正在查看的项目", None).unwrap();
+        store
+            .create_asset_item(second.id, "另一资产", "prop", Some("其它道具"))
+            .unwrap();
+        let mut app = App::new(
+            store.clone(),
+            Options {
+                root: root.path().into(),
+                ..Options::default()
+            },
+        );
+        let _ = app.update(Message::ToggleGate(Gate::Assets));
+        let _ = app.update(Message::Project(Choice {
+            id: second.id,
+            name: second.name,
+        }));
+        let _ = app.update(Message::ToggleGate(Gate::Assets));
+        let source = root.path().join("imported.txt");
+        std::fs::write(&source, b"temporary asset").unwrap();
+        store
+            .import_asset(&source, AssetTarget::Item(first_item.id))
+            .unwrap();
+        let _ = app.update(Message::Imported(first.id, first_item.id, Ok(true)));
+        let contexts = ContextStore::new(root.path().into());
+        assert!(!ProductionState::load(&contexts, first.id).assets_frozen);
+        assert!(ProductionState::load(&contexts, second.id).assets_frozen);
+        assert_eq!(app.pid(), Some(second.id));
+        assert!(app.production.assets_frozen);
+    }
+
+    #[test]
+    fn generating_a_script_candidate_does_not_revoke_unchanged_inherited_production_artifacts() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        let project = store.create_project("候选改稿", None).unwrap();
+        let episode = store
+            .create_episode(project.id, "第一集", Some("已锁定原稿"))
+            .unwrap();
+        let inherited = json!({"outline":{"logline":"已有结构"},"shots":[{"title":"已有镜头"}]});
+        store
+            .patch_episode(
+                episode.id,
+                EpisodeUpdate {
+                    script_locked: Some(true),
+                    exec_artifacts: Some(inherited.clone()),
+                    ..EpisodeUpdate::default()
+                },
+            )
+            .unwrap();
+        let mut app = App::new(
+            store.clone(),
+            Options {
+                root: root.path().into(),
+                ..Options::default()
+            },
+        );
+        let key = app.session.current.unwrap();
+        app.production.set(key.episode, Gate::Structure, true);
+        app.production.set(key.episode, Gate::Storyboard, true);
+        app.persist_production();
+        let run = "candidate-only";
+        let mut artifacts = inherited.clone();
+        artifacts["script"] = json!("尚未应用的优化稿");
+        let contexts = ContextStore::new(root.path().into());
+        contexts.snapshot_run(&project.id.to_string(),run,
+            &json!({"project_id":project.id.to_string(),"episode_id":episode.id,"run_id":run,"action":"script_optimize","context":{"artifacts":inherited}}),
+            &json!({"run_id":run,"status":"done","artifacts":artifacts}),&json!({"episode_id":episode.id})).unwrap();
+        store
+            .patch_episode(
+                episode.id,
+                EpisodeUpdate {
+                    last_exec_run_id: Some(run.into()),
+                    ..EpisodeUpdate::default()
+                },
+            )
+            .unwrap();
+        let (_, handle) = Task::<Message>::none().abortable();
+        app.busy = Some((key, run.into(), handle));
+        let _ = app.update(Message::RunComplete(
+            key,
+            run.into(),
+            Ok(WorkflowResult {
+                run_id: run.into(),
+                status: "done".into(),
+                artifacts,
+                output_text: String::new(),
+                waiting_for: None,
+            }),
+        ));
+        let saved = ProductionState::load(&contexts, project.id);
+        assert!(saved.confirmed(episode.id, Gate::Structure));
+        assert!(saved.confirmed(episode.id, Gate::Storyboard));
+        let saved_episode = store.episode(episode.id).unwrap();
+        assert!(saved_episode.script_locked);
+        assert_eq!(saved_episode.description.as_deref(), Some("已锁定原稿"));
+    }
+
+    #[test]
+    fn closing_saves_dirty_drafts_in_each_original_project_and_preserves_failed_drafts() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        let first = store.create_project("项目A", None).unwrap();
+        let first_episode = store
+            .create_episode(first.id, "标题A", Some("原稿A"))
+            .unwrap();
+        let second = store.create_project("项目B", None).unwrap();
+        let second_episode = store
+            .create_episode(second.id, "标题B", Some("原稿B"))
+            .unwrap();
+        for episode in [first_episode.id, second_episode.id] {
+            store
+                .patch_episode(
+                    episode,
+                    EpisodeUpdate {
+                        script_locked: Some(true),
+                        ..EpisodeUpdate::default()
+                    },
+                )
+                .unwrap();
+        }
+        let mut app = App::new(
+            store.clone(),
+            Options {
+                root: root.path().into(),
+                ..Options::default()
+            },
+        );
+        let _ = app.update(Message::Page(Page::Script));
+        app.editor = text_editor::Content::with_text("修改后的原稿A");
+        let _ = app.update(Message::Title("修改后的标题A".into()));
+        app.production.set(first_episode.id, Gate::Structure, true);
+        app.persist_production();
+        let _ = app.update(Message::Project(Choice {
+            id: second.id,
+            name: second.name,
+        }));
+        app.editor = text_editor::Content::with_text("修改后的原稿B");
+        app.production.set(second_episode.id, Gate::Structure, true);
+        app.persist_production();
+        let _ = app.update(Message::Close);
+        let contexts = ContextStore::new(root.path().into());
+        for (project, episode, script, title) in [
+            (first.id, first_episode.id, "修改后的原稿A", "修改后的标题A"),
+            (second.id, second_episode.id, "修改后的原稿B", "标题B"),
+        ] {
+            let saved = store.episode(episode).unwrap();
+            assert_eq!(saved.description.as_deref(), Some(script));
+            assert_eq!(saved.title, title);
+            assert!(!saved.script_locked);
+            assert!(!ProductionState::load(&contexts, project).confirmed(episode, Gate::Structure));
+        }
+        app.editor = text_editor::Content::with_text("不可丢失的未保存修改");
+        let unsupported = json!({"schema_version":"future.production","keep":"unknown"});
+        contexts
+            .put_context(
+                &second.id.to_string(),
+                "production_state",
+                "v1",
+                &unsupported,
+            )
+            .unwrap();
+        let _ = app.update(Message::Close);
+        assert!(app.session.draft().unwrap().dirty);
+        assert_eq!(app.session.draft().unwrap().text, "不可丢失的未保存修改");
+        assert_eq!(
+            store
+                .episode(second_episode.id)
+                .unwrap()
+                .description
+                .as_deref(),
+            Some("修改后的原稿B")
+        );
+        assert_eq!(
+            contexts
+                .get_context(&second.id.to_string(), "production_state", "v1")
+                .unwrap(),
+            Some(unsupported)
+        );
     }
 
     #[test]

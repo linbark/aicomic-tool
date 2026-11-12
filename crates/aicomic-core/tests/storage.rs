@@ -95,6 +95,157 @@ fn persists_full_script_and_removes_polymorphic_descendants() {
 }
 
 #[test]
+fn changing_episode_script_unlocks_it_without_replacing_run_artifacts() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let project = store.create_project("改稿", None).unwrap();
+    let episode = store
+        .create_episode(project.id, "第一集", Some("原剧本"))
+        .unwrap();
+    let artifacts = json!({"outline":{"title":"旧结构"},"shots":[{"title":"旧分镜"}]});
+    store
+        .patch_episode(
+            episode.id,
+            EpisodeUpdate {
+                script_locked: Some(true),
+                script_locked_at: Some("2026-11-12T10:00:00Z".into()),
+                last_exec_run_id: Some("original-run".into()),
+                exec_status: Some("done".into()),
+                exec_artifacts: Some(artifacts.clone()),
+                ..EpisodeUpdate::default()
+            },
+        )
+        .unwrap();
+
+    let saved = store
+        .update_episode(episode.id, "第一集", Some("修改后的剧本"))
+        .unwrap();
+    assert_eq!(saved.description.as_deref(), Some("修改后的剧本"));
+    assert!(!saved.script_locked);
+    assert!(saved.script_locked_at.is_none());
+    assert_eq!(saved.last_exec_run_id.as_deref(), Some("original-run"));
+    assert_eq!(saved.exec_status, "done");
+    assert_eq!(saved.exec_artifacts, Some(artifacts));
+    assert_eq!(
+        Store::open(dir.path())
+            .unwrap()
+            .episode(episode.id)
+            .unwrap(),
+        saved
+    );
+}
+
+#[test]
+fn resaving_or_renaming_an_episode_preserves_its_script_lock() {
+    for body in [Some("原剧本"), None] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let project = store.create_project("保持锁定", None).unwrap();
+        let episode = store.create_episode(project.id, "第一集", body).unwrap();
+        let locked = store
+            .patch_episode(
+                episode.id,
+                EpisodeUpdate {
+                    script_locked: Some(true),
+                    script_locked_at: Some("2026-11-12T10:00:00Z".into()),
+                    ..EpisodeUpdate::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            store.update_episode(episode.id, "第一集", body).unwrap(),
+            locked
+        );
+        let renamed = store
+            .update_episode(episode.id, "第一集：改名", body)
+            .unwrap();
+        assert_eq!(renamed.title, "第一集：改名");
+        assert_eq!(renamed.description, locked.description);
+        assert!(renamed.script_locked);
+        assert_eq!(renamed.script_locked_at, locked.script_locked_at);
+    }
+}
+
+#[test]
+fn setting_or_clearing_a_nullable_episode_script_revokes_only_its_own_lock() {
+    for (before, after) in [(None, Some("新增剧本")), (Some("旧剧本"), None)] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let project = store.create_project("可空旧剧本", None).unwrap();
+        let episode = store.create_episode(project.id, "第一集", before).unwrap();
+        let other = store
+            .create_episode(project.id, "另一集", Some("不变剧本"))
+            .unwrap();
+        for id in [episode.id, other.id] {
+            store
+                .patch_episode(
+                    id,
+                    EpisodeUpdate {
+                        script_locked: Some(true),
+                        script_locked_at: Some("2026-11-12T10:00:00Z".into()),
+                        ..EpisodeUpdate::default()
+                    },
+                )
+                .unwrap();
+        }
+        let unchanged = store.episode(other.id).unwrap();
+
+        let changed = store.update_episode(episode.id, "第一集", after).unwrap();
+        assert_eq!(changed.description.as_deref(), after);
+        assert!(!changed.script_locked);
+        assert!(changed.script_locked_at.is_none());
+        assert_eq!(store.episode(other.id).unwrap(), unchanged);
+    }
+}
+
+#[test]
+fn failed_episode_script_saves_preserve_text_title_and_lock_together() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let project = store.create_project("保存失败", None).unwrap();
+    let episode = store
+        .create_episode(project.id, "第一集", Some("锁定的原剧本"))
+        .unwrap();
+    let original = store
+        .patch_episode(
+            episode.id,
+            EpisodeUpdate {
+                script_locked: Some(true),
+                script_locked_at: Some("2026-11-12T10:00:00Z".into()),
+                exec_artifacts: Some(json!({"outline":{"title":"已确认结构"}})),
+                last_exec_run_id: Some("confirmed-run".into()),
+                ..EpisodeUpdate::default()
+            },
+        )
+        .unwrap();
+    assert!(
+        store
+            .update_episode(episode.id, " ", Some("非法标题未保存"))
+            .is_err()
+    );
+    assert_eq!(store.episode(episode.id).unwrap(), original);
+
+    // Inject a database write failure in this isolated fixture. Verify through
+    // the same public Interface that neither content nor confirmation changed.
+    let db = rusqlite::Connection::open(dir.path().join("database.db")).unwrap();
+    db.execute_batch("CREATE TRIGGER reject_script_update BEFORE UPDATE OF description ON episodes WHEN NEW.description='拒绝改稿' BEGIN SELECT RAISE(ABORT,'fixture rejected script');END;").unwrap();
+    assert!(
+        store
+            .update_episode(episode.id, "不应保存的改名", Some("拒绝改稿"))
+            .is_err()
+    );
+    assert_eq!(store.episode(episode.id).unwrap(), original);
+    assert_eq!(
+        Store::open(dir.path())
+            .unwrap()
+            .episode(episode.id)
+            .unwrap(),
+        original
+    );
+}
+
+#[test]
 fn imports_media_without_overwrite_and_cleans_selection_on_delete() {
     let dir = tempfile::tempdir().unwrap();
     let source = tempfile::tempdir().unwrap();

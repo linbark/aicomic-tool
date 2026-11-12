@@ -9,6 +9,9 @@
 /projects/
 /qdrant_db/
 /backups/
+# Storage journals can contain quarantined user material and Run records
+.aicomic-operations/
+.aicomic-trash-*/
 /models/
 /demo-data/
 /smoke-data/

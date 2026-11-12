@@ -22,7 +22,8 @@ let results = memory.semantic_search(project_id, "人物获得的道具", 10).aw
 - 证据、实体、快照、时间关系/时间块均同步维护 canonical 表与主记录。中文切片按 Unicode 字符数执行，支持 episode、scene、tags。
 - changeset 保存原始 JSON、审核记录、批准/拒绝。批准在事务中执行，错误整单回滚，不会把失败提案标为 approved。
 - 每实体 confirmed 最新快照物化为固定 `profile::<entity_id>`；后批的旧章节不会使当前设定退回。
-- 冲突创建/解决同时更新审计记录。SeriesBible 与 VisualDNA 切片索引、结构化 beats/shots/QC 的 episodic 写回及章节摘要均已提供。
+- 冲突创建/解决同时更新审计记录。SeriesBible 与 VisualDNA 的 `index_*` 在单事务中按项目与精确 JSON 来源同步当前设定投影；`sync_current_settings(project_id, bible, visual_dna)` 同步完整项目快照，`{}` 或缺失 DNA 来源会退休旧投影。损坏的非对象输入不会被当作删除。保留原有来源内随机 ID，修复重复并为新切片生成来源专属确定 ID；不跨来源借用同内容记录，不修改手工/canonical 事实。
+- 失效投影保留为 `retconned` 历史，同时事务删除其所有模型向量。默认词面/任务/语义检索及向量重建、增量维护排除 `retconned`；显式 `MemoryQuery.status="retconned"` 或按 ID 仍可查看原记录。迟到的 embedding 在落库前核对当前项目、内容和状态，不能重新缓存已退休投影。结构化 beats/shots/QC 的 episodic 写回及章节摘要保留原合同。
 - AI 抽取先调用 `normalize_extracted_changeset` 约束输入证据、补项目/ID/时序、规范快照字段，再调用 `resolve_changeset_entities` 处理唯一精确名/别名、歧义、重复、强类型词提示与新 alias 建议。`resolve_changeset_entities_with_provider` 追加向量候选供人工选择，绝不凭相似度自动合并。归一不会让模型改写原文证据。
 - `ensure_changeset_for_run(project_id,episode_id,run_id,payload)` 在单个事务中归一并保存提案、关联冲突、运行唯一映射。相同运行/输入在重启后复用同一 ID；待审提案可修订，已审核提案的更改会明确报错。`MemoryService` 提供同名异步入口，在配置模型时加入向量候选。复用既有提案不需要重新加载权重。
 - 旧 Qdrant 本地目录不读写；Rust 没有把 Qdrant HTTP 客户端当成本地目录引擎。新 `rust_memory_vectors` 是可删除重建的 SQLite 密集向量索引，当前为精确余弦扫描。

@@ -60,8 +60,7 @@ pub(crate) fn allocate(conn: &Connection, table: &str) -> Result<i64> {
         .ok_or_else(|| Error::Invalid(format!("{table} numeric identifiers are exhausted")))
 }
 
-pub(crate) fn reserve_references(conn: &Connection, schema: &str) -> Result<()> {
-    let high = collect_high_water(conn, schema)?;
+pub(crate) fn reserve_high_water(conn: &Connection, high: [i64; 9]) -> Result<()> {
     for (table, value) in TABLES.iter().zip(high) {
         conn.execute(
             "UPDATE aicomic_id_allocators SET high_water=MAX(high_water,?) WHERE table_name=?",
@@ -71,7 +70,7 @@ pub(crate) fn reserve_references(conn: &Connection, schema: &str) -> Result<()> 
     Ok(())
 }
 
-fn collect_high_water(conn: &Connection, schema: &str) -> Result<[i64; 9]> {
+pub(crate) fn collect_high_water(conn: &Connection, schema: &str) -> Result<[i64; 9]> {
     let mut high = [0; 9];
     let mut statement=conn.prepare(&format!("SELECT name FROM {}.sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'aicomic_%'",quote(schema)))?;
     let names = statement

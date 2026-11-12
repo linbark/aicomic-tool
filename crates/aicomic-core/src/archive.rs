@@ -567,6 +567,11 @@ fn map_context_name(name: &str, items: &BTreeMap<i64, i64>) -> Option<String> {
 }
 
 fn rewrite_gate_episodes(value: &mut Value, episodes: &BTreeMap<i64, i64>) {
+    // Imported IDs and media paths are new. Rebind these derived fingerprints
+    // on first open, preserving the human confirmations rewritten below.
+    if let Some(object) = value.as_object_mut() {
+        object.remove("input_versions");
+    }
     let Some(map) = value.get_mut("episodes").and_then(Value::as_object_mut) else {
         return;
     };
@@ -908,6 +913,7 @@ mod tests {
             &contexts.join("production_state.v1.json"),
             &json!({
                 "schema_version": "production.v1",
+                "input_versions": {"assets":"old-path-digest","episodes":{episode.id.to_string():{"script":"old-script-digest"}}},
                 "episodes": { episode.id.to_string(): {"structure_approved": true} }
             }),
         )
@@ -972,6 +978,14 @@ mod tests {
         let gates = crate::paths::read_json(&contexts.join("production_state.v1.json"))
             .unwrap()
             .unwrap();
+        assert!(
+            gates.get("input_versions").is_none(),
+            "import must rebase path/ID-dependent fingerprints without revoking the imported confirmations"
+        );
+        assert_eq!(
+            gates["episodes"][new_episode.to_string()]["structure_approved"],
+            true
+        );
         assert!(gates["episodes"][new_episode.to_string()].is_object());
         assert!(gates["episodes"][episode.id.to_string()].is_null());
         assert!(

@@ -5,11 +5,17 @@ impl Store {
         paths::read_json(&self.paths.resolve(relative)?)
     }
     pub fn write_json(&self, relative: impl AsRef<Path>, value: &Value) -> Result<()> {
-        paths::write_json(&self.paths.resolve(relative)?, value)
+        let mut conn = self.lock()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        operations::ensure_ready(&tx, &self.paths)?;
+        paths::write_json(&self.paths.resolve(relative)?, value)?;
+        tx.commit()?;
+        Ok(())
     }
     pub fn read_context(&self, project_id: i64, filename: &str) -> Result<Option<Value>> {
         paths::component(filename)?;
-        self.project(project_id)?;
+        let conn = self.lock()?;
+        require(&conn, "projects", project_id)?;
         paths::read_json(&paths::safe_join(
             &self.paths.context_dir(project_id)?,
             filename,
@@ -17,15 +23,21 @@ impl Store {
     }
     pub fn write_context(&self, project_id: i64, filename: &str, value: &Value) -> Result<()> {
         paths::component(filename)?;
-        self.project(project_id)?;
+        let mut conn = self.lock()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        operations::ensure_ready(&tx, &self.paths)?;
+        require(&tx, "projects", project_id)?;
         paths::write_json(
             &paths::safe_join(&self.paths.context_dir(project_id)?, filename)?,
             value,
-        )
+        )?;
+        tx.commit()?;
+        Ok(())
     }
     pub fn read_run(&self, project_id: i64, run_id: &str, filename: &str) -> Result<Option<Value>> {
         paths::component(run_id)?;
-        self.project(project_id)?;
+        let conn = self.lock()?;
+        require(&conn, "projects", project_id)?;
         paths::read_json(&paths::safe_join(
             &self.paths.runs_dir(project_id)?,
             format!("{run_id}/{filename}"),
@@ -39,14 +51,19 @@ impl Store {
         value: &Value,
     ) -> Result<()> {
         paths::component(run_id)?;
-        self.project(project_id)?;
+        let mut conn = self.lock()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        operations::ensure_ready(&tx, &self.paths)?;
+        require(&tx, "projects", project_id)?;
         paths::write_json(
             &paths::safe_join(
                 &self.paths.runs_dir(project_id)?,
                 format!("{run_id}/{filename}"),
             )?,
             value,
-        )
+        )?;
+        tx.commit()?;
+        Ok(())
     }
     pub fn snapshot_run(
         &self,

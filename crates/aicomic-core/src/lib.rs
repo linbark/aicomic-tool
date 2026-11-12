@@ -6,6 +6,9 @@ mod identity;
 mod media;
 mod memory_cleanup;
 pub mod models;
+#[cfg(test)]
+mod operation_tests;
+mod operations;
 mod paths;
 mod schema;
 mod workflow;
@@ -38,6 +41,16 @@ pub enum Error {
     Invalid(String),
     #[error("unsafe path: {0}")]
     UnsafePath(String),
+    #[error("operation {operation_id} committed; cleanup is pending: {reason}")]
+    CommittedPending {
+        operation_id: String,
+        reason: String,
+    },
+    #[error("operation {operation_id} needs recovery; preserved on disk: {reason}")]
+    RecoveryRequired {
+        operation_id: String,
+        reason: String,
+    },
     #[error("storage lock was poisoned")]
     Poisoned,
 }
@@ -53,6 +66,13 @@ impl Store {
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
         let paths = AppPaths::new(root)?;
         let existing = paths.database_path.is_file() && paths.database_path.metadata()?.len() > 0;
+        if !existing && operations::has_pending(&paths)? {
+            return Err(Error::RecoveryRequired {
+                operation_id: "startup".into(),
+                reason: "operation manifests exist but the main database is missing or empty"
+                    .into(),
+            });
+        }
         let mut connection = Connection::open(&paths.database_path)?;
         connection.busy_timeout(Duration::from_secs(5))?;
         let needs_migration = schema::needs_migration(&connection)?;
@@ -75,10 +95,20 @@ impl Store {
         identity::initialize(&tx, &paths.resolve("memory_store.db")?)?;
         tx.commit()?;
         connection.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;")?;
+        operations::recover(&mut connection, &paths)?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
             paths,
         })
+    }
+    /// Retry durable file/memory cleanup without replaying the business operation.
+    pub fn recover_pending_operations(&self) -> Result<()> {
+        operations::recover(&mut *self.lock()?, &self.paths)
+    }
+    /// Legacy manifestless quarantine is never guessed or deleted automatically.
+    /// Hosts can display these warnings even when stderr has no console (Windows).
+    pub fn recovery_warnings(&self) -> Result<Vec<String>> {
+        operations::warnings(&self.paths)
     }
     pub fn paths(&self) -> &AppPaths {
         &self.paths

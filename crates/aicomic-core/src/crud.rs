@@ -86,8 +86,13 @@ impl Store {
         nonempty(title, "episode title")?;
         let conn = self.lock()?;
         require(&conn, "episodes", id)?;
+        // Compare against the old body inside the same SQL write. All callers,
+        // including close-time saves, must revoke a lock when its text changes.
         conn.execute(
-            "UPDATE episodes SET title=?,description=? WHERE id=?",
+            "UPDATE episodes SET title=?1,description=?2,
+             script_locked=CASE WHEN description IS NOT ?2 THEN 0 ELSE script_locked END,
+             script_locked_at=CASE WHEN description IS NOT ?2 THEN NULL ELSE script_locked_at END
+             WHERE id=?3",
             params![title, description, id],
         )?;
         get(&conn, "episodes", id)

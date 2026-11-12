@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::HashSet,
+    future::Future,
     path::PathBuf,
+    pin::Pin,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -25,6 +27,19 @@ pub struct ExecutionInput {
     pub action: String,
     pub run_id: String,
 }
+/// Supplies the current task memory immediately before each generation request.
+///
+/// Return the `retrieved_memory` JSON object itself, not an enclosing context.
+/// Implementations own database/projection access; the AI crate only awaits them.
+/// Do not include credentials in returned memory or `Debug` output.
+pub trait TaskContextProvider: std::fmt::Debug + Send + Sync {
+    fn retrieve<'a>(
+        &'a self,
+        input: &'a ExecutionInput,
+        stage: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Value>> + Send + 'a>>;
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkflowResult {
     pub run_id: String,
@@ -108,6 +123,7 @@ pub struct WorkflowEngine {
     store: ContextStore,
     prompts: PromptRegistry,
     events: Option<UnboundedSender<WorkflowEvent>>,
+    task_context: Option<Arc<dyn TaskContextProvider>>,
     active: Arc<Mutex<HashSet<String>>>,
     log_sequence: Arc<AtomicU64>,
 }
@@ -129,12 +145,19 @@ impl WorkflowEngine {
             store: ContextStore::new(root.clone()),
             prompts: PromptRegistry::new(root),
             events: None,
+            task_context: None,
             active: Arc::default(),
             log_sequence: Arc::new(AtomicU64::new(0)),
         }
     }
     pub fn with_events(mut self, sender: UnboundedSender<WorkflowEvent>) -> Self {
         self.events = Some(sender);
+        self
+    }
+    /// Refresh task memory before every generation, including JSON repair and resume.
+    /// With no provider, legacy caller-supplied context is left unchanged.
+    pub fn with_task_context(mut self, provider: Arc<dyn TaskContextProvider>) -> Self {
+        self.task_context = Some(provider);
         self
     }
     pub fn store(&self) -> &ContextStore {
@@ -383,7 +406,12 @@ impl WorkflowEngine {
                 .ok_or_else(|| AiError::InvalidInput("请先保存需要优化的项目大纲".into())),
         }
     }
-    fn with_context(&self, input: &ExecutionInput, stage: &str, text: &str) -> Result<String> {
+    async fn with_context(
+        &self,
+        input: &ExecutionInput,
+        stage: &str,
+        text: &str,
+    ) -> Result<String> {
         let bible = self
             .store
             .get_context(&input.project_id, "series_bible", "v1")?;
@@ -396,9 +424,73 @@ impl WorkflowEngine {
             self.store
                 .get_context(&input.project_id, "project_outline", "v1")?
         };
+        let mut provided = input.context.clone();
+        if let Some(provider) = &self.task_context {
+            let memory = match provider.retrieve(input, stage).await {
+                Ok(memory) if memory.is_object() => memory,
+                result => {
+                    let invalid = result.is_ok();
+                    // Provider errors may contain credentials or private database details.
+                    // Audit the failure category, never the error or stale input memory.
+                    self.stage(
+                        input,
+                        &format!("{stage}.context"),
+                        json!({"status":"error","error":if invalid {"task_context_invalid"} else {"task_context_unavailable"},"series_bible":bible,"project_outline":outline,"at_ms":now_ms()}),
+                    )?;
+                    return Err(if invalid {
+                        AiError::Protocol("任务上下文必须为 retrieved_memory 对象".into())
+                    } else {
+                        AiError::InvalidState("任务上下文检索失败，未请求模型".into())
+                    });
+                }
+            };
+            if !provided.is_object() {
+                provided = json!({});
+            }
+            provided["retrieved_memory"] = memory;
+            let has_visual_dna = provided.get("visual_dna").is_some()
+                || provided["artifacts"].get("visual_dna").is_some();
+            let visual_dna = if has_visual_dna {
+                match input.context["item_id"].as_i64().filter(|id| *id > 0) {
+                    Some(item) => self.store.get_context(
+                        &input.project_id,
+                        &format!("visual_dna.asset_item_{item}"),
+                        input.context["version"].as_str().unwrap_or("v1"),
+                    )?,
+                    None => None,
+                }
+            } else {
+                None
+            };
+            // Only these known source aliases claim current confirmed context.
+            // Keep other creative outputs and extension fields, and never mutate input.
+            for pointer in ["", "/artifacts"] {
+                if let Some(fields) = provided.pointer_mut(pointer).and_then(Value::as_object_mut) {
+                    for (key, current) in [
+                        ("series_bible", &bible),
+                        ("project_outline", &outline),
+                        ("current_outline", &outline),
+                        ("visual_dna", &visual_dna),
+                    ] {
+                        if fields.contains_key(key) {
+                            if let Some(current) = current {
+                                fields.insert(key.into(), current.clone());
+                            } else {
+                                fields.remove(key);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let context = json!({"series_bible":bible,"project_outline":outline,"provided":provided});
+        if self.task_context.is_some() {
+            // Persist precisely the context sent below, without model settings/credentials.
+            // An audit write failure also prevents the generation request.
+            self.stage(input, &format!("{stage}.context"), context.clone())?;
+        }
         Ok(format!(
-            "{text}\n\n### 创作上下文（遵循已确认设定）\n{}",
-            json!({"series_bible":bible,"project_outline":outline,"provided":input.context})
+            "{text}\n\n### 创作上下文（遵循已确认设定）\n{context}"
         ))
     }
     async fn text_call(
@@ -422,7 +514,7 @@ impl WorkflowEngine {
         if repair {
             settings.temperature = 0.0;
         }
-        let user = self.with_context(input, stage, user)?;
+        let user = self.with_context(input, stage, user).await?;
         let output = LlmClient
             .chat(
                 &settings,

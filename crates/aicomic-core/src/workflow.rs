@@ -19,6 +19,7 @@ impl Store {
             ));
         }
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        operations::ensure_ready(&tx, &self.paths)?;
         let mut changes = JsonChanges::default();
         for (action, key) in [
             ("split", "approved_split_episodes"),

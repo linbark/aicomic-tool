@@ -145,7 +145,9 @@ impl MemoryStore {
                 || q.entity
                     .as_ref()
                     .is_some_and(|v| r.entity.as_ref() != Some(v))
-                || q.status.as_ref().is_some_and(|v| v != &r.status)
+                || q.status
+                    .as_ref()
+                    .map_or(r.status == "retconned", |v| v != &r.status)
                 || q.source_kind.as_ref().is_some_and(|v| v != &r.source_kind)
                 || q.min_confidence.is_some_and(|v| r.confidence < v)
             {
@@ -470,18 +472,37 @@ impl MemoryStore {
                 vectors.push(vector);
             }
         }
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
         let key = provider.identifier();
         tx.execute("DELETE FROM rust_memory_vectors WHERE provider_key=? AND record_id IN (SELECT id FROM memory_records WHERE project_id=?)",params![key,project_id])?;
+        let mut indexed = 0;
         for (record, vector) in records.iter().zip(vectors) {
+            if !vector_input_is_current(&tx, record)? {
+                continue;
+            }
             let bytes: Vec<u8> = vector.iter().flat_map(|f| f.to_le_bytes()).collect();
             tx.execute("INSERT INTO rust_memory_vectors(record_id,provider_key,dimension,content_hash,vector,updated_at_ms) VALUES(?,?,?,?,?,?)",params![record.id,key,vector.len() as i64,hash(&record.content),bytes,now_ms()])?;
+            indexed += 1;
         }
         tx.execute("INSERT INTO rust_memory_vector_projects(project_id,provider_key,dimension,updated_at_ms) VALUES(?,?,?,?) ON CONFLICT(project_id,provider_key) DO UPDATE SET dimension=excluded.dimension,updated_at_ms=excluded.updated_at_ms",params![project_id,key,dimension.unwrap_or(0) as i64,now_ms()])?;
         tx.commit()?;
-        Ok(records.len())
+        Ok(indexed)
     }
 }
+
+// Embedding runs outside a write transaction. A source sync or edit may finish
+// before it returns; never cache those late vectors against retired/newer facts.
+fn vector_input_is_current(conn: &Connection, record: &MemoryRecord) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM memory_records WHERE project_id=? AND id=? AND COALESCE(status,'confirmed')<>'retconned' AND content=?)",
+        params![record.project_id, record.id, record.content],
+        |row| row.get(0),
+    )?)
+}
+
 fn parse_json(s: Option<String>) -> Value {
     s.and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or(Value::Null)
@@ -1170,13 +1191,21 @@ impl MemoryStore {
                 vectors.push(vector)
             }
         }
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let mut indexed = 0;
         for (record, vector) in dirty.iter().zip(vectors) {
+            if !vector_input_is_current(&tx, record)? {
+                continue;
+            }
             let bytes: Vec<u8> = vector.iter().flat_map(|n| n.to_le_bytes()).collect();
             tx.execute("INSERT INTO rust_memory_vectors(record_id,provider_key,dimension,content_hash,vector,updated_at_ms) VALUES(?,?,?,?,?,?) ON CONFLICT(record_id,provider_key) DO UPDATE SET dimension=excluded.dimension,content_hash=excluded.content_hash,vector=excluded.vector,updated_at_ms=excluded.updated_at_ms",params![record.id,key,dimension as i64,hash(&record.content),bytes,now_ms()])?;
+            indexed += 1;
         }
         tx.execute("UPDATE rust_memory_vector_projects SET dimension=?,updated_at_ms=? WHERE project_id=? AND provider_key=?",params![dimension as i64,now_ms(),project_id,key])?;
         tx.commit()?;
-        Ok(dirty.len())
+        Ok(indexed)
     }
 }
