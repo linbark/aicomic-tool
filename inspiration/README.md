@@ -486,6 +486,20 @@ ie verify --pill 13 --html path/to/index.html                # 静态验收，�
 
 见 [examples/pill27](../../docs/design/examples/pill27/README.md)。
 
+## 组件状态与配方 A/B
+
+- **`t.states` v1**：抽 hover / focus / disabled。实测 8B 输出偏懒（Mobbin 三个状态写成同一句、gunnar 直接写"无明显反馈"），
+  所以这一维暂时只入库、不进配方——**宁可缺，也不要假**。
+- **配方 A/B**：新增 `recipe.editorial`（大字级差、少栏），与 `recipe.minimal-landing` 用同一批药液成丹，
+  再让裁判按「层级」成对比较：
+
+```text
+丹药 27（minimal） 27.3
+丹药 28（editorial） 100.0   ← 成对比较 + 3 次重复
+```
+
+只有两颗时 Bradley-Terry 会给出极端值（一个接近 0、一个 100），这是预期；27.3 < 40 已自动转人工复核。
+
 ## 内核卡（演练输出）
 
 ```text

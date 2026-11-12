@@ -1,0 +1,55 @@
+{
+  "key": "recipe.editorial",
+  "name": "编辑感品牌页",
+  "goal": "大字级差、强留白、少栏；以排版本身作为视觉主体",
+  "version": "1",
+  "combination_prompt": "以 {{base.palette.ratio}} 的色彩语言定调（底 {{base.palette.bg}}、字 {{base.palette.text}}、强调 {{base.palette.accent}}、线 {{base.palette.border}}，正文对比 {{base.palette.text_contrast}}:1）；以 {{base.layout.ratio}} 的骨架搭结构（{{base.layout.structure}}），首屏只留一个视觉主体；间距用 {{base.spacing.ratio}} 的模数（{{base.spacing.base_px}}px，档位 {{base.spacing.steps}}，页边 {{base.spacing.page_margin_px}}px，段距 {{base.spacing.section_gap_px}}px）；{{accent.type.ratio}} 的字阶作为主体（{{accent.type.steps}}），字号级差必须撑起版面。硬约束：{{anti.donts.donts}}。",
+  "components": [
+    {
+      "slot": "base",
+      "dimension": "palette",
+      "ratio": 0.32,
+      "required": true,
+      "polarity": "positive"
+    },
+    {
+      "slot": "base",
+      "dimension": "layout",
+      "ratio": 0.2,
+      "required": true,
+      "polarity": "positive"
+    },
+    {
+      "slot": "base",
+      "dimension": "spacing",
+      "ratio": 0.18,
+      "required": false,
+      "polarity": "positive"
+    },
+    {
+      "slot": "accent",
+      "dimension": "type",
+      "ratio": 0.2,
+      "required": true,
+      "polarity": "positive"
+    },
+    {
+      "slot": "anti",
+      "dimension": "donts",
+      "ratio": 0.1,
+      "required": true,
+      "polarity": "negative"
+    }
+  ],
+  "constraints": {
+    "contrast_min": 4.5,
+    "palette_redundant": {
+      "hue_delta": 15,
+      "luma_delta": 0.1
+    },
+    "type_scale_conflict": 0.2,
+    "density_conflict": 0.4
+  },
+  "page_type": "landing",
+  "domain": "ui"
+}
