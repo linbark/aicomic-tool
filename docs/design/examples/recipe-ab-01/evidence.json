@@ -1,0 +1,191 @@
+{
+  "demo_only": true,
+  "experiment_id": 2,
+  "content_hash": "f957ec2c22b1ae71e53edf5e757fedc424926124c0be05f421d92a4b28a4d69e",
+  "conditions_hash": "397d64c07fd36cb93d9982790577fa7a16337991398091926c7d92e4fab08d54",
+  "arms": [
+    {
+      "arm": "a",
+      "pill_id": 30,
+      "recipe_hash": "4aa5ee49b1c3557b0180d19505c1c68352036cd526a6e781792722002afcd02a",
+      "snapshot_hash": "1b3893474c25f0832a9084ffec74e3e293057671cfebd211e3882855172a007f"
+    },
+    {
+      "arm": "b",
+      "pill_id": 31,
+      "recipe_hash": "4a80a614a6f643fa6af15262725b1a287fe3de3bd488a4fcf58854921266f5fa",
+      "snapshot_hash": "5322d96e9f09599463f6ba09001790ef4ec1917d3dc43d8d17f317cb056a50c7"
+    }
+  ],
+  "captures": [
+    {
+      "arm": "a",
+      "page_sha256": "82f8d547ba8eb98db1537ac1b9bf84ef2a6eca082a468414fb6cb2854facf21e",
+      "screenshot_sha256": "5cdb3395e3504de2891cf9a5fc2cddcb65b754eb3cfc6f7be3b9d0999ae8d074",
+      "profile_sha256": "a6b0e08ee5226fccd2d405e3219f25b3e1ae4dd6f2ed477281fe8bc47b8f8d7f",
+      "renderer": {
+        "kind": "chrome",
+        "version": "Google Chrome 157.0.8103.51"
+      },
+      "viewport": {
+        "height": 1600,
+        "width": 1200
+      },
+      "content_report": {
+        "actual_media_sha256": [],
+        "basis": "html_text_projection",
+        "expected_media_sha256": [],
+        "missing_strings": [],
+        "note": "核验静态 body 文本和显式 img 素材覆盖；不证明 CSS 下真实可见性或视觉美观",
+        "static_checks": {
+          "basis": "html_css_source_heuristic",
+          "checks": [
+            {
+              "detail": "冻结的丹药快照",
+              "id": "provenance",
+              "ok": true,
+              "provenance": {
+                "historically_reproducible": true,
+                "note": "使用冻结快照",
+                "source": "pill_snapshot"
+              }
+            },
+            {
+              "detail": "用到 80%（4/5）",
+              "id": "palette",
+              "ok": true
+            },
+            {
+              "detail": "box-shadow 出现 0 次",
+              "id": "no_shadow",
+              "ok": true
+            },
+            {
+              "detail": "正文对比 11.34:1",
+              "id": "contrast",
+              "ok": true
+            },
+            {
+              "detail": "最大/最小字号 3.71×",
+              "id": "type_scale",
+              "ok": true
+            }
+          ],
+          "evidence_kind": "static_check",
+          "limitations": [
+            "源码启发式不证明浏览器计算样式、交互或视觉美感"
+          ],
+          "measurements": {
+            "body_contrast": 11.34371484044124,
+            "palette_coverage": 0.8,
+            "shadow_count": 0,
+            "type_ratio": 3.7142857142857144
+          },
+          "passed": true,
+          "visual_quality": false
+        },
+        "status": "compliant",
+        "unsupported_css_media": false,
+        "visibility_verified": false
+      }
+    },
+    {
+      "arm": "b",
+      "page_sha256": "81781c09404a96ec6a785d9ebcecd880f5b292c6d6f95e4c99dda36b3f3732e0",
+      "screenshot_sha256": "39f42bb5d7538b7d8ae99217160b1c4c8cff3c89652c3456b75b4b6805b1b40a",
+      "profile_sha256": "a6b0e08ee5226fccd2d405e3219f25b3e1ae4dd6f2ed477281fe8bc47b8f8d7f",
+      "renderer": {
+        "kind": "chrome",
+        "version": "Google Chrome 157.0.8103.51"
+      },
+      "viewport": {
+        "height": 1600,
+        "width": 1200
+      },
+      "content_report": {
+        "actual_media_sha256": [],
+        "basis": "html_text_projection",
+        "expected_media_sha256": [],
+        "missing_strings": [],
+        "note": "核验静态 body 文本和显式 img 素材覆盖；不证明 CSS 下真实可见性或视觉美观",
+        "static_checks": {
+          "basis": "html_css_source_heuristic",
+          "checks": [
+            {
+              "detail": "冻结的丹药快照",
+              "id": "provenance",
+              "ok": true,
+              "provenance": {
+                "historically_reproducible": true,
+                "note": "使用冻结快照",
+                "source": "pill_snapshot"
+              }
+            },
+            {
+              "detail": "用到 80%（4/5）",
+              "id": "palette",
+              "ok": true
+            },
+            {
+              "detail": "box-shadow 出现 0 次",
+              "id": "no_shadow",
+              "ok": true
+            },
+            {
+              "detail": "正文对比 11.34:1",
+              "id": "contrast",
+              "ok": true
+            },
+            {
+              "detail": "最大/最小字号 5.14×",
+              "id": "type_scale",
+              "ok": true
+            }
+          ],
+          "evidence_kind": "static_check",
+          "limitations": [
+            "源码启发式不证明浏览器计算样式、交互或视觉美感"
+          ],
+          "measurements": {
+            "body_contrast": 11.34371484044124,
+            "palette_coverage": 0.8,
+            "shadow_count": 0,
+            "type_ratio": 5.142857142857143
+          },
+          "passed": true,
+          "visual_quality": false
+        },
+        "status": "compliant",
+        "unsupported_css_media": false,
+        "visibility_verified": false
+      }
+    }
+  ],
+  "manifest_hash": "e28ebf1a9c930da90715bb088b9b7f4984fad564e2a2291b2cdb9a71c5fa75f2",
+  "formal_visual": {
+    "abstentions": 0,
+    "basis": "latest_named_human_screenshot_reviews",
+    "evaluations": 0,
+    "experiments": 0,
+    "generalizable_beauty_claim": false,
+    "non_abstaining_experiments": 0,
+    "preferences": 0,
+    "reviewers": 0,
+    "ties": 0
+  },
+  "history": {
+    "ai": 0,
+    "demo": 2,
+    "human": 0
+  },
+  "default_database_unchanged": true,
+  "limitations": [
+    "生成条件为操作者声明，不代表已独立验证生成器执行",
+    "内容证据为源码文本/素材覆盖，不证明完整 DOM 可见性或严格因果 AB",
+    "规格或静态检查通过不能声称成品美观；静态检查不是 visual 分",
+    "n=1 不能声称普遍更美；统计仅描述已评审实验",
+    "experiments 按实验去重；evaluations 为每实验/人/visual 的最新评价；abstain 不计偏好",
+    "配方结果按 recipe_definition_hash × conditions_hash 分组，不混合不同生成器、viewport 或任务的胜负；overall 仅为总计",
+    "同配方 hash 的双臂只计组内比较，不归因成该配方胜负；未改写文本评分或校准"
+  ]
+}

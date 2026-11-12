@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Harbor · 概念演示</title>
+<style>
+:root{--paper:#F9F8F9;--ink:#022C8D;--accent:#114882;--warm:#CE8131;--line:#C2B6A3;--source-paper:#FBFAFB;--space:8px}
+*{box-sizing:border-box}
+html{color-scheme:light;scroll-behavior:auto}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 18px/1.65 system-ui,-apple-system,"PingFang SC",sans-serif;-webkit-font-smoothing:antialiased}
+a{color:inherit;text-decoration:none}
+a:focus-visible{outline:2px solid var(--ink);outline-offset:5px}
+.page{max-width:832px;margin:0 auto}
+header{height:88px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between}
+.brand{font-size:22px;font-weight:650;letter-spacing:-.04em}
+.audience{font-size:14px;color:var(--accent)}
+.hero{padding:112px 0 64px}
+h1{font-size:52px;line-height:1.14;letter-spacing:-.055em;font-weight:600;margin:0 0 24px}
+.lede{font-size:18px;margin:0;max-width:32em;color:var(--accent)}
+.actions{display:flex;gap:16px;margin-top:40px;align-items:center}
+.primary,.secondary{font-size:15px;padding:13px 22px;border:1px solid var(--ink);border-radius:3px;min-height:48px}
+.primary{background:var(--ink);color:var(--paper)}
+.secondary{background:var(--source-paper);color:var(--accent);border-color:var(--line)}
+.features{border-top:1px solid var(--line)}
+.feature{display:grid;grid-template-columns:220px 1fr;gap:40px;padding:32px 0;border-bottom:1px solid var(--line)}
+h2{font-size:22px;line-height:1.35;font-weight:600;letter-spacing:-.025em;margin:0}
+p{margin:0;font-size:18px;color:var(--accent)}
+.process{padding:64px 0}
+.process h2{margin-bottom:32px}
+.steps{display:grid;grid-template-columns:repeat(3,1fr);gap:24px}
+.step{padding-top:16px;border-top:2px solid var(--ink);font-size:18px}
+.closing{border-top:1px solid var(--line);padding:48px 0 40px}
+.closing h2{font-size:30px;max-width:18em;line-height:1.4}
+.closing h2::before{content:"";display:block;width:32px;height:4px;background:var(--warm);margin-bottom:24px}
+footer{font-size:14px;line-height:1.5;color:var(--accent);border-top:1px solid var(--line);padding:24px 0 40px}
+@media(max-width:960px){.page{margin:0 32px}.feature{grid-template-columns:1fr;gap:12px}.hero{padding-top:80px}h1{font-size:40px}.audience{max-width:12em;text-align:right}}
+</style>
+</head>
+<body>
+<main class="page">
+<header><span class="brand">Harbor</span><span class="audience">面向独立开发者与小团队</span></header>
+<section class="hero">
+<h1>发布本该安静地发生。</h1>
+<p class="lede">把部署、回滚与灰度收进一条清楚的时间线。</p>
+<div class="actions"><a class="primary" href="#start">使用 Git 账号开始</a><a class="secondary" href="#features">看一次发布</a></div>
+</section>
+<section class="features" id="features">
+<article class="feature"><h2>一条时间线</h2><p>从改动到上线，让每一步都有清楚的来路。</p></article>
+<article class="feature"><h2>回滚有来路</h2><p>保留每次发布的上下文，而不是只留一条成功通知。</p></article>
+<article class="feature"><h2>灰度有边界</h2><p>每次扩大流量前停一下，确认系统仍在预期之内。</p></article>
+</section>
+<section class="process" id="start"><h2>一个开始，三步完成。</h2><div class="steps"><span class="step">连接代码</span><span class="step">选择服务</span><span class="step">提交发布</span></div></section>
+<section class="closing"><h2>用更少界面，讲清每次变化。</h2></section>
+<footer>产品概念演示，功能与文案均为占位。</footer>
+</main>
+</body>
+</html>

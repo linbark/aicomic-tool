@@ -1,0 +1,23 @@
+{
+  "key": "recipe.ab01.editorial",
+  "name": "同文案实验 · 编辑式层级",
+  "version": "1",
+  "goal": "以字阶和非对称的编辑式留白建立层级，主标题成为版面主体，仍保持内容克制。",
+  "domain": "ui",
+  "page_type": "landing",
+  "components": [
+    {"slot": "base", "dimension": "palette", "ratio": 0.5, "required": true, "polarity": "positive"},
+    {"slot": "base", "dimension": "spacing", "ratio": 0.5, "required": true, "polarity": "positive"}
+  ],
+  "constraints": {"contrast_min": 4.5},
+  "render_contract": {
+    "layout": "editorial-staggered",
+    "display_px": 72,
+    "body_px": 18,
+    "weight": 600,
+    "borders": "thin separators",
+    "shadow": "none",
+    "note": "这是明确的实验配方参数，不是从素材精确测出的字号；配方是本实验唯一有意改变的输入。"
+  },
+  "combination_prompt": "以 {{base.palette.ratio}} 色彩语言（底 {{base.palette.bg}}、字 {{base.palette.text}}、强调 {{base.palette.accent}}）和 {{base.spacing.ratio}} 间距语言（模数 {{base.spacing.base_px}}px、段距 {{base.spacing.section_gap_px}}px）实现编辑式非对称留白。主标题72px，正文18px，以字阶为主体、细分割线，无投影。使用给定共同文案，不新增或删除正文。"
+}

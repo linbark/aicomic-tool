@@ -1,0 +1,22 @@
+{
+  "task": "将同一组 Harbor 概念产品文案实现为自包含静态品牌落地页，只有配方及其明确设计参数有意改变；不增加产品功能、效果数据或正文，不删除正文。",
+  "viewport": {"width": 1200, "height": 1600},
+  "theme": "light",
+  "generator": {
+    "kind": "coding-agent",
+    "model": "gpt-6.1-sol",
+    "version": "session-2026-11-12-stage2",
+    "deterministic": false,
+    "seed": null,
+    "note": "同一会话编码 agent 直接实现两页面，不调用付费模型；不能保证不同会话重新生成相同字节。"
+  },
+  "constraints": {
+    "self_contained": true,
+    "scripts": false,
+    "external_assets": false,
+    "font_family": "system-ui sans-serif",
+    "body_font_px": 18,
+    "content_check_basis": "html_text_projection",
+    "note": "源码文字覆盖不等于完整 DOM 可见性证明；静态通过不是视觉美感分。"
+  }
+}

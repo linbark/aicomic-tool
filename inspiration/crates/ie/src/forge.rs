@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::path::Path;
 
-fn frozen_snapshot(out: &Value) -> Result<bool> {
+pub(crate) fn frozen_snapshot(out: &Value) -> Result<bool> {
     let Some(version) = out.get("snapshot_version") else {
         return Ok(false);
     };
@@ -199,44 +199,33 @@ pub fn brief(db: &str, pill_id: i64, out_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn verify(db: &str, pill_id: i64, html: &Path) -> Result<()> {
-    let src =
-        std::fs::read_to_string(html).with_context(|| format!("读不到 {}", html.display()))?;
-    let conn = Connection::open(db)?;
-    let (output_json,): (String,) = conn.query_row(
-        "SELECT output_json FROM pill WHERE id=?1",
-        params![pill_id],
-        |r| Ok((r.get(0)?,)),
-    )?;
-    let out: Value =
-        serde_json::from_str(&output_json).context("丹药 output_json 不是合法 JSON")?;
-    let frozen = frozen_snapshot(&out)?;
-    let legacy = !frozen && out["legacy_provenance_fallback"] == true;
-    let comps = out["components"].as_array().cloned().unwrap_or_default();
-
-    // 药液色板
-    let mut palette: Vec<String> = Vec::new();
-    let mut donts: Vec<String> = Vec::new();
-    for c in &comps {
-        let dim = c["dimension"].as_str().unwrap_or("");
-        if let Some(v) = component_content(&conn, c, frozen, legacy)? {
-            if dim == "palette" {
-                for col in v["colors"].as_array().cloned().unwrap_or_default() {
-                    if let Some(h) = col["hex"].as_str() {
-                        palette.push(h.to_uppercase());
-                    }
-                }
-            }
-            if dim == "donts" {
-                for d in v["donts"].as_array().cloned().unwrap_or_default() {
-                    if let Some(s) = d.as_str() {
-                        donts.push(s.to_string());
-                    }
+/// Pure, structured static checks bound to a frozen pill; never a visual score.
+pub(crate) fn static_report(snapshot: &Value, source: &str) -> Result<Value> {
+    anyhow::ensure!(
+        frozen_snapshot(snapshot)?,
+        "静态报告需要完整冻结规格，旧文本不能作为历史依据"
+    );
+    let mut palette = Vec::new();
+    for component in snapshot["components"]
+        .as_array()
+        .context("快照缺 components")?
+    {
+        if component["dimension"] == "palette" {
+            for color in component["content"]["colors"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                if let Some(hex) = color["hex"].as_str() {
+                    palette.push(hex.to_uppercase());
                 }
             }
         }
     }
+    Ok(analyze_source(source, &palette, true, false))
+}
 
+fn analyze_source(src: &str, palette: &[String], frozen: bool, legacy: bool) -> Value {
     let upper = src.to_uppercase();
     let used_palette: Vec<String> = palette
         .iter()
@@ -250,7 +239,7 @@ pub fn verify(db: &str, pill_id: i64, html: &Path) -> Result<()> {
     };
 
     let shadows = upper.matches("BOX-SHADOW").count();
-    let sizes: Vec<f64> = regex_sizes(&src);
+    let sizes: Vec<f64> = regex_sizes(src);
     let (min_s, max_s) = sizes
         .iter()
         .fold((f64::MAX, 0.0f64), |(mn, mx), v| (mn.min(*v), mx.max(*v)));
@@ -261,8 +250,8 @@ pub fn verify(db: &str, pill_id: i64, html: &Path) -> Result<()> {
     };
 
     // 正文对比度：解析 :root 变量 + body 的 background/color
-    let vars = css_vars(&src);
-    let block = css_block(&src, "body").unwrap_or_default();
+    let vars = css_vars(src);
+    let block = css_block(src, "body").unwrap_or_default();
     let resolve = |decl: &str, key: &str| -> Option<String> {
         let idx = decl.find(key)?;
         let rest = &decl[idx + key.len()..];
@@ -309,8 +298,56 @@ pub fn verify(db: &str, pill_id: i64, html: &Path) -> Result<()> {
     checks.push(json!({"id":"type_scale","ok": ratio >= 2.0, "detail": format!("最大/最小字号 {ratio:.2}×")}));
 
     let passed = checks.iter().all(|c| c["ok"].as_bool().unwrap_or(false));
+    json!({"passed":passed,"checks":checks,"evidence_kind":"static_check","visual_quality":false,
+        "basis":"html_css_source_heuristic",
+        "measurements":{"shadow_count":shadows,"palette_coverage":palette_cov,"body_contrast":contrast,"type_ratio":ratio},
+        "limitations":["源码启发式不证明浏览器计算样式、交互或视觉美感"]})
+}
+
+pub fn verify(db: &str, pill_id: i64, html: &Path) -> Result<()> {
+    let src =
+        std::fs::read_to_string(html).with_context(|| format!("读不到 {}", html.display()))?;
+    let conn = Connection::open(db)?;
+    let (output_json,): (String,) = conn.query_row(
+        "SELECT output_json FROM pill WHERE id=?1",
+        params![pill_id],
+        |r| Ok((r.get(0)?,)),
+    )?;
+    let out: Value =
+        serde_json::from_str(&output_json).context("丹药 output_json 不是合法 JSON")?;
+    let frozen = frozen_snapshot(&out)?;
+    let legacy = !frozen && out["legacy_provenance_fallback"] == true;
+    let comps = out["components"].as_array().cloned().unwrap_or_default();
+
+    // 药液色板
+    let mut palette: Vec<String> = Vec::new();
+    let mut donts: Vec<String> = Vec::new();
+    for c in &comps {
+        let dim = c["dimension"].as_str().unwrap_or("");
+        if let Some(v) = component_content(&conn, c, frozen, legacy)? {
+            if dim == "palette" {
+                for col in v["colors"].as_array().cloned().unwrap_or_default() {
+                    if let Some(h) = col["hex"].as_str() {
+                        palette.push(h.to_uppercase());
+                    }
+                }
+            }
+            if dim == "donts" {
+                for d in v["donts"].as_array().cloned().unwrap_or_default() {
+                    if let Some(s) = d.as_str() {
+                        donts.push(s.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    let report = analyze_source(&src, &palette, frozen, legacy);
+    let checks = report["checks"].as_array().context("静态报告缺 checks")?;
+    let passed = report["passed"].as_bool().unwrap_or(false);
+    let shadows = report["measurements"]["shadow_count"].as_u64().unwrap_or(0);
     println!("验收丹药 #{pill_id} ← {}", html.display());
-    for c in &checks {
+    for c in checks {
         println!(
             "  [{}] {:<12} {}",
             if c["ok"].as_bool().unwrap_or(false) {
@@ -439,6 +476,21 @@ fn contrast_ratio(bg: &str, fg: &str) -> f64 {
 mod tests {
     use super::*;
     use crate::alchemy::tests::Fixture;
+
+    #[test]
+    fn structured_static_report_is_bound_to_frozen_evidence_not_a_visual_score() {
+        let f = Fixture::new();
+        f.refine(false);
+        let (recipe, _) = f.recipe();
+        let (_, snapshot) = f.brew(&recipe);
+        let source = "body{background:#FFFFFF;color:#000000}h1{font-size:32px}p{font-size:16px}";
+        let report = static_report(&snapshot, source).unwrap();
+        assert_eq!(report["passed"], true);
+        assert_eq!(report["evidence_kind"], "static_check");
+        assert_eq!(report["visual_quality"], false);
+        assert_eq!(report["checks"].as_array().unwrap().len(), 5);
+        assert!(static_report(&json!({"prompt":"old text spec"}), source).is_err());
+    }
 
     #[test]
     fn legacy_pill_requires_explicit_fallback_and_never_claims_historical_reproduction() {

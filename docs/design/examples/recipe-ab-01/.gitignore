@@ -1,0 +1,4 @@
+# Manual previews are not the controlled evidence exported under review/.
+preview-*.png
+# Superseded first experiment is retained locally for audit, never overwritten.
+review/

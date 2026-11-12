@@ -8,7 +8,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-pub const LATEST_SCHEMA: u32 = 23;
+pub const LATEST_SCHEMA: u32 = 24;
 const BASE: &str = include_str!("../../../../docs/design/inspiration/schema.v2.sql");
 
 const MIGRATIONS: &[(u32, &str)] = &[
@@ -95,6 +95,10 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (
         23,
         include_str!("../../../../docs/design/inspiration/migrations/022-judgment-provenance.sql"),
+    ),
+    (
+        24,
+        include_str!("../../../../docs/design/inspiration/migrations/023-artifact-experiments.sql"),
     ),
 ];
 

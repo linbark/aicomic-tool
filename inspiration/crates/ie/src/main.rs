@@ -8,8 +8,10 @@
 
 mod alchemy;
 mod bundle;
+mod capture;
 mod db;
 mod distill;
+mod experiment;
 mod extract;
 mod fit;
 mod forge;
@@ -31,6 +33,7 @@ fn main() -> Result<()> {
         args.remove(0)
     };
     let mut opts: HashMap<String, String> = HashMap::new();
+    let mut implicit_flags = std::collections::HashSet::new();
     let mut positional: Vec<String> = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -39,9 +42,11 @@ fn main() -> Result<()> {
             // 布尔开关不吞下一个参数：后面紧跟另一个 --flag 或没有值时记作 "1"
             let has_value = i + 1 < args.len() && !args[i + 1].starts_with("--");
             if has_value {
+                implicit_flags.remove(k);
                 opts.insert(k.to_string(), args[i + 1].clone());
                 i += 2;
             } else {
+                implicit_flags.insert(k.to_string());
                 opts.insert(k.to_string(), "1".to_string());
                 i += 1;
             }
@@ -50,7 +55,11 @@ fn main() -> Result<()> {
             i += 1;
         }
     }
-    if cmd == "judge" && !positional.is_empty() {
+    // Keep an omitted value distinct from a literal "1", especially for human provenance.
+    for key in ["source", "reviewer", "dimension", "manifest-hash"] {
+        anyhow::ensure!(!implicit_flags.contains(key), "需要 --{key} <value>");
+    }
+    if matches!(cmd.as_str(), "judge" | "experiment") && !positional.is_empty() {
         opts.insert("sub".into(), positional[0].clone());
     }
     let db = opts
@@ -59,7 +68,16 @@ fn main() -> Result<()> {
         .unwrap_or_else(|| "data/inspiration/inspiration.db".to_string());
     if matches!(
         cmd.as_str(),
-        "refine" | "brew" | "formula" | "mutate" | "judge" | "brief" | "verify" | "motion" | "bag"
+        "refine"
+            | "brew"
+            | "formula"
+            | "mutate"
+            | "judge"
+            | "brief"
+            | "verify"
+            | "motion"
+            | "bag"
+            | "experiment"
     ) {
         db::require_current(std::path::Path::new(&db))?;
     }
@@ -352,6 +370,82 @@ fn main() -> Result<()> {
                 limit,
             })
         }
+        "experiment" => {
+            let required = |key: &str| -> Result<&str> {
+                opts.get(key)
+                    .map(String::as_str)
+                    .filter(|value| !implicit_flags.contains(key) && !value.trim().is_empty())
+                    .ok_or_else(|| anyhow::anyhow!("需要 --{key} <value>"))
+            };
+            let experiment_id = || -> Result<i64> {
+                let id: i64 = required("experiment")?.parse()?;
+                anyhow::ensure!(id > 0, "experiment ID 必须为正数");
+                Ok(id)
+            };
+            let value = match opts.get("sub").map(String::as_str) {
+                Some("create") => {
+                    let pills: Vec<i64> = required("pills")?
+                        .split(',')
+                        .map(|p| p.trim().parse())
+                        .collect::<std::result::Result<_, _>>()?;
+                    anyhow::ensure!(
+                        pills.len() == 2 && pills.iter().all(|p| *p > 0),
+                        "需要 --pills <id>,<id>，恰好两颗正整数丹药"
+                    );
+                    let content: serde_json::Value =
+                        serde_json::from_str(&std::fs::read_to_string(required("content")?)?)?;
+                    let conditions: serde_json::Value =
+                        serde_json::from_str(&std::fs::read_to_string(required("conditions")?)?)?;
+                    experiment::create(&experiment::CreateOpts {
+                        db: &db,
+                        pill_a: pills[0],
+                        pill_b: pills[1],
+                        content: &content,
+                        conditions: &conditions,
+                    })?
+                }
+                Some("attach") => {
+                    let html = PathBuf::from(required("html")?);
+                    let out_dir = PathBuf::from(required("out")?);
+                    let chrome = opts.get("chrome").map(PathBuf::from);
+                    experiment::attach(&experiment::AttachOpts {
+                        db: &db,
+                        experiment_id: experiment_id()?,
+                        arm: required("arm")?,
+                        html: &html,
+                        out_dir: &out_dir,
+                        chrome: chrome.as_deref(),
+                    })?
+                }
+                Some("blind") => {
+                    let out_dir = PathBuf::from(required("out")?);
+                    experiment::blind(&experiment::BlindOpts {
+                        db: &db,
+                        experiment_id: experiment_id()?,
+                        out_dir: &out_dir,
+                    })?
+                }
+                Some("record") => experiment::record(&experiment::RecordOpts {
+                    db: &db,
+                    experiment_id: experiment_id()?,
+                    manifest_hash: required("manifest-hash")?,
+                    source: opts.get("source").map(String::as_str).unwrap_or("demo"),
+                    reviewer: opts.get("reviewer").map(String::as_str),
+                    dimension: opts
+                        .get("dimension")
+                        .map(String::as_str)
+                        .unwrap_or("visual"),
+                    winner: required("winner")?,
+                    note: opts.get("note").map(String::as_str),
+                })?,
+                Some("stats") => experiment::stats(&experiment::StatsOpts { db: &db })?,
+                _ => anyhow::bail!(
+                    "用法：ie experiment <create|attach|blind|record|stats> --db <path> ..."
+                ),
+            };
+            println!("{}", serde_json::to_string_pretty(&value)?);
+            Ok(())
+        }
         "judge" => {
             let sub = opts.get("sub").cloned().unwrap_or_default();
             match sub.as_str() {
@@ -561,7 +655,7 @@ fn main() -> Result<()> {
         "stats" => stats(&db),
         _ => {
             eprintln!(
-                "用法：ie <migrate|extract|vision|distill|refine|brew|formula|mutate|bag|pills|judge|motion|brief|verify|export|import|simulate|fit|stats> --db <path> [options]"
+                "用法：ie <migrate|extract|vision|distill|refine|brew|formula|mutate|bag|pills|judge|experiment|motion|brief|verify|export|import|simulate|fit|stats> --db <path> [options]"
             );
             Ok(())
         }

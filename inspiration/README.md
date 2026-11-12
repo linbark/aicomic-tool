@@ -62,6 +62,33 @@ ie judge models --db my.db
 
 升级副本核验（2026-11-12）：将当前用户库通过 SQLite backup 复制到临时目录再升级，865 件作品、851 个素材、65 瓶药液及背包、29 颗丹药、16 个评判批次全部保留，药液 ID/内容/hash/旧版本字段未变；7 条旧评分隔离为 legacy。副本重新校准后真实样本为 0，两裁判恢复默认 1.0 且不应用校准；完整性和外键检查通过。**原始数据库内容哈希未变，没有在默认库里做测试或伪造真人评分。**
 
+## 第二阶段：成品实验与配方回流
+
+实现、真实截图与边界见[第二阶段验收](../docs/design/炼丹炉成品回流验收.md)。
+
+`experiment` 与现有文字规格评审分开：它只比较绑定了页面与截图的两份成品，不消费旧的文本分、BT 分或 `final_total`。新库升级到 schema 24 后使用：
+
+```sh
+ie experiment create --db /path/to/experiment.db --pills 30,31 \
+  --content content.json --conditions conditions.json
+ie experiment attach --db /path/to/experiment.db --experiment 1 --arm a \
+  --html first.html --out /new/path/to/artifact-a
+ie experiment attach --db /path/to/experiment.db --experiment 1 --arm b \
+  --html second.html --out /new/path/to/artifact-b
+ie experiment blind --db /path/to/experiment.db --experiment 1 --out /new/path/to/review
+# 使用 blind 实际返回的 manifest_hash；演示/助手回填不得使用 human
+ie experiment record --db /path/to/experiment.db --experiment 1 \
+  --manifest-hash <returned-hash> --winner abstain --source demo
+ie experiment stats --db /path/to/experiment.db
+```
+
+- 共同正文见样例[内容清单](../docs/design/examples/recipe-ab-01/content.json)，共同生成/截图条件见[条件清单](../docs/design/examples/recipe-ab-01/conditions.json)。创建要求两颗完整冻结丹药；每臂只能导入一次，改页面请新建实验。
+- attach 使用已有 Chrome/Chromium 直接捕获，不安装浏览器、不启动 HTTP 服务；可用 `--chrome <executable>` 指定本机浏览器。只接受自包含静态 HTML，截图为 light、DPR 1、固定视口，不支持脚本、外链字体/图片、动态交互和视频。
+- 页面、原文件、归档、截图、捕获回执与匿名清单均按实际字节绑定。公开匿名包只含 A/B 两张截图、清单及其哈希；内部配方/丹药映射不在包中。原证据与所有已导出包须保留原路径，不能增加身份说明文件；缺失或篡改后拒绝继续评分和正式统计。
+- 只有明确命名的 human 视觉评价、受控 Chrome 捕获、完整条件声明、内容覆盖和静态验收通过才可进入正式统计。默认 demo，mock/AI/演示单列；重复同实验/评分者仅用最新真人评价，不让后来的演示遮盖人评。
+- 配方按完整定义哈希及共同条件分组，不直接改写药液质量或配方权重。n=1 仅为本条件下一次判断，不能宣称普遍更美。当前没有真实用户视觉评价时，正式样本必须为 0。
+- 内容覆盖是源码文字/内嵌素材检查，不是 DOM 真实可见性证明；生成器配置是操作者声明，不是独立认证；静态通过不是美感分，捕获哈希也不是数字签名。字体仍使用本机系统字体，不能承诺跨平台像素一致。
+
 ## 命令
 
 ```sh

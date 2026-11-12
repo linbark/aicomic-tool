@@ -1,0 +1,23 @@
+{
+  "key": "recipe.ab01.minimal",
+  "name": "同文案实验 · 平静单列",
+  "version": "1",
+  "goal": "把文案收束成单一视觉焦点，均匀节奏、安静线条，不以装饰替代信息层级。",
+  "domain": "ui",
+  "page_type": "landing",
+  "components": [
+    {"slot": "base", "dimension": "palette", "ratio": 0.7, "required": true, "polarity": "positive"},
+    {"slot": "base", "dimension": "spacing", "ratio": 0.3, "required": true, "polarity": "positive"}
+  ],
+  "constraints": {"contrast_min": 4.5},
+  "render_contract": {
+    "layout": "single-column",
+    "display_px": 52,
+    "body_px": 18,
+    "weight": 600,
+    "borders": "thin separators",
+    "shadow": "none",
+    "note": "这是明确的实验配方参数，不是从素材精确测出的字号；不调用模型假造状态或禁忌。"
+  },
+  "combination_prompt": "以 {{base.palette.ratio}} 色彩语言（底 {{base.palette.bg}}、字 {{base.palette.text}}、强调 {{base.palette.accent}}）和 {{base.spacing.ratio}} 间距语言（模数 {{base.spacing.base_px}}px、段距 {{base.spacing.section_gap_px}}px）实现平静单列。主标题52px，正文18px，细分割线，无投影。使用给定共同文案，不新增或删除正文。"
+}
