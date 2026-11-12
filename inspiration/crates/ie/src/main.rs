@@ -376,6 +376,7 @@ fn main() -> Result<()> {
                         seed,
                         repeats,
                         dimension,
+                        rpm: opts.get("rpm").and_then(|v| v.parse().ok()).unwrap_or(5),
                     })
                 }
                 "list" => judge::list(&db),
@@ -414,6 +415,36 @@ fn main() -> Result<()> {
                 }
                 _ => anyhow::bail!("用法：ie judge <run|list|review|screen|fill|record> ..."),
             }
+        }
+        "motion" => {
+            let video = opts
+                .get("video")
+                .map(PathBuf::from)
+                .ok_or_else(|| anyhow::anyhow!("需要 --video <path>"))?;
+            let provider = opts
+                .get("provider")
+                .cloned()
+                .unwrap_or_else(|| "gemini".into());
+            let model = opts
+                .get("model")
+                .cloned()
+                .unwrap_or_else(|| "gemini-3.1-flash-lite".into());
+            let base_url = opts
+                .get("base-url")
+                .cloned()
+                .unwrap_or_else(|| "https://generativelanguage.googleapis.com".into());
+            let thinking: u32 = opts
+                .get("thinking")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            alchemy::refine_video(&alchemy::MotionOpts {
+                db: &db,
+                video: &video,
+                provider: &provider,
+                model: &model,
+                base_url: &base_url,
+                thinking,
+            })
         }
         "brief" => {
             let pill: i64 = opts

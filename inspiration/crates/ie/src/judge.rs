@@ -23,6 +23,7 @@ pub struct RunOpts<'a> {
     pub seed: u64,
     pub repeats: usize,
     pub dimension: String,
+    pub rpm: u32,
 }
 
 struct Candidate {
@@ -149,6 +150,10 @@ pub fn run(o: &RunOpts<'_>) -> Result<()> {
             let mut ll: f64 = 0.0;
             let mut reason = String::new();
             for _ in 0..o.repeats.max(1) {
+                // 免费层每分钟额度很低，按 rpm 节流；0 表示不限速
+                if o.rpm > 0 {
+                    std::thread::sleep(Duration::from_millis(60_000 / o.rpm as u64));
+                }
                 let outcome = if o.provider == "openai" {
                     call_openai(&client, o.base_url, &key, &body)
                 } else {

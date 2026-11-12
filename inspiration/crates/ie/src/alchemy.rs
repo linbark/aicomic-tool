@@ -338,11 +338,14 @@ fn palette_roles(colors: &[(String, f32)], paper: &str, ink: &str) -> serde_json
 }
 
 fn spacing_extract(m: &metrics::Metrics, domain: &str) -> serde_json::Value {
+    // 页边吸附到模数整数倍：测量出的 181 与模数 8 不自洽，会导致规格内部矛盾
+    let base = m.spacing_base.max(1);
+    let margin = ((m.page_margin + base / 2) / base) * base;
     serde_json::json!({
         "domain": domain,
         "base_px": m.spacing_base,
         "steps": m.spacing_steps,
-        "page_margin_px": m.page_margin,
+        "page_margin_px": margin,
         "section_gap_px": m.section_gap,
         "confidence": 0.7,
         "method": "whitespace-bands"
@@ -610,6 +613,61 @@ pub fn brew(o: &BrewOpts<'_>) -> Result<()> {
         bail!("相冲，拒绝炼丹：\n{}", lines.join("\n"));
     }
 
+    // 规格自洽检查：不通过就拿不到丹药（除非 --force）
+    let mut issues: Vec<serde_json::Value> = Vec::new();
+    let ratio_sum: f64 = picked.iter().map(|p| p.ratio).sum();
+    if (ratio_sum - 1.0).abs() > 0.02 {
+        issues.push(serde_json::json!({"severity":"error","rule":"ratio.sum","detail":format!("配比之和 {ratio_sum:.2}，应为 1.0")}));
+    }
+    if let Some(p) = picked.iter().find(|p| p.dimension == "palette") {
+        let c = p.content["roles"]["text_contrast"]
+            .as_f64()
+            .unwrap_or_else(|| p.content["stats"]["contrast"].as_f64().unwrap_or(0.0));
+        if c > 0.0 && c < 4.5 {
+            issues.push(serde_json::json!({"severity":"error","rule":"palette.contrast","detail":format!("正文对比 {c:.2}:1 < 4.5")}));
+        }
+    }
+    if let Some(p) = picked.iter().find(|p| p.dimension == "spacing") {
+        let base = p.content["base_px"].as_f64().unwrap_or(0.0);
+        let margin = p.content["page_margin_px"].as_f64().unwrap_or(0.0);
+        if base > 0.0 && margin > 0.0 && (margin % base).abs() > 0.01 {
+            issues.push(serde_json::json!({"severity":"warn","rule":"spacing.modulus","detail":format!("页边 {margin:.0} 不是模数 {base:.0} 的整数倍")}));
+        }
+    }
+    if let Some(p) = picked.iter().find(|p| p.dimension == "type") {
+        let sizes: Vec<f64> = p.content["steps"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|s| s["size_px"].as_f64()).collect())
+            .unwrap_or_default();
+        if sizes.len() >= 2 {
+            let mx = sizes.iter().cloned().fold(0.0f64, f64::max);
+            let mn = sizes.iter().cloned().fold(f64::MAX, f64::min);
+            if mn > 0.0 && mx / mn < 2.0 {
+                issues.push(serde_json::json!({"severity":"warn","rule":"type.hierarchy","detail":format!("最大/最小字号仅 {:.2}×，层级不足", mx / mn)}));
+            }
+        }
+    }
+    if !page_type.is_empty()
+        && let Some(p) = picked.iter().find(|p| p.dimension == "donts")
+    {
+        let mismatched = p.content["donts"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter(|d| {
+                        d["applies_to"]
+                            .as_str()
+                            .map(|t| t != page_type && t != "any")
+                            .unwrap_or(false)
+                    })
+                    .count()
+            })
+            .unwrap_or(0);
+        if mismatched > 0 {
+            issues.push(serde_json::json!({"severity":"warn","rule":"donts.context","detail":format!("{mismatched} 条禁忌不适用于 {page_type}")}));
+        }
+    }
+
     // 渲染合成提示词
     let mut map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for p in &picked {
@@ -666,7 +724,22 @@ pub fn brew(o: &BrewOpts<'_>) -> Result<()> {
         unresolved += 1;
     }
     if unresolved > 0 {
-        println!("  ⚠ {unresolved} 个占位符没有对应字段，已替换为（未提供）");
+        issues.push(serde_json::json!({"severity":"error","rule":"prompt.unresolved","detail":format!("{unresolved} 个占位符没有对应字段")}));
+    }
+    for i in &issues {
+        println!(
+            "  [{}] {}：{}",
+            i["severity"].as_str().unwrap_or("?"),
+            i["rule"].as_str().unwrap_or("?"),
+            i["detail"].as_str().unwrap_or("")
+        );
+    }
+    let has_error = issues.iter().any(|i| i["severity"] == "error");
+    if has_error && !o.force {
+        bail!(
+            "规格不自洽（{} 条 error），用 --force 可强行成丹",
+            issues.iter().filter(|i| i["severity"] == "error").count()
+        );
     }
 
     // 组装丹药
@@ -710,6 +783,7 @@ pub fn brew(o: &BrewOpts<'_>) -> Result<()> {
             "extract_id": p.extract_id, "material": p.material, "quality": p.quality, "fire": p.fire
         })).collect::<Vec<_>>(),
         "conflicts": conflicts,
+        "spec_issues": issues,
         "prompt": rendered,
     });
     conn.execute(
@@ -840,6 +914,143 @@ pub fn mutate(o: &MutateOpts<'_>) -> Result<()> {
     if !best.0.is_empty() {
         println!("\n最佳变异：{}（丹药 #{}，{:.2}）", best.0, best.1, best.2);
     }
+    Ok(())
+}
+
+pub struct MotionOpts<'a> {
+    pub db: &'a str,
+    pub video: &'a Path,
+    pub provider: &'a str,
+    pub model: &'a str,
+    pub base_url: &'a str,
+    pub thinking: u32,
+}
+
+/// 动效抽取：ffmpeg 抽 3 帧（10%/50%/90%），一次请求让模型比较变化。
+pub fn refine_video(o: &MotionOpts<'_>) -> Result<()> {
+    if !o.video.exists() {
+        bail!("找不到视频 {}", o.video.display());
+    }
+    let dur_out = std::process::Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(o.video)
+        .output()
+        .context("需要 ffprobe")?;
+    let dur: f64 = String::from_utf8_lossy(&dur_out.stdout)
+        .trim()
+        .parse()
+        .unwrap_or(3.0);
+
+    let mut frames: Vec<Vec<u8>> = Vec::new();
+    for (i, pct) in [0.1f64, 0.5, 0.9].iter().enumerate() {
+        let ts = (dur * pct).max(0.0);
+        let out = std::env::temp_dir().join(format!("ie-frame-{}-{i}.jpg", std::process::id()));
+        let st = std::process::Command::new("ffmpeg")
+            .args(["-y", "-ss", &format!("{ts:.2}"), "-i"])
+            .arg(o.video)
+            .args(["-frames:v", "1", "-q:v", "3"])
+            .arg(&out)
+            .output()
+            .context("需要 ffmpeg")?;
+        if !st.status.success() {
+            bail!("抽帧失败：{}", String::from_utf8_lossy(&st.stderr));
+        }
+        let bytes = std::fs::read(&out)?;
+        let _ = std::fs::remove_file(&out);
+        if bytes.len() > 1000 {
+            frames.push(bytes);
+        }
+    }
+    if frames.len() < 2 {
+        bail!("抽到的有效帧不足（{}）", frames.len());
+    }
+
+    let conn = Connection::open(o.db)?;
+    let t = conn.query_row(
+        "SELECT id, version, prompt_template FROM technique WHERE key='t.motion'",
+        [],
+        |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        },
+    )?;
+    let (tid, tver, prompt) = t;
+
+    let key = if o.provider == "openai" {
+        std::env::var("IE_API_KEY").unwrap_or_default()
+    } else {
+        std::env::var("GEMINI_API_KEY").context("缺少 GEMINI_API_KEY")?
+    };
+    let body = if o.provider == "openai" {
+        let mut content = vec![serde_json::json!({"type":"text","text":prompt})];
+        for f in &frames {
+            use base64::Engine;
+            content.push(serde_json::json!({
+                "type":"image_url",
+                "image_url":{"url": format!("data:image/jpeg;base64,{}", base64::engine::general_purpose::STANDARD.encode(f))}
+            }));
+        }
+        serde_json::json!({"model":o.model,"messages":[{"role":"user","content":content}],"temperature":0.2,"max_tokens":1200})
+    } else {
+        use base64::Engine;
+        let mut parts = vec![serde_json::json!({"text": prompt})];
+        for f in &frames {
+            parts.push(serde_json::json!({
+                "inline_data": {"mime_type":"image/jpeg","data": base64::engine::general_purpose::STANDARD.encode(f)}
+            }));
+        }
+        serde_json::json!({
+            "contents":[{"parts":parts}],
+            "generationConfig":{"responseMimeType":"application/json","temperature":0.2,"maxOutputTokens":1200,"thinkingConfig":{"thinkingBudget":o.thinking}}
+        })
+    };
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(180))
+        .build()?;
+    let outcome = if o.provider == "openai" {
+        call_openai(&client, o.base_url, &key, &body)
+    } else {
+        call(&client, o.base_url, o.model, &key, &body)
+    };
+    let json = match outcome {
+        CallOutcome::Ok(v, _) => v,
+        CallOutcome::RateLimited(i) => bail!("限流：{}", i.body),
+        CallOutcome::Failed(e) => bail!("调用失败：{e}"),
+    };
+    let quality = json["confidence"].as_f64().unwrap_or(0.55).clamp(0.0, 1.0) as f32;
+    let hash = hash_of(&format!(
+        "{}|t.motion|{}|{}|{}",
+        o.video.display(),
+        tver,
+        o.model,
+        json
+    ));
+    conn.execute(
+        "INSERT INTO extract(work_id,technique_id,dimension,content_json,content_md,quality,fire_model,hash,created_at,technique_version)
+         VALUES(NULL,?1,'motion',?2,NULL,?3,?4,?5,?6,?7)",
+        params![tid, json.to_string(), quality, o.model, hash, crate::now_iso(), tver],
+    )?;
+    let eid = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT OR IGNORE INTO inventory(extract_id,added_at) VALUES(?1,?2)",
+        params![eid, crate::now_iso()],
+    )?;
+    println!(
+        "  ✓ t.motion「观动」motion 质量 {quality:.2} 火候 {} → 药液 #{eid}",
+        o.model
+    );
+    println!("{}", serde_json::to_string_pretty(&json)?);
     Ok(())
 }
 
