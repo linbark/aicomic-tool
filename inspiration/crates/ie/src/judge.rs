@@ -326,7 +326,7 @@ pub fn run(o: &RunOpts<'_>) -> Result<()> {
     Ok(())
 }
 
-fn recompute(conn: &Connection, run_id: i64) -> Result<()> {
+pub(crate) fn recompute(conn: &Connection, run_id: i64) -> Result<()> {
     let mut stmt = conn.prepare(
         "SELECT id, precheck, machine_total, human_score FROM judge_item WHERE run_id=?1",
     )?;

@@ -1,0 +1,18 @@
+[
+  {
+    "name": "local",
+    "provider": "openai",
+    "model": "qwen3-vl:8b-instruct",
+    "base_url": "http://127.0.0.1:11434/v1",
+    "rpm": 0,
+    "weight": 1.0
+  },
+  {
+    "name": "gemini-lite",
+    "provider": "gemini",
+    "model": "gemini-3.1-flash-lite",
+    "base_url": "https://generativelanguage.googleapis.com",
+    "rpm": 4,
+    "weight": 1.0
+  }
+]

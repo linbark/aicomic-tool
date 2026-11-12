@@ -14,6 +14,7 @@ mod fit;
 mod forge;
 mod judge;
 mod metrics;
+mod panel;
 mod vector;
 mod vision;
 
@@ -377,6 +378,39 @@ fn main() -> Result<()> {
                         repeats,
                         dimension,
                         rpm: opts.get("rpm").and_then(|v| v.parse().ok()).unwrap_or(5),
+                    })
+                }
+                "panel" => {
+                    let pills: Vec<i64> = opts
+                        .get("pills")
+                        .map(|s| s.split(',').filter_map(|x| x.trim().parse().ok()).collect())
+                        .unwrap_or_default();
+                    let judges: Vec<String> = opts
+                        .get("judges")
+                        .map(|s| s.split(',').map(|x| x.trim().to_string()).collect())
+                        .unwrap_or_else(|| vec!["local".into(), "gemini-lite".into()]);
+                    let cfg = PathBuf::from(
+                        opts.get("judges-config")
+                            .cloned()
+                            .unwrap_or_else(|| "docs/design/inspiration/judges.json".to_string()),
+                    );
+                    let repeats: usize = opts
+                        .get("repeats")
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(2);
+                    let dimension = opts
+                        .get("dimension")
+                        .cloned()
+                        .unwrap_or_else(|| "overall".into());
+                    let seed: u64 = opts.get("seed").and_then(|v| v.parse().ok()).unwrap_or(7);
+                    panel::run(&panel::PanelOpts {
+                        db: &db,
+                        pills,
+                        judges,
+                        cfg_path: &cfg,
+                        repeats,
+                        dimension,
+                        seed,
                     })
                 }
                 "list" => judge::list(&db),
