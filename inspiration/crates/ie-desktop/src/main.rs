@@ -21,7 +21,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         app::Studio::update,
         app::Studio::view,
     )
-    .title(|app: &app::Studio| format!("{} · 炼丹炉", app.screen.title()))
+    .title(|app: &app::Studio| {
+        format!(
+            "{} · 炼丹炉 {}",
+            app.screen.title(),
+            env!("CARGO_PKG_VERSION")
+        )
+    })
     .window(iced::window::Settings {
         size: iced::Size::new(size.0, size.1),
         min_size: Some(iced::Size::new(1040., 720.)),

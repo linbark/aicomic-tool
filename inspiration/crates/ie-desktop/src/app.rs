@@ -13,6 +13,7 @@ pub const PAGE_SIZE: usize = 24;
 #[derive(Clone, Debug)]
 pub enum Dialog {
     Open,
+    AssetRoot,
     Copy,
     New,
     Export(i64),
@@ -258,6 +259,7 @@ impl Studio {
         let config = self.config.clone();
         self.busy = Some("等待系统文件对话框…".into());
         let for_task = kind.clone();
+        let asset_root = self.config.root.clone();
         Task::perform(
             async move {
                 tokio::task::spawn_blocking(move || {
@@ -267,6 +269,10 @@ impl Studio {
                             .set_title("只读打开素材数据库")
                             .add_filter("SQLite 数据库", &["db", "sqlite", "sqlite3"])
                             .pick_file(),
+                        Dialog::AssetRoot => dialog
+                            .set_title("选择素材目录 · 不会修改数据库")
+                            .set_directory(asset_root)
+                            .pick_folder(),
                         Dialog::Copy => dialog
                             .set_title("建立工作副本 · 不会修改原数据库")
                             .set_file_name("炼丹炉-工作副本.db")
@@ -377,7 +383,14 @@ impl Studio {
                 self.sync_experiment_selection();
                 return self.load_visible_images();
             }
-            Message::Refresh => return self.reload(),
+            Message::Refresh => {
+                if self.busy.is_some() {
+                    return Task::none();
+                }
+                // Explicit refresh also re-probes files repaired or replaced at the same path.
+                self.assets.clear();
+                return self.reload();
+            }
             Message::ToggleInspector => self.inspector = !self.inspector,
             Message::ToggleSidebar => self.sidebar = !self.sidebar,
             Message::ToggleList => self.list = !self.list,
@@ -487,6 +500,12 @@ impl Studio {
                             self.experiment = None;
                             return self.reload();
                         }
+                        Dialog::AssetRoot => {
+                            self.config.root = path;
+                            self.options.root_explicit = true;
+                            self.assets.clear();
+                            return self.reload();
+                        }
                         Dialog::Copy => {
                             return self.action(
                                 StudioAction::CreateCopy { target: path },
@@ -582,6 +601,8 @@ impl Studio {
                     Err(error) => {
                         self.error = true;
                         self.status = error;
+                        // Keep the previous snapshot browsable even if its refresh failed.
+                        return self.load_visible_images();
                     }
                 }
             }
@@ -1111,6 +1132,206 @@ mod tests {
         assert!(a.show_raw_pill);
         let _ = a.update(Message::SelectPill(42));
         assert!(!a.show_raw_pill);
+    }
+    #[test]
+    fn explicit_refresh_retries_failed_image_at_the_same_path() {
+        let mut a = app(false);
+        let path = PathBuf::from("/isolated/repaired.png");
+        let snapshot = Snapshot::from_value(serde_json::json!({
+            "schema_version": 25,
+            "works": [{"id": 1, "image_path": path}]
+        }));
+        let config = a.config.clone();
+        let outcome = || Outcome {
+            config: config.clone(),
+            snapshot: snapshot.clone(),
+            switched: false,
+            note: "fixture".into(),
+        };
+        let _ = a.update(Message::Loaded {
+            generation: a.generation,
+            config: config.clone(),
+            result: Ok(Box::new(outcome())),
+        });
+        let _ = a.update(Message::Images {
+            generation: a.generation,
+            result: Ok(HashMap::from([(
+                path.clone(),
+                Asset {
+                    handle: None,
+                    error: Some("fixture was missing".into()),
+                },
+            )])),
+        });
+        assert!(a.assets[&path].error.is_some());
+        let _ = a.update(Message::Refresh);
+        let _ = a.update(Message::Loaded {
+            generation: a.generation,
+            config: config.clone(),
+            result: Ok(Box::new(outcome())),
+        });
+        assert!(a.pending_assets.contains(&path));
+        assert!(!a.assets.contains_key(&path));
+    }
+    #[test]
+    fn explicit_refresh_reprobes_successful_images_and_rejects_stale_results() {
+        let mut a = ready_app(true);
+        a.screen = Screen::Preferences;
+        let generation = a.generation;
+        let stale_images = a.assets.clone();
+        let config = a.config.clone();
+        let snapshot = a.data.clone();
+        let _ = a.update(Message::Refresh);
+        assert_eq!(a.generation, generation + 1);
+        assert!(a.assets.is_empty());
+        let _ = a.update(Message::Images {
+            generation,
+            result: Ok(stale_images),
+        });
+        assert!(a.assets.is_empty());
+        let _ = a.update(Message::Loaded {
+            generation: a.generation,
+            config: config.clone(),
+            result: Ok(Box::new(Outcome {
+                config,
+                snapshot,
+                switched: false,
+                note: "fixture".into(),
+            })),
+        });
+        for name in ["A", "B"] {
+            assert!(
+                a.pending_assets
+                    .contains(&PathBuf::from(format!("/isolated/{name}.png")))
+            );
+        }
+        assert!(!a.ready_experiment());
+    }
+    #[test]
+    fn refresh_while_busy_does_not_clear_images_or_pending_work() {
+        let mut a = ready_app(false);
+        let generation = a.generation;
+        let pending = PathBuf::from("/isolated/pending.png");
+        a.pending_assets.insert(pending.clone());
+        a.busy = Some("fixture in progress".into());
+        let _ = a.update(Message::Refresh);
+        assert_eq!(a.generation, generation);
+        assert_eq!(a.assets.len(), 2);
+        assert!(a.pending_assets.contains(&pending));
+        assert_eq!(a.busy.as_deref(), Some("fixture in progress"));
+    }
+    #[test]
+    fn failed_refresh_reprobes_old_visible_images_instead_of_leaving_them_loading() {
+        let mut a = ready_app(true);
+        a.screen = Screen::Preferences;
+        let config = a.config.clone();
+        let _ = a.update(Message::Refresh);
+        let _ = a.update(Message::Loaded {
+            generation: a.generation,
+            config,
+            result: Err("fixture database could not be refreshed".into()),
+        });
+        assert!(a.busy.is_none());
+        assert!(a.error);
+        assert_eq!(a.status, "fixture database could not be refreshed");
+        for path in a.visible_paths() {
+            assert!(a.pending_assets.contains(&path));
+        }
+    }
+    #[test]
+    fn explicit_asset_directory_reloads_without_unlocking_or_switching_database() {
+        let mut a = ready_app(false);
+        a.writable = false;
+        let generation = a.generation;
+        let config = a.config.clone();
+        let db = config.db.clone();
+        let chosen = PathBuf::from("/chosen/materials");
+        let _ = a.update(Message::DialogDone {
+            generation,
+            config,
+            kind: Dialog::AssetRoot,
+            result: Ok(Some(chosen.clone())),
+        });
+        assert_eq!(a.config.root, chosen);
+        assert!(a.options.root_explicit);
+        assert_eq!(a.config.db, db);
+        assert!(!a.writable);
+        assert!(a.assets.is_empty());
+        assert!(a.pending_assets.is_empty());
+        assert_eq!(a.generation, generation + 1);
+        assert!(a.busy.is_some());
+
+        let config = a.config.clone();
+        let generation = a.generation;
+        let _ = a.update(Message::Loaded {
+            generation,
+            config: config.clone(),
+            result: Ok(Box::new(Outcome {
+                config,
+                snapshot: Snapshot::from_value(serde_json::json!({
+                    "schema_version": 25,
+                    "asset_root_hint": "/old/materials"
+                })),
+                switched: false,
+                note: "fixture".into(),
+            })),
+        });
+        assert_eq!(a.config.root, chosen);
+        assert_eq!(a.generation, generation);
+        assert!(a.busy.is_none());
+        assert!(!a.writable);
+    }
+    #[test]
+    fn asset_directory_dialog_is_blocked_while_busy_and_cancel_is_non_mutating() {
+        let mut a = ready_app(false);
+        let generation = a.generation;
+        let config = a.config.clone();
+        a.busy = Some("fixture in progress".into());
+        let _ = a.update(Message::Dialog(Dialog::AssetRoot));
+        assert_eq!(a.busy.as_deref(), Some("fixture in progress"));
+        assert_eq!(a.generation, generation);
+        assert!(runtime::same_config(&a.config, &config));
+
+        a.busy = None;
+        let _ = a.update(Message::Dialog(Dialog::AssetRoot));
+        assert!(a.busy.is_some());
+        let _ = a.update(Message::DialogDone {
+            generation,
+            config: config.clone(),
+            kind: Dialog::AssetRoot,
+            result: Ok(None),
+        });
+        assert!(a.busy.is_none());
+        assert_eq!(a.generation, generation);
+        assert!(runtime::same_config(&a.config, &config));
+        assert_eq!(a.assets.len(), 2);
+        assert!(!a.options.root_explicit);
+        assert!(a.writable);
+    }
+    #[test]
+    fn old_asset_directory_dialog_cannot_replace_root_or_release_reload() {
+        let mut a = ready_app(false);
+        let generation = a.generation;
+        let config = a.config.clone();
+        let _ = a.update(Message::DialogDone {
+            generation,
+            config: config.clone(),
+            kind: Dialog::AssetRoot,
+            result: Ok(Some("/chosen/materials".into())),
+        });
+        let current = a.config.clone();
+        let current_generation = a.generation;
+        for (generation, config) in [(generation, config.clone()), (a.generation, config)] {
+            let _ = a.update(Message::DialogDone {
+                generation,
+                config,
+                kind: Dialog::AssetRoot,
+                result: Ok(Some("/stale/materials".into())),
+            });
+            assert!(runtime::same_config(&a.config, &current));
+            assert_eq!(a.generation, current_generation);
+            assert!(a.busy.is_some());
+        }
     }
     #[test]
     fn startup_database_is_always_read_only() {

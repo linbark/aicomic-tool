@@ -99,6 +99,14 @@ pub fn path(value: &Value, key: &str) -> Option<PathBuf> {
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
 }
+pub fn unavailable_preview(work: &Value) -> &'static str {
+    match label(work, "preview_status") {
+        "no_local_asset" => "本条尚无本地图像",
+        "file_missing" => "图片文件不在当前素材目录，可选择素材目录",
+        "unreadable_or_unsupported" => "图片无法读取或格式不支持",
+        _ => "无本地预览图",
+    }
+}
 pub fn flag(value: &Value, key: &str) -> bool {
     value[key].as_bool().unwrap_or(false)
 }
@@ -332,6 +340,22 @@ mod tests {
         assert_eq!(s.filtered_works("EDITORIAL").len(), 1);
         assert_eq!(s.filtered_works("8").len(), 1);
         assert!(!s.needs_migration);
+    }
+    #[test]
+    fn unavailable_preview_explains_backend_status_without_guessing_legacy_records() {
+        for (status, expected) in [
+            ("no_local_asset", "本条尚无本地图像"),
+            ("file_missing", "图片文件不在当前素材目录，可选择素材目录"),
+            ("unreadable_or_unsupported", "图片无法读取或格式不支持"),
+            ("unknown", "无本地预览图"),
+            ("available", "无本地预览图"),
+        ] {
+            assert_eq!(
+                unavailable_preview(&serde_json::json!({"preview_status": status})),
+                expected
+            );
+        }
+        assert_eq!(unavailable_preview(&serde_json::json!({})), "无本地预览图");
     }
     #[test]
     fn visible_experiment_falls_back_only_within_search_results() {

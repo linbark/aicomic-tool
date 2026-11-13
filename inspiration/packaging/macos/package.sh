@@ -7,7 +7,7 @@ arch="$(uname -m)"
 case "$arch" in arm64|x86_64) ;; *) printf 'Unsupported host architecture: %s\n' "$arch" >&2; exit 2 ;; esac
 binary=""
 output="$workspace/dist/macos-$arch"
-version="0.1.0"
+version="0.1.1"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --binary) binary="${2:?--binary needs a file}"; shift 2 ;;

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use iced::widget::{
     Column, Row, Space, button, checkbox, column, container, image, row, rule, scrollable, slider,
-    text, text_input,
+    text, text_input, tooltip,
 };
 use iced::{Alignment, Element, Fill, FillPortion, Length};
 use serde_json::Value;
@@ -114,6 +114,12 @@ impl Studio {
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("尚未打开数据库");
+        let root_name = self
+            .config
+            .root
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("/");
         nav = nav
             .push(Space::new().height(16))
             .push(line())
@@ -145,6 +151,22 @@ impl Studio {
                 action(
                     "建立新库…",
                     self.busy.is_none().then_some(Message::Dialog(Dialog::New)),
+                    false,
+                )
+                .width(Fill),
+            )
+            .push(Space::new().height(8))
+            .push(tooltip(
+                auxiliary(format!("素材目录 · {}", trim(root_name, 16))),
+                text(self.config.root.display().to_string()).size(12),
+                iced::widget::tooltip::Position::Right,
+            ))
+            .push(
+                action(
+                    "选择素材目录…",
+                    self.busy
+                        .is_none()
+                        .then_some(Message::Dialog(Dialog::AssetRoot)),
                     false,
                 )
                 .width(Fill),
@@ -426,7 +448,7 @@ impl Studio {
                 items = items.push(
                     button(
                         row![
-                            self.preview(data::path(work, "image_path"), 72., 54.),
+                            self.work_preview(work, 72., 54.),
                             column![
                                 text(trim(&data::title(work), 32)).size(13),
                                 auxiliary(format!("编号 {}", id(work)))
@@ -475,11 +497,7 @@ impl Studio {
                 for work in group {
                     let selected = self.selection == Some(id(work));
                     let content = column![
-                        self.preview(
-                            data::path(work, "image_path"),
-                            Fill,
-                            if self.width < 1120. { 140. } else { 168. }
-                        ),
+                        self.work_preview(work, Fill, if self.width < 1120. { 140. } else { 168. }),
                         column![
                             text(trim(&data::title(work), 28)).size(13),
                             auxiliary(format!(
@@ -521,11 +539,33 @@ impl Studio {
         .spacing(16)
         .into()
     }
+    fn work_preview<'a>(
+        &self,
+        work: &Value,
+        width: impl Into<Length>,
+        height: f32,
+    ) -> Element<'a, Message> {
+        self.preview_with_hint(
+            data::path(work, "image_path"),
+            width,
+            height,
+            data::unavailable_preview(work),
+        )
+    }
     fn preview<'a>(
         &self,
         path: Option<PathBuf>,
         width: impl Into<Length>,
         height: f32,
+    ) -> Element<'a, Message> {
+        self.preview_with_hint(path, width, height, "无本地预览图")
+    }
+    fn preview_with_hint<'a>(
+        &self,
+        path: Option<PathBuf>,
+        width: impl Into<Length>,
+        height: f32,
+        unavailable: &'static str,
     ) -> Element<'a, Message> {
         let width = width.into();
         let asset = path.as_ref().and_then(|p| self.assets.get(p));
@@ -543,7 +583,7 @@ impl Studio {
                     } else if path.is_some() {
                         "正在载入图像…".into()
                     } else {
-                        "无本地预览图".into()
+                        unavailable.into()
                     },
                 ))
                 .padding(12)
@@ -648,7 +688,7 @@ impl Studio {
         let mut body = column![
             heading(data::title(work)), self.trajectory(work),
             row![heading("当前选材").width(Fill), action("重新选材", Some(Message::Navigate(Screen::Library)), false), action("本地炼药", (self.can_write() && data::path(work, "image_path").is_some()).then_some(Message::Refine), false)].align_y(Alignment::Center).spacing(8),
-            row![self.preview(data::path(work, "image_path"), 180., 132.), column![text("仅计算像素，不调用模型").size(13), auxiliary("palette：颜色分布\nspacing：留白与间距代理\n像素代理不是语义理解，也不是审美评分。")].spacing(8).width(Fill)].spacing(16),
+            row![self.work_preview(work, 180., 132.), column![text("仅计算像素，不调用模型").size(13), auxiliary("palette：颜色分布\nspacing：留白与间距代理\n像素代理不是语义理解，也不是审美评分。")].spacing(8).width(Fill)].spacing(16),
             line(), heading("配方与比例"),
             row![action("像素配方", Some(Message::SelectRecipe(None)), false), Space::new().width(Fill), action("选择本地配方…", self.busy.is_none().then_some(Message::Dialog(Dialog::Recipe)), false)].spacing(8),
         ].spacing(16);
@@ -1187,7 +1227,7 @@ impl Studio {
                 if let Some(work) = self.work() {
                     let extracts = self.data.extracts_for(id(work));
                     body = body
-                        .push(self.preview(data::path(work, "image_path"), Fill, 196.))
+                        .push(self.work_preview(work, Fill, 196.))
                         .push(heading(data::title(work)))
                         .push(auxiliary(format!(
                             "素材 #{} · {}",

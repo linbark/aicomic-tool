@@ -99,8 +99,10 @@ pub fn snapshot(config: &StudioConfig) -> Result<Value> {
         (SELECT count(*) FROM extract e WHERE e.work_id=w.id) FROM work w ORDER BY w.id DESC LIMIT 1000")?;
     view["works"] = json!(stmt.query_map([], |r| {
         let path: Option<String> = r.get(4)?;
+        let image = existing_image(&config.root,path.as_deref());
+        let status = preview_status(&config.root,path.as_deref(),image.is_some());
         Ok(json!({"id":r.get::<_,i64>(0)?,"title":r.get::<_,String>(1)?,"domain":r.get::<_,String>(2)?,
-            "collection":r.get::<_,String>(3)?,"image_path":existing_image(&config.root,path.as_deref()),
+            "collection":r.get::<_,String>(3)?,"image_path":image,"preview_status":status,
             "extract_count":r.get::<_,i64>(5)?}))
     })?.collect::<rusqlite::Result<Vec<_>>>()?);
     let mut stmt = tx.prepare("SELECT id,work_id,role,local_path,width,height,sha256 FROM asset ORDER BY id DESC LIMIT 1000")?;
@@ -363,10 +365,30 @@ fn schema_version(conn: &Connection) -> Result<Option<u32>> {
 fn existing_image(root: &Path, raw: Option<&str>) -> Option<String> {
     let path = root.join(raw?);
     let path = path.canonicalize().ok()?;
-    if !path.is_file() || image::image_dimensions(&path).is_err() {
+    if !path.is_file() {
         return None;
     }
+    // Content-addressed blobs intentionally have no extension. Match the native
+    // decoder's content sniffing instead of rejecting valid JPEG/WebP/PNG paths.
+    image::ImageReader::open(&path)
+        .ok()?
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()?;
     path.to_str().map(str::to_owned)
+}
+
+fn preview_status(root: &Path, raw: Option<&str>, available: bool) -> &'static str {
+    if available {
+        "available"
+    } else if raw.is_none_or(str::is_empty) {
+        "no_local_asset"
+    } else if !root.join(raw.unwrap_or_default()).is_file() {
+        "file_missing"
+    } else {
+        "unreadable_or_unsupported"
+    }
 }
 
 pub fn execute(config: &StudioConfig, action: &StudioAction) -> Result<Value> {
@@ -833,6 +855,95 @@ mod tests {
         assert!(error.to_string().contains("pixel"));
         assert_eq!(snapshot(&fixture.config)?["counts"]["extracts"], 0);
         assert_eq!(before, std::fs::read(&fixture.config.db)?);
+        Ok(())
+    }
+
+    #[test]
+    fn preview_recognizes_extensionless_content_addressed_images_without_writes() -> Result<()> {
+        let fixture = Fixture::new()?;
+        let conn = database(&fixture, 21)?;
+        std::fs::create_dir_all(fixture.dir.join("blobs/ab"))?;
+        let relative = "blobs/ab/abcdef0123456789";
+        let path = fixture.dir.join(relative);
+        image::RgbImage::from_pixel(48, 32, image::Rgb([31, 83, 97]))
+            .save_with_format(&path, image::ImageFormat::Png)?;
+        conn.execute(
+            "INSERT INTO asset(work_id,role,local_path) VALUES(1,'poster',?1)",
+            [relative],
+        )?;
+        drop(conn);
+        let before = std::fs::read(&fixture.config.db)?;
+        let view = snapshot(&fixture.config)?;
+        assert_eq!(
+            view["works"][0]["image_path"],
+            json!(path.canonicalize()?.to_str())
+        );
+        assert_eq!(
+            view["assets"][0]["image_path"],
+            view["works"][0]["image_path"]
+        );
+        assert_eq!(std::fs::read(&fixture.config.db)?, before);
+        Ok(())
+    }
+
+    #[test]
+    fn preview_uses_jpeg_webp_content_instead_of_missing_or_misleading_extensions() -> Result<()> {
+        for (name, format) in [
+            ("content-addressed-jpeg", image::ImageFormat::Jpeg),
+            ("content-addressed-webp", image::ImageFormat::WebP),
+            ("actually-jpeg.png", image::ImageFormat::Jpeg),
+        ] {
+            let fixture = Fixture::new()?;
+            let conn = database(&fixture, 21)?;
+            let path = fixture.dir.join(name);
+            image::RgbImage::from_pixel(48, 32, image::Rgb([31, 83, 97]))
+                .save_with_format(&path, format)?;
+            conn.execute(
+                "INSERT INTO asset(work_id,role,local_path) VALUES(1,'poster',?1)",
+                [name],
+            )?;
+            drop(conn);
+            let before = std::fs::read(&fixture.config.db)?;
+            let view = snapshot(&fixture.config)?;
+            assert_eq!(
+                view["works"][0]["image_path"],
+                json!(path.canonicalize()?.to_str())
+            );
+            assert_eq!(view["works"][0]["preview_status"], "available");
+            assert_eq!(std::fs::read(&fixture.config.db)?, before);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn preview_reports_absent_media_missing_files_and_unreadable_content_without_guessing()
+    -> Result<()> {
+        let fixture = Fixture::new()?;
+        let conn = database(&fixture, 21)?;
+        assert_eq!(
+            snapshot(&fixture.config)?["works"][0]["preview_status"],
+            "no_local_asset"
+        );
+        conn.execute(
+            "INSERT INTO asset(work_id,role,local_path) VALUES(1,'poster','missing-image')",
+            [],
+        )?;
+        assert_eq!(
+            snapshot(&fixture.config)?["works"][0]["preview_status"],
+            "file_missing"
+        );
+        std::fs::write(
+            fixture.dir.join("missing-image"),
+            "Not an image; never use a fabricated thumbnail",
+        )?;
+        let before = std::fs::read(&fixture.config.db)?;
+        let view = snapshot(&fixture.config)?;
+        assert_eq!(
+            view["works"][0]["preview_status"],
+            "unreadable_or_unsupported"
+        );
+        assert!(view["works"][0]["image_path"].is_null());
+        assert_eq!(std::fs::read(&fixture.config.db)?, before);
         Ok(())
     }
 
