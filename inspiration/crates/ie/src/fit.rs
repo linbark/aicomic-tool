@@ -549,7 +549,9 @@ fn hash_json(value: &Value) -> String {
     format!("{:x}", Sha256::digest(value.to_string().as_bytes()))
 }
 fn open_kernel_db(db: &str, write: bool) -> Result<Connection> {
-    crate::db::require_current(std::path::Path::new(db))?;
+    if write {
+        crate::db::require_current(std::path::Path::new(db))?;
+    }
     let conn = Connection::open_with_flags(
         db,
         if write {
@@ -559,6 +561,19 @@ fn open_kernel_db(db: &str, write: bool) -> Result<Connection> {
         },
     )?;
     conn.busy_timeout(std::time::Duration::from_secs(10))?;
+    if !write {
+        let version: String = conn.query_row(
+            "SELECT value FROM schema_meta WHERE key='schema_version'",
+            [],
+            |r| r.get(0),
+        )?;
+        ensure!(
+            version
+                .parse::<u32>()
+                .is_ok_and(|v| (25..=crate::db::LATEST_SCHEMA).contains(&v)),
+            "只读个人内核需要 schema25 或兼容新版本；不会自动迁移"
+        );
+    }
     conn.pragma_update(None, "foreign_keys", true)?;
     Ok(conn)
 }
@@ -1149,11 +1164,7 @@ mod tests {
     fn training_db() -> String {
         let db = temp_db();
         let mut conn = Connection::open(&db).unwrap();
-        crate::db::migrate_to(&mut conn, 24).unwrap();
-        conn.execute_batch(include_str!(
-            "../../../../docs/design/inspiration/migrations/024-personal-evidence.sql"
-        ))
-        .unwrap();
+        crate::db::migrate(&mut conn).unwrap();
         conn.execute("INSERT INTO person(id,consent_json,created_at) VALUES('synthetic-human','{\"personal_preference\":true,\"source\":\"human\",\"reviewer\":\"synthetic-human\",\"usage\":\"local-only\"}','fixture')", []).unwrap();
         db
     }

@@ -5,15 +5,26 @@ use ie::studio::StudioConfig;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Screen {
     #[default]
+    Workshop,
+    Treasury,
     Library,
     Brew,
     Pills,
     Preferences,
 }
 impl Screen {
-    pub const ALL: [Self; 4] = [Self::Library, Self::Brew, Self::Pills, Self::Preferences];
+    pub const ALL: [Self; 6] = [
+        Self::Workshop,
+        Self::Treasury,
+        Self::Library,
+        Self::Brew,
+        Self::Pills,
+        Self::Preferences,
+    ];
     pub fn title(self) -> &'static str {
         match self {
+            Self::Workshop => "工坊",
+            Self::Treasury => "藏经阁",
             Self::Library => "素材库",
             Self::Brew => "炼丹台",
             Self::Pills => "丹药",
@@ -22,11 +33,15 @@ impl Screen {
     }
     fn parse(value: &str) -> Result<Self, String> {
         match value {
+            "workshop" => Ok(Self::Workshop),
+            "treasury" => Ok(Self::Treasury),
             "library" => Ok(Self::Library),
             "brew" => Ok(Self::Brew),
             "pills" => Ok(Self::Pills),
             "preferences" => Ok(Self::Preferences),
-            _ => Err("--screen 只接受 library / brew / pills / preferences".into()),
+            _ => Err(
+                "--screen 只接受 workshop / treasury / library / brew / pills / preferences".into(),
+            ),
         }
     }
 }
@@ -55,7 +70,7 @@ impl Options {
             appearance: "system".into(),
             screenshot: None,
             exit_after_capture: false,
-            screen: Screen::Library,
+            screen: Screen::Workshop,
             size: (1280., 860.),
         };
         let mut args = args.into_iter();
@@ -132,7 +147,7 @@ fn absolute(cwd: &Path, path: PathBuf) -> PathBuf {
     }
 }
 
-pub const HELP: &str = "炼丹炉 · 原生本地素材工作台\n\n  --db PATH       只读打开已有数据库（不迁移原库）\n  --root DIR      素材根目录\n  --recipes DIR   本地配方目录\n  --demo          隔离体验数据，不记录真人；必须显式提供 --db\n  --screen library|brew|pills|preferences\n  --theme system|light|dark  默认跟随系统；后两项用于隔离预览\n  --window-size 1280x860  窗口逻辑尺寸，最小1040x720\n  --screenshot PATH.png   原生 compositor 截图；不覆盖已有文件\n  --exit-after-capture    保存截图后退出\n\n不传 --db 时不读取任何数据库。写入前需在窗口中建立工作副本或新库。";
+pub const HELP: &str = "炼丹炉 · 原生本地素材工作台\n\n  --db PATH       只读打开已有数据库（不迁移原库）\n  --root DIR      素材根目录\n  --recipes DIR   本地配方目录\n  --demo          隔离体验数据，不记录真人；必须显式提供 --db\n  --screen workshop|treasury|library|brew|pills|preferences\n  --theme system|light|dark  默认跟随系统；后两项用于隔离预览\n  --window-size 1280x860  窗口逻辑尺寸，最小1040x720\n  --screenshot PATH.png   原生 compositor 截图；不覆盖已有文件\n  --exit-after-capture    保存截图后退出\n\n不传 --db 时不读取任何数据库。写入前需在窗口中建立工作副本或新库。";
 
 #[cfg(test)]
 mod tests {

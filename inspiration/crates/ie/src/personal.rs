@@ -481,8 +481,11 @@ fn connect(db: &str, readonly: bool) -> Result<Connection> {
         [],
         |r| r.get(0),
     )?;
-    if version != "25" {
-        bail!("personal 需要 schema 25；请显式迁移，不会自动修改旧库");
+    if !version
+        .parse::<u32>()
+        .is_ok_and(|v| (25..=crate::db::LATEST_SCHEMA).contains(&v))
+    {
+        bail!("personal 需要 schema 25 或兼容的新版本；请显式迁移，不会自动修改旧库");
     }
     Ok(conn)
 }
@@ -509,11 +512,7 @@ pub(crate) mod tests {
             std::fs::create_dir_all(&root).unwrap();
             let db = root.join("fixture.sqlite").to_str().unwrap().to_owned();
             let mut conn = Connection::open(&db).unwrap();
-            crate::db::migrate_to(&mut conn, 24).unwrap();
-            conn.execute_batch(include_str!(
-                "../../../../docs/design/inspiration/migrations/024-personal-evidence.sql"
-            ))
-            .unwrap();
+            crate::db::migrate(&mut conn).unwrap();
             Self { root, db }
         }
     }
@@ -1091,7 +1090,7 @@ pub(crate) mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(version, "25");
+        assert_eq!(version, crate::db::LATEST_SCHEMA.to_string());
         let immutable: i64 = conn.query_row("SELECT count(*) FROM sqlite_master WHERE type='trigger' AND tbl_name='artifact_work'", [], |r| r.get(0)).unwrap();
         assert_eq!(immutable, 2);
     }

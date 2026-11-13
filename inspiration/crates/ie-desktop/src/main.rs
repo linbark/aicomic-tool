@@ -1,6 +1,13 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod app;
+mod atelier;
+mod atelier_adapter;
+mod atelier_runtime;
+#[cfg(test)]
+mod atelier_tests;
+mod atelier_view;
+mod board;
 mod data;
 mod options;
 mod runtime;

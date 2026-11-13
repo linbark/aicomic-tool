@@ -49,6 +49,9 @@ pub fn snapshot(config: &StudioConfig) -> Result<Value> {
         "counts":{"works":0,"extracts":0,"pills":0,"experiments":0},
         "works":[], "assets":[], "extracts":[], "recipes":[], "pills":[], "experiments":[], "people":[],
         "missing_database": !config.db.try_exists()?, "demo":false, "asset_root_hint":null,
+        "atelier": crate::atelier::snapshot(config).unwrap_or_else(|error| json!({
+            "available":false,"assets":[],"runs":[],"integrity_error":true,"error":error.to_string()
+        })),
     });
     view["recipes"] = json!(recipe_files(&config.recipes)?);
     if view["missing_database"] == true {
@@ -412,6 +415,10 @@ pub fn execute(config: &StudioConfig, action: &StudioAction) -> Result<Value> {
         }
         let backup = crate::db::migrate_path(&target)?;
         store_asset_root_hint(&target, &config.root)?;
+        crate::atelier::seed(&StudioConfig {
+            db: target.clone(),
+            ..config.clone()
+        })?;
         return Ok(
             json!({"message":"已一致复制并迁移新工作副本；源库未迁移", "switch_db":target,"backup":backup}),
         );
@@ -421,6 +428,11 @@ pub fn execute(config: &StudioConfig, action: &StudioAction) -> Result<Value> {
         let backup = crate::db::migrate_path(&target)?;
         let root = target.parent().context("新库缺少父目录")?;
         let root = store_asset_root_hint(&target, root)?;
+        crate::atelier::seed(&StudioConfig {
+            db: target.clone(),
+            root: root.clone(),
+            ..config.clone()
+        })?;
         return Ok(
             json!({"message":"已显式创建空白工作库", "switch_db":target,"switch_root":root,"backup":backup}),
         );
@@ -1058,9 +1070,9 @@ mod tests {
     }
 
     #[test]
-    fn schema21_through25_browse_versions_without_querying_newer_columns_or_writing() -> Result<()>
-    {
-        for version in 21..=25 {
+    fn schema21_through_current_browse_versions_without_querying_newer_columns_or_writing()
+    -> Result<()> {
+        for version in 21..=crate::db::LATEST_SCHEMA {
             let fixture = Fixture::new()?;
             {
                 let conn = database(&fixture, version)?;
@@ -1075,14 +1087,15 @@ mod tests {
             let before = std::fs::read(&fixture.config.db)?;
             let view = snapshot(&fixture.config)?;
             assert_eq!(view["schema_version"], version);
-            assert_eq!(view["needs_migration"], version < 25);
+            assert_eq!(view["needs_migration"], version < crate::db::LATEST_SCHEMA);
+            assert_eq!(view["atelier"]["available"], version >= 26);
             assert_eq!(view["works"][0]["extract_count"], 1);
             assert!(view["works"][0]["image_path"].as_str().is_some());
             assert!(view["extracts"][0]["technique_version"].is_null());
             assert_eq!(view["extracts"][0]["current"], false);
             assert_eq!(view["extracts"][0]["content"], json!({"legacy":true}));
             assert_eq!(view["pills"][0]["snapshot"], false);
-            if version < 25 {
+            if version < crate::db::LATEST_SCHEMA {
                 assert!(execute(&fixture.config, &StudioAction::RefineLocal { work: 1 }).is_err());
             }
             assert_eq!(before, std::fs::read(&fixture.config.db)?);

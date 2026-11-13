@@ -14,11 +14,13 @@ pub struct Snapshot {
     pub experiments: Vec<Value>,
     pub people: Vec<Value>,
     pub warnings: Vec<String>,
+    pub atelier: Value,
 }
 impl Snapshot {
     pub fn from_value(value: Value) -> Self {
         let array = |key: &str| value[key].as_array().cloned().unwrap_or_default();
         Self {
+            atelier: value["atelier"].clone(),
             demo: value["demo"].as_bool().unwrap_or(false),
             asset_root_hint: path(&value, "asset_root_hint").filter(|p| p.is_absolute()),
             schema: value["schema_version"].as_i64(),

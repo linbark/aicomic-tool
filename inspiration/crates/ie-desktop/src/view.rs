@@ -60,6 +60,9 @@ fn detail_row<'a>(name: impl Into<String>, value: impl Into<String>) -> Element<
 
 impl Studio {
     pub fn view(&self) -> Element<'_, Message> {
+        if matches!(self.screen, Screen::Workshop | Screen::Treasury) {
+            return self.atelier_page();
+        }
         let body = column![self.toolbar(), self.feedback(), self.content()]
             .height(Fill)
             .width(Fill)
@@ -84,6 +87,8 @@ impl Studio {
         .spacing(8);
         for screen in Screen::ALL {
             let count = match screen {
+                Screen::Workshop => self.atelier.workshop.nodes.len(),
+                Screen::Treasury => self.atelier.assets.len(),
                 Screen::Library => self.data.works.len(),
                 Screen::Brew => self.data.extracts.len(),
                 Screen::Pills => self.data.pills.len(),
@@ -172,7 +177,7 @@ impl Studio {
                 .width(Fill),
             )
             .push(Space::new().height(Fill))
-            .push(auxiliary("⌘/Ctrl 1–4 切换页面\n⌘/Ctrl F 搜索 · R 刷新"));
+            .push(auxiliary("⌘1 工坊 · ⌘2 藏经阁\n⌘F 搜索 · ⌘S 保存"));
         container(nav)
             .padding([24, 16])
             .width(184)
@@ -182,6 +187,9 @@ impl Studio {
     }
     fn toolbar(&self) -> Element<'_, Message> {
         let primary = match self.screen {
+            Screen::Workshop | Screen::Treasury => {
+                action("返回工坊", Some(Message::Navigate(Screen::Workshop)), false)
+            }
             Screen::Library => action(
                 "本地炼药",
                 (self.can_write()
@@ -231,6 +239,7 @@ impl Studio {
         };
         let search = text_input(
             match self.screen {
+                Screen::Workshop | Screen::Treasury => "搜索资产",
                 Screen::Library => "搜索标题、领域或集合",
                 Screen::Brew => "搜索本地配方",
                 Screen::Pills => "搜索丹药或配方",
@@ -329,6 +338,7 @@ impl Studio {
     }
     fn content(&self) -> Element<'_, Message> {
         let center = match self.screen {
+            Screen::Workshop | Screen::Treasury => self.atelier_page(),
             Screen::Library => self.library(),
             Screen::Brew => self.brew(),
             Screen::Pills => self.pills(),
@@ -1223,6 +1233,7 @@ impl Studio {
         ]
         .spacing(16);
         match self.screen {
+            Screen::Workshop | Screen::Treasury => {}
             Screen::Library | Screen::Brew => {
                 if let Some(work) = self.work() {
                     let extracts = self.data.extracts_for(id(work));

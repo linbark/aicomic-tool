@@ -2,6 +2,7 @@
 //! Opening the studio never implicitly migrates or writes the user's database.
 
 pub mod alchemy;
+pub mod atelier;
 pub mod bundle;
 pub mod capture;
 pub mod db;

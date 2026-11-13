@@ -5,6 +5,7 @@ use std::time::Duration;
 use iced::{Subscription, Task, keyboard, window};
 use ie::studio::{StudioAction, StudioConfig};
 
+use crate::atelier::{self, Atelier};
 use crate::data::{self, Snapshot};
 use crate::options::{Options, Screen};
 use crate::runtime::{self, Asset, Outcome};
@@ -21,6 +22,7 @@ pub enum Dialog {
 }
 #[derive(Clone, Debug)]
 pub enum Message {
+    Atelier(atelier::Message),
     Navigate(Screen),
     Search(String),
     ClearSearch,
@@ -76,6 +78,7 @@ pub struct PendingPreference {
 }
 
 pub struct Studio {
+    pub atelier: Atelier,
     pub options: Options,
     pub config: StudioConfig,
     pub data: Snapshot,
@@ -113,6 +116,7 @@ impl Studio {
     pub fn new(options: Options) -> (Self, Task<Message>) {
         let config = options.config.clone();
         let mut app = Self {
+            atelier: Atelier::default(),
             screen: options.screen,
             inspector: options.size.0 >= 1180.,
             width: options.size.0,
@@ -165,6 +169,8 @@ impl Studio {
             && self.data.schema.is_some()
             && self.busy.is_none()
             && self.confirmation.is_none()
+            && !self.atelier.running()
+            && self.atelier.save.is_none()
     }
     pub fn work(&self) -> Option<&serde_json::Value> {
         self.data.work(self.selection)
@@ -229,7 +235,7 @@ impl Studio {
         )
     }
     fn action(&mut self, action: StudioAction, label: &str, creates: bool) -> Task<Message> {
-        if self.busy.is_some() {
+        if self.busy.is_some() || self.atelier.running() || self.atelier.save.is_some() {
             return Task::none();
         }
         if !creates && !self.can_write() {
@@ -252,6 +258,10 @@ impl Studio {
         )
     }
     fn choose(&mut self, kind: Dialog) -> Task<Message> {
+        if self.atelier.running() || self.atelier.save.is_some() {
+            self.status = "请等待保存 / 运行完成后再切换数据库；可以继续切页浏览。".into();
+            return Task::none();
+        }
         if self.busy.is_some() || self.confirmation.is_some() {
             return Task::none();
         }
@@ -360,6 +370,7 @@ impl Studio {
     }
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::Atelier(message) => return self.atelier_update(message),
             Message::Navigate(screen) => {
                 self.screen = screen;
                 self.query.clear();
@@ -384,7 +395,7 @@ impl Studio {
                 return self.load_visible_images();
             }
             Message::Refresh => {
-                if self.busy.is_some() {
+                if self.busy.is_some() || self.atelier.running() || self.atelier.save.is_some() {
                     return Task::none();
                 }
                 // Explicit refresh also re-probes files repaired or replaced at the same path.
@@ -490,6 +501,7 @@ impl Studio {
                                 .parent()
                                 .unwrap_or(std::path::Path::new("/"))
                                 .to_path_buf();
+                            self.atelier.reset();
                             self.config.db = path;
                             self.options.root_explicit = false;
                             self.writable = false;
@@ -501,6 +513,7 @@ impl Studio {
                             return self.reload();
                         }
                         Dialog::AssetRoot => {
+                            self.atelier.rebase();
                             self.config.root = path;
                             self.options.root_explicit = true;
                             self.assets.clear();
@@ -556,6 +569,7 @@ impl Studio {
                 match result {
                     Ok(outcome) => {
                         if outcome.switched {
+                            self.atelier.reset();
                             self.config = outcome.config;
                             self.writable = true;
                             self.assets.clear();
@@ -565,12 +579,14 @@ impl Studio {
                             && self.config.root != *root
                         {
                             self.config.root = root.clone();
+                            self.atelier.rebase();
                             self.assets.clear();
                             self.pending_assets.clear();
                             // Re-resolve image paths under the hinted root in a new generation.
                             return self.reload();
                         }
                         self.data = outcome.snapshot;
+                        self.atelier.ingest(&self.data.atelier);
                         self.status = outcome.note;
                         self.error = false;
                         if self.data.work(self.selection).is_none() {
@@ -731,7 +747,15 @@ impl Studio {
                         && let Some(id) = self.window
                     {
                         self.capturing = true;
-                        return window::screenshot(id).map(Message::Captured);
+                        // Iced relayout refreshes Editor/Paragraph Arcs after an update.
+                        // Capturing immediately would consume the previous draw's dead
+                        // Weak primitives, producing blank editors. Stop capture/frame
+                        // subscriptions above and let one fresh draw finish; this delay
+                        // yields no application message before the Window screenshot.
+                        return Task::future(async {
+                            tokio::time::sleep(Duration::from_millis(150)).await;
+                        })
+                        .then(move |()| window::screenshot(id).map(Message::Captured));
                     }
                 }
             }
@@ -766,7 +790,16 @@ impl Studio {
                     return iced::exit();
                 }
             }
-            Message::FocusSearch => return iced::widget::operation::focus("studio-search"),
+            Message::FocusSearch => {
+                if self.screen == Screen::Workshop {
+                    self.atelier.workshop.picker = true;
+                }
+                return iced::widget::operation::focus(match self.screen {
+                    Screen::Treasury => "atelier-search",
+                    Screen::Workshop => "atelier-picker-search",
+                    _ => "studio-search",
+                });
+            }
             Message::FocusNext(previous) => {
                 return if previous {
                     iced::widget::operation::focus_previous()
@@ -786,10 +819,17 @@ impl Studio {
                     && let keyboard::Key::Character(value) = key
                 {
                     match value.as_str().to_lowercase().as_str() {
+                        "s" => {
+                            return match self.screen {
+                                Screen::Treasury => self.atelier_update(atelier::Message::Save),
+                                Screen::Workshop => self.atelier_update(atelier::Message::SavePlan),
+                                _ => Task::none(),
+                            };
+                        }
                         "f" => return self.update(Message::FocusSearch),
                         "r" => return self.update(Message::Refresh),
-                        "1" => return self.update(Message::Navigate(Screen::Library)),
-                        "2" => return self.update(Message::Navigate(Screen::Brew)),
+                        "1" => return self.update(Message::Navigate(Screen::Workshop)),
+                        "2" => return self.update(Message::Navigate(Screen::Treasury)),
                         "3" => return self.update(Message::Navigate(Screen::Pills)),
                         "4" => return self.update(Message::Navigate(Screen::Preferences)),
                         "o" => return self.update(Message::Dialog(Dialog::Open)),
@@ -841,6 +881,12 @@ impl Studio {
                 }
             }),
         ];
+        if self.atelier.running() {
+            subscriptions.push(
+                iced::time::every(Duration::from_millis(80))
+                    .map(|_| Message::Atelier(atelier::Message::Tick)),
+            );
+        }
         if self.options.screenshot.is_some() && !self.capturing {
             subscriptions
                 .push(iced::time::every(Duration::from_millis(120)).map(|_| Message::CaptureTick));

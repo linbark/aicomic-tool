@@ -920,8 +920,11 @@ fn connect(path: &str, flags: OpenFlags) -> Result<Connection> {
         [],
         |r| r.get(0),
     )?;
-    if version != "24" && version != "25" {
-        bail!("experiment 需要 schema 24/25；请先显式迁移，不会自动修改旧库");
+    if !version
+        .parse::<u32>()
+        .is_ok_and(|v| (24..=crate::db::LATEST_SCHEMA).contains(&v))
+    {
+        bail!("experiment 需要 schema 24 或兼容的新版本；请先显式迁移，不会自动修改旧库");
     }
     Ok(conn)
 }
